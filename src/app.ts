@@ -278,7 +278,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     reply.header("Access-Control-Allow-Origin", origin ?? "*");
     reply.header("Vary", "Origin");
     reply.header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Requested-With, Cookie");
-    reply.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    reply.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
 
     if (config.proxyAuthToken) {
       if (request.method === "OPTIONS") {
