@@ -51,12 +51,16 @@ Alternative credential sources:
 
 Env-backed providers:
 
-- `OB1_API_KEY` automatically exposes an `ob1` provider route.
 - `OPENROUTER_API_KEY` automatically exposes an `openrouter` provider route.
 - `REQUESTY_API_TOKEN` (or `REQUESTY_API_KEY`) automatically exposes a `requesty` provider route.
 - `GEMINI_API_KEY` automatically exposes a `gemini` provider route (native Gemini REST via `generateContent`).
-- `ob1`, `openrouter`, and `requesty` default to OpenAI-compatible `/v1/chat/completions` routing.
-- You can target them by setting `UPSTREAM_PROVIDER_ID=ob1|openrouter|requesty|gemini`, or by listing them in `UPSTREAM_FALLBACK_PROVIDER_IDS`.
+- `openrouter` and `requesty` default to OpenAI-compatible `/v1/chat/completions` routing.
+- You can target them by setting `UPSTREAM_PROVIDER_ID=openrouter|requesty|gemini`, or by listing them in `UPSTREAM_FALLBACK_PROVIDER_IDS`.
+
+Additional provider ids:
+
+- `ob1` is available as a standard provider id. Configure it in `keys.json` and target it with `UPSTREAM_PROVIDER_ID=ob1`.
+- The default base URL for `ob1` is `https://dashboard.openblocklabs.com/api`.
 
 ## Run
 
