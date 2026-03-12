@@ -378,6 +378,14 @@ function readProvidersFromEnv(): Map<string, ProviderState> {
     );
   }
 
+  const ob1Key = process.env.OB1_API_KEY?.trim();
+  if (ob1Key) {
+    providers.set(
+      normalizeProviderId(process.env.OB1_PROVIDER_ID ?? "ob1"),
+      createEnvProviderState(process.env.OB1_PROVIDER_ID ?? "ob1", ob1Key),
+    );
+  }
+
   const openrouterKey = process.env.OPENROUTER_API_KEY?.trim();
   if (openrouterKey) {
     providers.set(

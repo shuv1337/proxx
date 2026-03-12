@@ -51,11 +51,12 @@ Alternative credential sources:
 
 Env-backed providers:
 
+- `OB1_API_KEY` automatically exposes an `ob1` provider route.
 - `OPENROUTER_API_KEY` automatically exposes an `openrouter` provider route.
 - `REQUESTY_API_TOKEN` (or `REQUESTY_API_KEY`) automatically exposes a `requesty` provider route.
 - `GEMINI_API_KEY` automatically exposes a `gemini` provider route (native Gemini REST via `generateContent`).
-- `openrouter` and `requesty` default to OpenAI-compatible `/v1/chat/completions` routing.
-- You can target them by setting `UPSTREAM_PROVIDER_ID=openrouter|requesty|gemini`, or by listing them in `UPSTREAM_FALLBACK_PROVIDER_IDS`.
+- `ob1`, `openrouter`, and `requesty` default to OpenAI-compatible `/v1/chat/completions` routing.
+- You can target them by setting `UPSTREAM_PROVIDER_ID=ob1|openrouter|requesty|gemini`, or by listing them in `UPSTREAM_FALLBACK_PROVIDER_IDS`.
 
 ## Run
 
@@ -132,8 +133,8 @@ Notes:
 - `STREAM_CHUNK_DELAY_MS_MIN` / `STREAM_CHUNK_DELAY_MS_MAX` (optional; default: unset; random delay range between chunks)
 - `UPSTREAM_PROVIDER_ID` (default: `vivgrid`; provider key in `keys.json`)
 - `UPSTREAM_FALLBACK_PROVIDER_IDS` (default: auto `ollama-cloud` when primary is `vivgrid`, or `vivgrid` when primary is `ollama-cloud`; comma-separated)
-- `UPSTREAM_BASE_URL` (default: `https://api.vivgrid.com`)
-- `UPSTREAM_PROVIDER_BASE_URLS` (optional mapping: `provider=url,provider=url`; defaults include `vivgrid=https://api.vivgrid.com` and `ollama-cloud=https://ollama.com`)
+- `UPSTREAM_BASE_URL` (optional override; when unset or blank, the proxy derives it from `UPSTREAM_PROVIDER_ID` / `UPSTREAM_PROVIDER_BASE_URLS`)
+- `UPSTREAM_PROVIDER_BASE_URLS` (optional mapping: `provider=url,provider=url`; defaults include `vivgrid=https://api.vivgrid.com`, `ollama-cloud=https://ollama.com`, `ob1=https://dashboard.openblocklabs.com/api`, `openrouter=https://openrouter.ai/api/v1`, and `requesty=https://router.requesty.ai/v1`)
 - `OPENAI_PROVIDER_ID` (default: `openai`; provider key in `keys.json`)
 - `OPENAI_BASE_URL` (default: `https://chatgpt.com/backend-api`)
 - `OLLAMA_BASE_URL` (default: `http://127.0.0.1:11434`)
