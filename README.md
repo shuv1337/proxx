@@ -17,9 +17,15 @@ cp models.example.json models.json
 
 Required setup:
 
-- Put real provider credentials in `keys.json`
+- Put real provider credentials in one of: `keys.json`, `PROXY_KEYS_JSON` / `UPSTREAM_KEYS_JSON`, or the configured SQL store via `DATABASE_URL`
 - Set `PROXY_AUTH_TOKEN` in `.env` unless you are only doing local unauthenticated debugging
 - Adjust `UPSTREAM_*`, `OPENAI_*`, `OLLAMA_*`, and optional `CHROMA_*` settings in `.env` for your environment
+
+Alternative credential sources:
+
+- `PROXY_KEYS_JSON` / `UPSTREAM_KEYS_JSON` can carry the same JSON payload inline when you cannot rely on a mounted `keys.json` (for example Render)
+- When `DATABASE_URL` is configured, SQL-backed credentials are also loaded and become the runtime source of truth for the proxy UI and request routing
+- `DISABLED_PROVIDER_IDS` can remove providers such as `vivgrid` from live routing without deleting their stored credentials
 
 Env-backed providers:
 
@@ -81,10 +87,11 @@ docker compose logs -f
 
 Notes:
 
-- `keys.json` is required for startup
+- credentials are required for upstream proxying, but they can come from `keys.json`, inline JSON env, provider-specific env vars, or SQL when `DATABASE_URL` is configured
 - `data/` stores request logs and session history
 - The API defaults to `127.0.0.1:8789`
 - The web companion is exposed on `${PROXY_WEB_PORT:-5174}`
+- The local compose stack now starts Postgres by default and sets `DATABASE_URL` so local runtime behavior matches Render more closely
 
 ## Example Request
 

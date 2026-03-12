@@ -79,6 +79,7 @@ async function withProxyApp(
     port: 0,
     upstreamProviderId: "vivgrid",
     upstreamFallbackProviderIds: [],
+    disabledProviderIds: [],
     upstreamProviderBaseUrls: {
       vivgrid: `http://127.0.0.1:${address.port}`,
       "ollama-cloud": `http://127.0.0.1:${address.port}`,
@@ -114,14 +115,15 @@ async function withProxyApp(
     streamBootstrapTimeoutMs: 2000,
     upstreamTransientRetryCount: 2,
     upstreamTransientRetryBackoffMs: 1,
-    proxyAuthToken: "test-token",
-    allowUnauthenticated: false,
+    proxyAuthToken: options.proxyAuthToken,
+    allowUnauthenticated: options.allowUnauthenticated ?? options.proxyAuthToken === undefined,
     databaseUrl: undefined,
     githubOAuthClientId: undefined,
     githubOAuthClientSecret: undefined,
     githubOAuthCallbackPath: "/auth/github/callback",
     githubAllowedUsers: [],
-    sessionSecret: "test-session-secret",
+    sessionSecret: "test-session-token", // pragma: allowlist secret
+    ...options.configOverrides,
   };
 
   const app = await createApp(config);
@@ -163,6 +165,32 @@ async function withEnv(values: Record<string, string | undefined>, fn: () => Pro
         process.env[key] = value;
       }
     }
+  }
+}
+
+function makeJwt(claims: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
+  return `${header}.${payload}.signature`;
+}
+
+async function withPatchedFetch(
+  handler: (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1], originalFetch: typeof fetch) => Promise<Response | undefined>,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    const response = await handler(input, init, originalFetch);
+    if (response) {
+      return response;
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    await fn();
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 }
 
@@ -230,8 +258,11 @@ test("rotates API key when first key is rate-limited", async () => {
 test("routes claude models through chat completions for the openrouter provider", { concurrency: false }, async () => {
   await withEnv(
     {
-      OPENROUTER_API_KEY: "or-key-1",
+      OPENROUTER_API_KEY: "or-token-1", // pragma: allowlist secret
       REQUESTY_API_TOKEN: undefined,
+      OPENROUTER_PROVIDER_ID: undefined,
+      REQUESTY_PROVIDER_ID: undefined,
+      REQUESTY_API_KEY: undefined,
     },
     async () => {
       await withProxyApp(
@@ -288,7 +319,10 @@ test("routes claude models through chat completions for the requesty provider", 
   await withEnv(
     {
       OPENROUTER_API_KEY: undefined,
-      REQUESTY_API_TOKEN: "req-key-1",
+      REQUESTY_API_TOKEN: "req-token-1",
+      OPENROUTER_PROVIDER_ID: undefined,
+      REQUESTY_PROVIDER_ID: undefined,
+      REQUESTY_API_KEY: undefined,
     },
     async () => {
       await withProxyApp(
@@ -978,7 +1012,7 @@ test("falls back from openai-prefixed codex route to standard fallback providers
   );
 });
 
-test("falls back from vivgrid gpt routing to codex oauth accounts", async () => {
+test("de-prioritizes vivgrid behind codex oauth accounts for gpt routing", async () => {
   const observedPaths: string[] = [];
   const observedAuth: string[] = [];
 
@@ -1013,16 +1047,6 @@ test("falls back from vivgrid gpt routing to codex oauth accounts", async () => 
           observedAuth.push(auth.replace(/^Bearer\s+/i, ""));
         }
         observedPaths.push(request.url ?? "");
-
-        if (auth === "Bearer vivgrid-rate-limited") {
-          return {
-            status: 401,
-            headers: {
-              "content-type": "application/json"
-            },
-            body: JSON.stringify({ error: { message: "invalid key" } })
-          };
-        }
 
         const parsedBody = JSON.parse(body);
         assert.ok(isRecord(parsedBody));
@@ -1083,8 +1107,8 @@ test("falls back from vivgrid gpt routing to codex oauth accounts", async () => 
       assert.equal(response.statusCode, 200);
       assert.equal(response.headers["x-open-hax-upstream-provider"], "openai");
       assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
-      assert.deepEqual(observedPaths, ["/v1/responses", "/v1/responses"]);
-      assert.deepEqual(observedAuth, ["vivgrid-rate-limited", "openai-codex-working"]);
+      assert.deepEqual(observedPaths, ["/v1/responses"]);
+      assert.deepEqual(observedAuth, ["openai-codex-working"]);
 
       const payload: unknown = response.json();
       assert.ok(isRecord(payload));
@@ -1141,14 +1165,6 @@ test("prefers paid codex oauth accounts for gpt-5.4 over free accounts", async (
         const auth = request.headers.authorization;
         if (typeof auth === "string") {
           observedAuth.push(auth.replace(/^Bearer\s+/i, ""));
-        }
-
-        if (auth === "Bearer vivgrid-failing-key") {
-          return {
-            status: 401,
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ error: { message: "invalid key" } })
-          };
         }
 
         if (auth === "Bearer openai-free-unsupported") {
@@ -1214,7 +1230,7 @@ test("prefers paid codex oauth accounts for gpt-5.4 over free accounts", async (
       assert.equal(response.statusCode, 200);
       assert.equal(response.headers["x-open-hax-upstream-provider"], "openai");
       assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
-      assert.deepEqual(observedAuth, ["vivgrid-failing-key", "openai-plus-working"]);
+      assert.deepEqual(observedAuth, ["openai-plus-working"]);
 
       const payload: unknown = response.json();
       assert.ok(isRecord(payload));
@@ -1224,6 +1240,376 @@ test("prefers paid codex oauth accounts for gpt-5.4 over free accounts", async (
       assert.ok(isRecord(payload.choices[0].message));
       assert.equal(payload.choices[0].message.content, "paid-codex-account-ok");
     }
+  );
+});
+
+test("prefers free codex oauth accounts for gpt-5.3-codex before paid accounts", async () => {
+  const observedAuth: string[] = [];
+
+  await withProxyApp(
+    {
+      keys: [],
+      keysPayload: {
+        providers: {
+          openai: {
+            auth: "oauth_bearer",
+            accounts: [
+              {
+                id: "oa-plus",
+                access_token: "openai-plus-second",
+                chatgpt_account_id: "cgpt-plus",
+                plan_type: "plus"
+              },
+              {
+                id: "oa-free",
+                access_token: "openai-free-first",
+                chatgpt_account_id: "cgpt-free",
+                plan_type: "free"
+              }
+            ]
+          }
+        }
+      },
+      configOverrides: {
+        upstreamProviderId: "openai",
+        upstreamFallbackProviderIds: []
+      },
+      upstreamHandler: async (request, body) => {
+        const auth = request.headers.authorization;
+        if (typeof auth === "string") {
+          observedAuth.push(auth.replace(/^Bearer\s+/i, ""));
+        }
+
+        const parsedBody = JSON.parse(body);
+        assert.ok(isRecord(parsedBody));
+        assert.equal(parsedBody.model, "gpt-5.3-codex");
+        assert.equal(request.headers["chatgpt-account-id"], "cgpt-free");
+
+        return {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: "resp-free-openai-priority",
+            object: "response",
+            created_at: 1772916804,
+            model: "gpt-5.3-codex",
+            output: [
+              {
+                id: "msg-free-openai-priority",
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: "free-first-ok"
+                  }
+                ]
+              }
+            ],
+            usage: {
+              input_tokens: 9,
+              output_tokens: 4,
+              total_tokens: 13
+            }
+          })
+        };
+      }
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "gpt-5.3-codex",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.headers["x-open-hax-upstream-provider"], "openai");
+      assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
+      assert.deepEqual(observedAuth, ["openai-free-first"]);
+
+      const payload: unknown = response.json();
+      assert.ok(isRecord(payload));
+      assert.equal(payload.object, "chat.completion");
+      assert.equal(payload.model, "gpt-5.3-codex");
+      assert.ok(Array.isArray(payload.choices));
+      assert.ok(isRecord(payload.choices[0]));
+      assert.ok(isRecord(payload.choices[0].message));
+      assert.equal(payload.choices[0].message.content, "free-first-ok");
+    }
+  );
+});
+
+test("refreshes expired openai fallback accounts before gpt-5.4 fallback", async () => {
+  const observedAuth: string[] = [];
+  const refreshedAccessToken = makeJwt({
+    chatgpt_account_id: "cgpt-refreshed",
+    chatgpt_plan_type: "plus",
+  });
+  let refreshCalls = 0;
+
+  await withPatchedFetch(
+    async (input, init, originalFetch) => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (url === "https://auth.openai.com/oauth/token") {
+        refreshCalls += 1;
+        const body = typeof init?.body === "string" ? init.body : "";
+        assert.match(body, /grant_type=refresh_token/);
+        assert.match(body, /refresh_token=expired-openai-refresh/);
+        return new Response(JSON.stringify({
+          access_token: refreshedAccessToken,
+          refresh_token: "refreshed-openai-refresh",
+          expires_in: 3600,
+          chatgpt_plan_type: "plus",
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return originalFetch(input, init);
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: {
+            providers: {
+              vivgrid: ["vivgrid-failing-key"],
+              openai: {
+                auth: "oauth_bearer",
+                accounts: [
+                  {
+                    id: "oa-expired-plus",
+                    access_token: "expired-openai-access",
+                    refresh_token: "expired-openai-refresh",
+                    expires_at: Date.now() - 1000,
+                    chatgpt_account_id: "cgpt-stale",
+                    plan_type: "plus",
+                  },
+                ],
+              },
+            },
+          },
+          configOverrides: {
+            upstreamProviderId: "vivgrid",
+            upstreamFallbackProviderIds: [],
+          },
+          upstreamHandler: async (request, body) => {
+            if (request.url === "/api/embed" || request.url === "/api/embeddings") {
+              return {
+                status: 200,
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ embeddings: [[0.1, 0.2, 0.3]] }),
+              };
+            }
+
+            const auth = request.headers.authorization;
+            if (typeof auth === "string") {
+              observedAuth.push(auth.replace(/^Bearer\s+/i, ""));
+            }
+
+            assert.equal(auth, `Bearer ${refreshedAccessToken}`);
+            assert.equal(request.headers["chatgpt-account-id"], "cgpt-refreshed");
+
+            const parsedBody = JSON.parse(body);
+            assert.ok(isRecord(parsedBody));
+            assert.equal(parsedBody.model, "gpt-5.4");
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: "resp-refreshed-openai-fallback",
+                object: "response",
+                created_at: 1772916803,
+                model: "gpt-5.4",
+                output: [
+                  {
+                    id: "msg-refreshed-openai-fallback",
+                    type: "message",
+                    role: "assistant",
+                    content: [
+                      {
+                        type: "output_text",
+                        text: "refreshed-openai-account-ok",
+                      },
+                    ],
+                  },
+                ],
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: {
+              "content-type": "application/json",
+            },
+            payload: {
+              model: "gpt-5.4",
+              messages: [{ role: "user", content: "hello" }],
+              stream: false,
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          assert.equal(response.headers["x-open-hax-upstream-provider"], "openai");
+          assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
+          assert.equal(refreshCalls, 1);
+          assert.deepEqual(observedAuth, [refreshedAccessToken]);
+
+          const payload: unknown = response.json();
+          assert.ok(isRecord(payload));
+          assert.equal(payload.object, "chat.completion");
+          assert.ok(Array.isArray(payload.choices));
+          assert.ok(isRecord(payload.choices[0]));
+          assert.ok(isRecord(payload.choices[0].message));
+          assert.equal(payload.choices[0].message.content, "refreshed-openai-account-ok");
+        },
+      );
+    },
+  );
+});
+
+test("refreshes oauth tokens on 401 unauthorized before marking rate-limited", async () => {
+  const observedAuth: string[] = [];
+  const validAccessToken = makeJwt({
+    chatgpt_account_id: "cgpt-refreshed-from-401",
+    chatgpt_plan_type: "team",
+  });
+  let refreshCalls = 0;
+  let firstRequest = true;
+
+  await withPatchedFetch(
+    async (input, init, originalFetch) => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (url === "https://auth.openai.com/oauth/token") {
+        refreshCalls += 1;
+        const body = typeof init?.body === "string" ? init.body : "";
+        assert.match(body, /grant_type=refresh_token/);
+        assert.match(body, /refresh_token=revoked-openai-refresh/);
+        return new Response(JSON.stringify({
+          access_token: validAccessToken,
+          refresh_token: "refreshed-from-401-refresh",
+          expires_in: 3600,
+          chatgpt_plan_type: "team",
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return originalFetch(input, init);
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: {
+            providers: {
+              openai: {
+                auth: "oauth_bearer",
+                accounts: [
+                  {
+                    id: "oa-revoked-team",
+                    access_token: "revoked-openai-access",
+                    refresh_token: "revoked-openai-refresh",
+                    expires_at: Date.now() + 86400000,
+                    chatgpt_account_id: "cgpt-revoked",
+                    plan_type: "team",
+                  },
+                ],
+              },
+            },
+          },
+          configOverrides: {
+            upstreamProviderId: "openai",
+            upstreamFallbackProviderIds: [],
+          },
+          upstreamHandler: async (request, body) => {
+            const auth = request.headers.authorization;
+            if (typeof auth === "string") {
+              observedAuth.push(auth.replace(/^Bearer\s+/i, ""));
+            }
+
+            if (firstRequest && auth === "Bearer revoked-openai-access") {
+              firstRequest = false;
+              return {
+                status: 401,
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ error: { message: "Unauthorized", type: "invalid_request_error" } }),
+              };
+            }
+
+            assert.equal(auth, `Bearer ${validAccessToken}`);
+            assert.equal(request.headers["chatgpt-account-id"], "cgpt-refreshed-from-401");
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: "resp-refreshed-after-401",
+                object: "response",
+                created_at: 1772916803,
+                model: "gpt-5.4",
+                output: [
+                  {
+                    id: "msg-refreshed-after-401",
+                    type: "message",
+                    role: "assistant",
+                    content: [{ type: "output_text", text: "refreshed-after-401-ok" }],
+                  },
+                ],
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model: "gpt-5.4",
+              messages: [{ role: "user", content: "test" }],
+            }),
+          });
+
+          assert.equal(response.statusCode, 200);
+          assert.equal(response.headers["x-open-hax-upstream-provider"], "openai");
+          assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
+          assert.equal(refreshCalls, 1);
+          assert.deepEqual(observedAuth, ["revoked-openai-access", validAccessToken]);
+
+          const payload: unknown = response.json();
+          assert.ok(isRecord(payload));
+          assert.equal(payload.object, "chat.completion");
+          assert.ok(Array.isArray(payload.choices));
+          assert.ok(isRecord(payload.choices[0]));
+          assert.ok(isRecord(payload.choices[0].message));
+          assert.equal(payload.choices[0].message.content, "refreshed-after-401-ok");
+        },
+      );
+    },
   );
 });
 
@@ -2249,8 +2635,8 @@ test("routes glm chat requests to chat-completions upstream", async () => {
       });
 
       assert.equal(response.statusCode, 200);
-      assert.equal(response.headers["x-open-hax-upstream-mode"], "chat_completions");
-      assert.equal(observedPath, "/v1/chat/completions");
+      assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
+      assert.equal(observedPath, "/v1/responses");
       assert.ok(isRecord(observedBody));
       assert.equal(observedBody.model, "glm-5");
       assert.ok(Array.isArray(observedBody.messages));
@@ -2633,8 +3019,8 @@ test("routes openai-prefixed models with oauth account failover", async () => {
       });
 
       assert.equal(response.statusCode, 200);
-      assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
-      assert.equal(observedPath, "/v1/responses");
+      assert.equal(response.headers["x-open-hax-upstream-mode"], "chat_completions");
+      assert.equal(observedPath, "/v1/chat/completions");
       assert.ok(isRecord(observedBody));
       assert.equal(observedBody.model, "gpt-5.3-codex");
       assert.deepEqual(observedAuth, ["Bearer oa-token-a", "Bearer oa-token-b"]);
@@ -2650,6 +3036,106 @@ test("routes openai-prefixed models with oauth account failover", async () => {
       assert.equal(payload.choices[0].message.content, "openai-oauth-ok");
       assert.ok(isRecord(payload.usage));
       assert.equal(payload.usage.total_tokens, 12);
+    }
+  );
+});
+
+test("routes gpt-5.4 through responses for openai oauth accounts", async () => {
+  let observedPath = "";
+  let observedBody: unknown;
+  let observedAuthorization: string | undefined;
+  let observedAccountId: string | undefined;
+
+  await withProxyApp(
+    {
+      keys: [],
+      keysPayload: {
+        providers: {
+          openai: {
+            auth: "oauth_bearer",
+            accounts: [
+              { id: "openai-a", access_token: "oa-token-a", chatgpt_account_id: "chatgpt-a" },
+            ]
+          }
+        }
+      },
+      configOverrides: {
+        upstreamProviderId: "openai",
+        upstreamFallbackProviderIds: [],
+      },
+      upstreamHandler: async (request, body) => {
+        observedPath = request.url ?? "";
+        observedBody = JSON.parse(body);
+        observedAuthorization = typeof request.headers.authorization === "string"
+          ? request.headers.authorization
+          : undefined;
+        observedAccountId = typeof request.headers["chatgpt-account-id"] === "string"
+          ? request.headers["chatgpt-account-id"]
+          : undefined;
+
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            id: "resp_gpt54_openai",
+            object: "response",
+            created_at: 1772516810,
+            model: "gpt-5.4",
+            output: [
+              {
+                id: "msg_gpt54_openai",
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: "OK"
+                  }
+                ]
+              }
+            ],
+            usage: {
+              input_tokens: 11,
+              output_tokens: 5,
+              total_tokens: 16
+            }
+          })
+        };
+      }
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "gpt-5.4",
+          messages: [{ role: "user", content: "Reply with exactly: OK" }],
+          stream: false
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
+      assert.equal(observedPath, "/v1/responses");
+      assert.equal(observedAuthorization, "Bearer oa-token-a");
+      assert.equal(observedAccountId, "chatgpt-a");
+      assert.ok(isRecord(observedBody));
+      assert.equal(observedBody.model, "gpt-5.4");
+      assert.ok(Array.isArray(observedBody.input));
+
+      const payload: unknown = response.json();
+      assert.ok(isRecord(payload));
+      assert.equal(payload.object, "chat.completion");
+      assert.equal(payload.model, "gpt-5.4");
+      assert.ok(Array.isArray(payload.choices));
+      assert.ok(isRecord(payload.choices[0]));
+      assert.ok(isRecord(payload.choices[0].message));
+      assert.equal(payload.choices[0].message.content, "OK");
     }
   );
 });

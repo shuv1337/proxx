@@ -5,6 +5,7 @@ export interface ProxyConfig {
   readonly port: number;
   readonly upstreamProviderId: string;
   readonly upstreamFallbackProviderIds: readonly string[];
+  readonly disabledProviderIds: readonly string[];
   readonly upstreamProviderBaseUrls: Readonly<Record<string, string>>;
   readonly upstreamBaseUrl: string;
   readonly openaiProviderId: string;
@@ -86,6 +87,17 @@ function numberFromEnvAliases(names: readonly string[], fallback: number): numbe
   return fallback;
 }
 
+function optionalFilePathFromEnvAliases(names: readonly string[], cwd: string): string | undefined {
+  for (const name of names) {
+    const raw = process.env[name];
+    if (typeof raw === "string" && raw.length > 0) {
+      return resolve(cwd, raw);
+    }
+  }
+
+  return undefined;
+}
+
 function nonNegativeNumberFromEnvAliases(names: readonly string[], fallback: number): number {
   for (const name of names) {
     const raw = process.env[name];
@@ -155,6 +167,14 @@ function csvFromEnv(name: string, fallback: readonly string[]): string[] {
   return items;
 }
 
+function normalizeProviderList(values: readonly string[]): string[] {
+  return [...new Set(
+    values
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+  )];
+}
+
 function providerBaseUrlsFromEnv(
   name: string,
   fallback: Readonly<Record<string, string>>
@@ -212,9 +232,11 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
       .split(",")
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0);
-  const upstreamFallbackProviderIds = [...new Set(
-    parsedFallbackProviders.filter((entry) => entry !== upstreamProviderId)
-  )];
+  const disabledProviderIds = normalizeProviderList(csvFromEnv("DISABLED_PROVIDER_IDS", []));
+  const disabledProviderSet = new Set(disabledProviderIds);
+  const upstreamFallbackProviderIds = normalizeProviderList(
+    parsedFallbackProviders.filter((entry) => entry !== upstreamProviderId && !disabledProviderSet.has(entry))
+  );
   const upstreamProviderBaseUrls = providerBaseUrlsFromEnv("UPSTREAM_PROVIDER_BASE_URLS", {
     vivgrid: "https://api.vivgrid.com",
     "ollama-cloud": "https://ollama.com",
@@ -280,10 +302,11 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     : proxyAuthToken ?? "default-session-secret-change-in-production";
 
   return {
-    host: process.env.PROXY_HOST ?? "127.0.0.1",
-    port: numberFromEnvAliases(["PROXY_PORT"], 8789),
+    host: process.env.PROXY_HOST ?? process.env.HOST ?? "127.0.0.1",
+    port: numberFromEnvAliases(["PROXY_PORT", "PORT"], 8789),
     upstreamProviderId,
     upstreamFallbackProviderIds,
+    disabledProviderIds,
     upstreamProviderBaseUrls,
     upstreamBaseUrl,
     openaiProviderId,
@@ -305,7 +328,8 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     ollamaV1ChatPath: process.env.OLLAMA_V1_CHAT_PATH ?? "/v1/chat/completions",
     openaiModelPrefixes: csvFromEnv("OPENAI_MODEL_PREFIXES", ["openai/", "openai:"]),
     ollamaModelPrefixes: csvFromEnv("OLLAMA_MODEL_PREFIXES", ["ollama/", "ollama:"]),
-    keysFilePath: filePathFromEnvAliases(["PROXY_KEYS_FILE", "VIVGRID_KEYS_FILE"], "./keys.json", cwd),
+    keysFilePath: optionalFilePathFromEnvAliases(["PROXY_KEYS_FILE", "VIVGRID_KEYS_FILE"], cwd)
+      ?? filePathFromEnvAliases(["PROXY_KEYS_FILE", "VIVGRID_KEYS_FILE"], "./keys.json", cwd),
     modelsFilePath: filePathFromEnvAliases(["PROXY_MODELS_FILE", "VIVGRID_MODELS_FILE"], "./models.json", cwd),
     requestLogsFilePath: filePathFromEnvAliases(["PROXY_REQUEST_LOGS_FILE"], "./data/request-logs.json", cwd),
     promptAffinityFilePath: filePathFromEnvAliases(["PROXY_PROMPT_AFFINITY_FILE"], "./data/prompt-affinity.json", cwd),

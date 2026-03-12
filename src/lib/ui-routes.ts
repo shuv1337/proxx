@@ -4,7 +4,7 @@ import { access, readFile } from "node:fs/promises";
 import type { FastifyInstance } from "fastify";
 
 import type { ProxyConfig } from "./config.js";
-import { CredentialStore } from "./credential-store.js";
+import type { CredentialStoreLike } from "./credential-store.js";
 import type { KeyPool, KeyPoolAccountStatus } from "./key-pool.js";
 import { OpenAiOAuthManager } from "./openai-oauth.js";
 import { RequestLogStore } from "./request-log-store.js";
@@ -16,6 +16,7 @@ interface UiRouteDependencies {
   readonly config: ProxyConfig;
   readonly keyPool: KeyPool;
   readonly requestLogStore: RequestLogStore;
+  readonly credentialStore: CredentialStoreLike;
 }
 
 interface UsageAccountSummary {
@@ -155,7 +156,7 @@ function bucketStart(timestamp: number, bucketMs: number): number {
 async function buildUsageOverview(
   requestLogStore: RequestLogStore,
   keyPool: KeyPool,
-  credentialStore: CredentialStore,
+  credentialStore: CredentialStoreLike,
 ): Promise<UsageOverviewResponse> {
   const allLogs = requestLogStore.snapshot();
   const allStatuses: Record<string, Awaited<ReturnType<KeyPool["getStatus"]>>> = await keyPool.getAllStatuses().catch(() => ({}));
@@ -354,7 +355,7 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
     ollamaBaseUrl: deps.config.ollamaBaseUrl,
     embeddingModel: process.env.CHROMA_EMBED_MODEL ?? "nomic-embed-text:latest",
   });
-  const credentialStore = new CredentialStore(deps.config.keysFilePath, deps.config.upstreamProviderId);
+  const credentialStore = deps.credentialStore;
   const oauthManager = new OpenAiOAuthManager();
   const ecosystemsDir = await firstExistingPath([
     resolve(process.cwd(), "../../ecosystems"),
@@ -537,12 +538,15 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
   });
 
   app.post<{
-    Body: { readonly providerId?: string; readonly accountId?: string; readonly apiKey?: string };
+    Body: { readonly providerId?: string; readonly accountId?: string; readonly credentialValue?: string; readonly apiKey?: string };
   }>("/api/ui/credentials/api-key", async (request, reply) => {
     const providerId = typeof request.body?.providerId === "string"
       ? request.body.providerId
       : deps.config.upstreamProviderId;
-    const apiKey = typeof request.body?.apiKey === "string" ? request.body.apiKey.trim() : "";
+    const credentialValueRaw = typeof request.body?.credentialValue === "string"
+      ? request.body.credentialValue
+      : request.body?.apiKey;
+    const apiKey = typeof credentialValueRaw === "string" ? credentialValueRaw.trim() : "";
     if (apiKey.length === 0) {
       reply.code(400).send({ error: "api_key_required" });
       return;

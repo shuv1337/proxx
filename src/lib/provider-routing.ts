@@ -224,6 +224,10 @@ function routeForProvider(config: ProxyConfig, providerId: string): ProviderRout
     return null;
   }
 
+  if (config.disabledProviderIds.includes(normalizedProviderId)) {
+    return null;
+  }
+
   const baseUrl = (normalizedProviderId === config.openaiProviderId
     ? config.openaiBaseUrl
     : config.upstreamProviderBaseUrls[normalizedProviderId] ?? "")
@@ -328,14 +332,20 @@ export function resolveProviderRoutesForModel(
     return [...routes];
   }
 
+  const normalizedModel = routedModel.trim().toLowerCase();
+  const configuredModels = new Set(
+    catalog.modelIds.map((modelId) => modelId.trim().toLowerCase()).filter((modelId) => modelId.length > 0)
+  );
+  if (configuredModels.has(normalizedModel) && !catalog.dynamicOllamaModelIds.some((modelId) => modelId.trim().toLowerCase() === normalizedModel)) {
+    return [...routes];
+  }
+
   const dynamicOllamaModels = new Set(
     catalog.dynamicOllamaModelIds.map((modelId) => modelId.trim().toLowerCase()).filter((modelId) => modelId.length > 0)
   );
   if (dynamicOllamaModels.size === 0) {
     return [...routes];
   }
-
-  const normalizedModel = routedModel.trim().toLowerCase();
   const modelKnownOnOllama = dynamicOllamaModels.has(normalizedModel);
 
   if (!modelKnownOnOllama) {
