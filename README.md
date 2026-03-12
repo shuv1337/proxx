@@ -41,6 +41,7 @@ Required setup:
 - Put real provider credentials in `keys.json`
 - Set `PROXY_AUTH_TOKEN` in `.env` unless you are only doing local unauthenticated debugging
 - Adjust `UPSTREAM_*`, `OPENAI_*`, `OLLAMA_*`, optional `CHROMA_*`, and optional `OTEL_*` settings in `.env` for your environment
+- If you enable OTEL export, set your own collector endpoint and auth headers through environment variables rather than hardcoding them in tracked files
 
 Env-backed providers:
 
@@ -144,7 +145,7 @@ Notes:
 - `CHROMA_COLLECTION` (optional; default: `open_hax_proxy_sessions`)
 - `CHROMA_EMBED_MODEL` (optional; default: `nomic-embed-text:latest`; served from Ollama)
 - `OTEL_EXPORTER_OTLP_ENDPOINT` (optional; OTLP HTTP base URL for telemetry export)
-- `OTEL_EXPORTER_OTLP_HEADERS` (optional; comma-separated OTLP headers, for example ingest auth)
+- `OTEL_EXPORTER_OTLP_HEADERS` (optional; comma-separated OTLP headers, for example ingest auth; do not commit real secrets)
 - `OTEL_SERVICE_NAME` (optional; default: `proxx`)
 - `OTEL_RESOURCE_ATTRIBUTES` (optional; comma-separated OTEL resource attributes)
 - `OTEL_SDK_DISABLED` (optional; set `true` to disable telemetry even when endpoint and headers are set)
