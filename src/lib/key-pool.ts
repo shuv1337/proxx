@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { getTelemetry } from "./telemetry/otel.js";
 
 import { normalizeEpochMilliseconds } from "./epoch.js";
 
@@ -619,6 +620,10 @@ export class KeyPool {
   public markRateLimited(credential: ProviderCredential, retryAfterMs?: number): void {
     const cooldown = Math.max(retryAfterMs ?? this.config.defaultCooldownMs, 1000);
     this.cooldownByAccountKey.set(accountCooldownKey(credential), Date.now() + cooldown);
+    getTelemetry().recordMetric("proxy.key_pool.rate_limited", 1, {
+      "proxy.provider_id": credential.providerId ?? this.config.defaultProviderId,
+      "proxy.account_id": credential.accountId,
+    });
   }
 
   public async msUntilAnyKeyReady(providerId: string = this.config.defaultProviderId): Promise<number> {
