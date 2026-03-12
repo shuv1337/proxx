@@ -25,6 +25,7 @@ import {
   inspectProviderAvailability,
   selectProviderStrategy,
 } from "./lib/provider-strategy.js";
+import { orderProviderRoutesByPolicy } from "./lib/provider-policy.js";
 import {
   fetchWithResponseTimeout,
   hasBearerToken,
@@ -57,8 +58,9 @@ import { createSqlConnection, closeConnection, type Sql } from "./lib/db/index.j
 import { SqlCredentialStore } from "./lib/db/sql-credential-store.js";
 import { SqlAuthPersistence } from "./lib/auth/sql-persistence.js";
 import { SqlGitHubAllowlist } from "./lib/auth/github-allowlist.js";
-import { seedFromJsonFile } from "./lib/db/json-seeder.js";
-import { registerOAuthRoutes, createVerifyBearerToken } from "./lib/oauth-routes.js";
+import { seedFromJsonFile, seedFromJsonValue } from "./lib/db/json-seeder.js";
+import { registerOAuthRoutes } from "./lib/oauth-routes.js";
+import { RuntimeCredentialStore } from "./lib/runtime-credential-store.js";
 
 interface ChatCompletionRequest {
   readonly model?: string;
@@ -173,10 +175,25 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
 
       if (config.keysFilePath) {
         try {
-          const seedResult = await seedFromJsonFile(sql, config.keysFilePath, config.upstreamProviderId);
+          const seedResult = await seedFromJsonFile(sql, config.keysFilePath, config.upstreamProviderId, {
+            skipExistingProviders: true,
+          });
           app.log.info({ providers: seedResult.providers, accounts: seedResult.accounts }, "seeded credentials from json file");
         } catch (error) {
           app.log.warn({ error: toErrorMessage(error) }, "failed to seed credentials from json file; continuing with existing data");
+        }
+      }
+
+      const inlineKeysJson = process.env.PROXY_KEYS_JSON ?? process.env.UPSTREAM_KEYS_JSON ?? process.env.VIVGRID_KEYS_JSON;
+      if (typeof inlineKeysJson === "string" && inlineKeysJson.trim().length > 0) {
+        try {
+          const parsedInlineKeys: unknown = JSON.parse(inlineKeysJson);
+          const seedResult = await seedFromJsonValue(sql, parsedInlineKeys, config.upstreamProviderId, {
+            skipExistingProviders: true,
+          });
+          app.log.info({ providers: seedResult.providers, accounts: seedResult.accounts }, "seeded credentials from inline json env");
+        } catch (error) {
+          app.log.warn({ error: toErrorMessage(error) }, "failed to seed credentials from inline json env; continuing with existing data");
         }
       }
 
@@ -191,7 +208,9 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     keysFilePath: config.keysFilePath,
     reloadIntervalMs: config.keyReloadMs,
     defaultCooldownMs: config.keyCooldownMs,
-    defaultProviderId: config.upstreamProviderId
+    defaultProviderId: config.upstreamProviderId,
+    accountStore: sqlCredentialStore,
+    preferAccountStoreProviders: sqlCredentialStore !== undefined,
   });
   try {
     await keyPool.warmup();
@@ -215,6 +234,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   }
 
   const credentialStore = new CredentialStore(config.keysFilePath, config.upstreamProviderId);
+  const runtimeCredentialStore = new RuntimeCredentialStore(credentialStore, sqlCredentialStore);
   const oauthManager = new OpenAiOAuthManager();
 
   async function refreshExpiredOAuthAccount(credential: ProviderCredential): Promise<ProviderCredential | null> {
@@ -238,7 +258,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         expiresAt: newTokens.expiresAt,
       };
 
-      await credentialStore.upsertOAuthAccount(
+      await runtimeCredentialStore.upsertOAuthAccount(
         credential.providerId,
         newCredential.accountId,
         newCredential.token,
@@ -406,7 +426,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       }
 
       const rawPath = (request.raw.url ?? request.url).split("?", 1)[0] ?? request.url;
-      const allowUnauthenticatedRoute = rawPath === "/api/ui/credentials/openai/oauth/browser/callback"
+      const allowUnauthenticatedRoute = rawPath === "/health" || rawPath === "/api/ui/credentials/openai/oauth/browser/callback"
         || rawPath === "/auth/callback";
 
       if (allowUnauthenticatedRoute) {
@@ -630,8 +650,6 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
-    await ensureFreshAccounts(config.upstreamProviderId);
-
     let providerRoutes = buildProviderRoutes(
       config,
       context.openAiPrefixed,
@@ -639,6 +657,15 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     );
     if (!context.openAiPrefixed && resolvedModelCatalog) {
       providerRoutes = resolveProviderRoutesForModel(providerRoutes, context.routedModel, resolvedModelCatalog);
+    }
+    providerRoutes = orderProviderRoutesByPolicy(policyEngine, providerRoutes, context.requestedModelInput, context.routedModel, {
+      openAiPrefixed: context.openAiPrefixed,
+      localOllama: context.localOllama,
+      explicitOllama: context.explicitOllama,
+    });
+
+    for (const providerId of new Set(providerRoutes.map((route) => route.providerId))) {
+      await ensureFreshAccounts(providerId);
     }
 
     const availability = await inspectProviderAvailability(keyPool, providerRoutes);
@@ -885,6 +912,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     config,
     keyPool,
     requestLogStore,
+    credentialStore: runtimeCredentialStore,
     proxySettingsStore
   });
 

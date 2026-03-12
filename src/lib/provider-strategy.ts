@@ -1027,7 +1027,8 @@ class OpenAiResponsesProviderStrategy extends TransformedJsonProviderStrategy {
 
   public matches(context: StrategyRequestContext): boolean {
     return context.openAiPrefixed
-      && shouldUseResponsesUpstream(context.routedModel, context.config.responsesModelPrefixes);
+      && (context.routedModel === "gpt-5.4"
+        || shouldUseResponsesUpstream(context.routedModel, context.config.responsesModelPrefixes));
   }
 
   public getUpstreamPath(context: StrategyRequestContext): string {
@@ -1546,13 +1547,68 @@ export async function executeProviderFallback(
       accumulator.sawModelNotFound ||= outcome.modelNotFound === true;
       accumulator.sawModelNotSupportedForAccount ||= outcome.modelNotSupportedForAccount === true;
 
-      if (!upstreamResponse.ok && outcome.requestError === true && (upstreamResponse.status === 401 || upstreamResponse.status === 403)) {
+      if (!upstreamResponse.ok && outcome.requestError === true && upstreamResponse.status === 401 && candidate.account.authType === "oauth_bearer" && candidate.account.refreshToken && refreshExpiredToken) {
+        const refreshedCredential = await refreshExpiredToken(candidate.account);
+        if (refreshedCredential) {
+          const refreshedHeaders = buildUpstreamHeadersForCredential(context.clientHeaders, refreshedCredential);
+          const refreshedRelease = keyPool.markInFlight(refreshedCredential);
+          let refreshedResponse: Response;
+          try {
+            refreshedResponse = await fetchWithResponseTimeout(upstreamUrl, {
+              method: "POST",
+              headers: refreshedHeaders,
+              body: candidatePayload.bodyText
+            }, context.upstreamAttemptTimeoutMs);
+          } catch (error) {
+            refreshedRelease();
+            releaseInFlight();
+            throw error;
+          }
+          const refreshedAttemptStartedAt = Date.now();
+          const refreshedLogId = recordAttempt(requestLogStore, providerContext, {
+            providerId: candidate.providerId,
+            accountId: refreshedCredential.accountId,
+            authType: refreshedCredential.authType,
+            upstreamPath,
+            status: refreshedResponse.status,
+            latencyMs: Date.now() - refreshedAttemptStartedAt
+          }, candidateStrategy.mode);
+          await updateUsageCountsFromResponse(requestLogStore, refreshedLogId, refreshedResponse, candidateStrategy.mode, context.routedModel);
+          if (isRateLimitResponse(refreshedResponse)) {
+            accumulator.sawRateLimit = true;
+            keyPool.markRateLimited(refreshedCredential, parseRetryAfterMs(refreshedResponse.headers.get("retry-after")));
+            try {
+              await refreshedResponse.arrayBuffer();
+            } catch {}
+            break;
+          }
+          reply.header("x-open-hax-upstream-mode", candidateStrategy.mode);
+          const refreshedOutcome = await candidateStrategy.handleProviderAttempt(reply, refreshedResponse, providerContext);
+          if (refreshedOutcome.kind === "handled") {
+            releaseInFlight();
+            return { handled: true, candidateCount: candidates.length, summary: accumulator };
+          }
+          accumulator.sawRateLimit ||= refreshedOutcome.rateLimit === true;
+          accumulator.sawRequestError ||= refreshedOutcome.requestError === true;
+          accumulator.sawUpstreamServerError ||= refreshedOutcome.upstreamServerError === true;
+          accumulator.sawUpstreamInvalidRequest ||= refreshedOutcome.upstreamInvalidRequest === true;
+          accumulator.sawModelNotFound ||= refreshedOutcome.modelNotFound === true;
+          accumulator.sawModelNotSupportedForAccount ||= refreshedOutcome.modelNotSupportedForAccount === true;
+          if (!refreshedResponse.ok && refreshedOutcome.requestError === true && (refreshedResponse.status === 401 || refreshedResponse.status === 403)) {
+            keyPool.markRateLimited(refreshedCredential, Math.min(context.config.keyCooldownMs, 10_000));
+            if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && refreshedCredential.accountId === preferredAffinity.accountId) {
+              preferredReassignmentAllowed = true;
+            }
+          }
+          break;
+        }
         keyPool.markRateLimited(candidate.account, Math.min(context.config.keyCooldownMs, 10_000));
-        if (
-          preferredAffinity
-          && candidate.providerId === preferredAffinity.providerId
-          && candidate.account.accountId === preferredAffinity.accountId
-        ) {
+        if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && candidate.account.accountId === preferredAffinity.accountId) {
+          preferredReassignmentAllowed = true;
+        }
+      } else if (!upstreamResponse.ok && outcome.requestError === true && (upstreamResponse.status === 401 || upstreamResponse.status === 403)) {
+        keyPool.markRateLimited(candidate.account, Math.min(context.config.keyCooldownMs, 10_000));
+        if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && candidate.account.accountId === preferredAffinity.accountId) {
           preferredReassignmentAllowed = true;
         }
       }
