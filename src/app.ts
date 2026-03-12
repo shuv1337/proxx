@@ -28,6 +28,7 @@ import {
   sendOpenAiError,
   toErrorMessage,
 } from "./lib/provider-utils.js";
+import { getTelemetry, type TelemetrySpan } from "./lib/telemetry/otel.js";
 import { RequestLogStore } from "./lib/request-log-store.js";
 import { PromptAffinityStore } from "./lib/prompt-affinity-store.js";
 import { ProxySettingsStore } from "./lib/proxy-settings-store.js";
@@ -300,6 +301,27 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         sendOpenAiError(reply, 401, "Unauthorized", "invalid_request_error", "unauthorized");
       }
     }
+  });
+
+  // Attach a telemetry span to each request
+  app.decorateRequest("_otelSpan", null);
+
+  app.addHook("onRequest", async (request) => {
+    if (request.method === "OPTIONS") return;
+    const span = getTelemetry().startSpan("http.request", {
+      "http.method": request.method,
+      "http.path": (request.raw.url ?? request.url).split("?")[0],
+    });
+    (request as any)._otelSpan = span;
+  });
+
+  app.addHook("onResponse", async (request, reply) => {
+    const span = (request as any)._otelSpan as TelemetrySpan | null;
+    if (!span) return;
+    span.setAttribute("http.status_code", reply.statusCode);
+    if (reply.statusCode >= 400) span.setStatus("error", `HTTP ${reply.statusCode}`);
+    else span.setStatus("ok");
+    span.end();
   });
 
   app.options("/", async (_request, reply) => {

@@ -40,6 +40,10 @@ services:
       CHROMA_URL: "${CHROMA_URL:-http://host.docker.internal:8000}"
       CHROMA_COLLECTION: "${CHROMA_COLLECTION:-open_hax_proxy_sessions}"
       CHROMA_EMBED_MODEL: "${CHROMA_EMBED_MODEL:-nomic-embed-text:latest}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://host.docker.internal:3474"
+      OTEL_EXPORTER_OTLP_HEADERS: "x-maple-ingest-key=maple_pk_u0Z7qYQTZSKBU7xtM8FJwt9GVk-gq2CZ"
+      OTEL_SERVICE_NAME: "proxx"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=proxx,deployment.environment=local,host.name=shuvdev"
     volumes:
       - ./keys.json:/workspace/service-config/keys.json
       - ./models.json:/workspace/service-config/models.json:ro
