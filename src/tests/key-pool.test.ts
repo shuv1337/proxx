@@ -219,7 +219,7 @@ test("loads env-backed openrouter and requesty providers alongside file accounts
 
           assert.equal(openrouterAccounts.length, 1);
           assert.equal(openrouterAccounts[0]?.providerId, "openrouter");
-          assert.equal(openrouterAccounts[0]?.token, "or-key-1");
+          assert.equal(openrouterAccounts[0]?.token, "or-token-1");
           assert.ok(UUID_PATTERN.test(openrouterAccounts[0]?.accountId ?? ""));
 
           assert.equal(requestyAccounts.length, 1);

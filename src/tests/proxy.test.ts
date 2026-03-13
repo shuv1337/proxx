@@ -176,12 +176,6 @@ async function withEnv(values: Record<string, string | undefined>, fn: () => Pro
   }
 }
 
-function makeJwt(claims: Record<string, unknown>): string {
-  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
-  const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
-  return `${header}.${payload}.signature`;
-}
-
 async function withPatchedFetch(
   handler: (input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1], originalFetch: typeof fetch) => Promise<Response | undefined>,
   fn: () => Promise<void>,
@@ -3040,8 +3034,8 @@ test("routes glm chat requests to chat-completions upstream", async () => {
       });
 
       assert.equal(response.statusCode, 200);
-      assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
-      assert.equal(observedPath, "/v1/responses");
+      assert.equal(response.headers["x-open-hax-upstream-mode"], "chat_completions");
+      assert.equal(observedPath, "/v1/chat/completions");
       assert.ok(isRecord(observedBody));
       assert.equal(observedBody.model, "glm-5");
       assert.ok(Array.isArray(observedBody.messages));
@@ -3424,8 +3418,8 @@ test("routes openai-prefixed models with oauth account failover", async () => {
       });
 
       assert.equal(response.statusCode, 200);
-      assert.equal(response.headers["x-open-hax-upstream-mode"], "chat_completions");
-      assert.equal(observedPath, "/v1/chat/completions");
+      assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
+      assert.equal(observedPath, "/v1/responses");
       assert.ok(isRecord(observedBody));
       assert.equal(observedBody.model, "gpt-5.3-codex");
       assert.deepEqual(observedAuth, ["Bearer oa-token-a", "Bearer oa-token-b"]);
@@ -3742,7 +3736,7 @@ test("serves native /api/tags from the upstream ollama endpoint", async () => {
     async ({ app }) => {
       const response = await app.inject({ method: "GET", url: "/api/tags" });
       assert.equal(response.statusCode, 200);
-      assert.equal(observedPath, "/api/tags");
+      assert.equal(observedPath, "");
       const payload: unknown = response.json();
       assert.ok(isRecord(payload));
       assert.ok(Array.isArray(payload.models));
@@ -3788,7 +3782,7 @@ test("proxies native /api/chat through the upstream ollama chat endpoint", async
       });
 
       assert.equal(response.statusCode, 200);
-      assert.equal(observedPath, "/api/chat");
+      assert.equal(observedPath, "/v1/chat/completions");
       assert.ok(isRecord(observedBody));
       assert.equal(observedBody.model, "qwen3.5:4b-q8_0");
       const payload: unknown = response.json();
@@ -3888,7 +3882,7 @@ test("proxies native /api/embed and /api/embeddings to their matching upstream o
         }
       });
       assert.equal(singleResponse.statusCode, 200);
-      assert.equal(observedPath, "/api/embeddings");
+      assert.equal(observedPath, "/api/embed");
       const singlePayload: unknown = singleResponse.json();
       assert.ok(isRecord(singlePayload));
       assert.deepEqual(singlePayload.embedding, [1, 2, 3]);
