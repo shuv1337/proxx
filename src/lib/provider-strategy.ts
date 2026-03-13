@@ -35,6 +35,14 @@ import {
 } from "./ollama-compat.js";
 import type { ProviderRoute } from "./provider-routing.js";
 import {
+  buildFactoryAnthropicHeaders,
+  buildFactoryCommonHeaders,
+  getFactoryEndpointPath,
+  getFactoryModelType,
+  isFkKey,
+  inlineSystemPrompt,
+} from "./factory-compat.js";
+import {
   appendCsvHeaderValue,
   chatCompletionHasReasoningContent,
   fetchWithResponseTimeout,
@@ -1312,9 +1320,187 @@ class ChatCompletionsProviderStrategy extends BaseProviderStrategy {
   }
 }
 
+/**
+ * Factory.ai Anthropic Messages strategy.
+ *
+ * Routes claude-* models to Factory's `/api/llm/a/v1/messages` endpoint,
+ * translating OpenAI chat format to Anthropic Messages format and back.
+ * Adds all Factory-specific headers and handles system prompt inlining for fk- keys.
+ */
+class FactoryMessagesProviderStrategy extends TransformedJsonProviderStrategy {
+  public readonly mode = "messages" as const;
+
+  public readonly isLocal = false;
+
+  public matches(context: StrategyRequestContext): boolean {
+    return context.factoryPrefixed
+      && getFactoryModelType(context.routedModel) === "anthropic";
+  }
+
+  public getUpstreamPath(_context: StrategyRequestContext): string {
+    return getFactoryEndpointPath("anthropic");
+  }
+
+  public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
+    const messagesPayload = chatRequestToMessagesRequest(buildRequestBodyForUpstream(context));
+    // Inline system content into first user message to avoid Factory 403 with fk- keys.
+    // We always inline for Factory to keep behavior consistent across credential types.
+    const inlinedPayload = inlineSystemPrompt(messagesPayload);
+    return buildPayloadResult(inlinedPayload, context);
+  }
+
+  public override applyRequestHeaders(headers: Headers, context: ProviderAttemptContext, payload: Record<string, unknown>): void {
+    const anthropicHeaders = buildFactoryAnthropicHeaders(
+      context.routedModel,
+      payload,
+      context.config.messagesInterleavedThinkingBeta,
+    );
+    for (const [name, value] of Object.entries(anthropicHeaders)) {
+      headers.set(name, value);
+    }
+  }
+
+  protected convertResponseToChatCompletion(upstreamJson: unknown, routedModel: string): Record<string, unknown> {
+    return messagesToChatCompletion(upstreamJson, routedModel);
+  }
+}
+
+/**
+ * Factory.ai OpenAI Responses strategy.
+ *
+ * Routes gpt-* models to Factory's `/api/llm/o/v1/responses` endpoint,
+ * translating OpenAI chat format to Responses format and back.
+ * Adds Factory-specific headers. Streaming handled via Responses event stream translation.
+ */
+class FactoryResponsesProviderStrategy extends TransformedJsonProviderStrategy {
+  public readonly mode = "responses" as const;
+
+  public readonly isLocal = false;
+
+  public matches(context: StrategyRequestContext): boolean {
+    return context.factoryPrefixed
+      && getFactoryModelType(context.routedModel) === "openai";
+  }
+
+  public getUpstreamPath(_context: StrategyRequestContext): string {
+    return getFactoryEndpointPath("openai");
+  }
+
+  public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
+    const upstreamPayload = chatRequestToResponsesRequest(buildRequestBodyForUpstream(context));
+    applyRequestedServiceTier(upstreamPayload, context);
+    upstreamPayload["store"] = false;
+    upstreamPayload["stream"] = true;
+    return buildPayloadResult(upstreamPayload, context);
+  }
+
+  public override applyRequestHeaders(headers: Headers, context: ProviderAttemptContext, _payload: Record<string, unknown>): void {
+    const factoryHeaders = buildFactoryCommonHeaders(context.routedModel);
+    for (const [name, value] of Object.entries(factoryHeaders)) {
+      headers.set(name, value);
+    }
+  }
+
+  public override async handleProviderAttempt(
+    reply: FastifyReply,
+    upstreamResponse: Response,
+    context: ProviderAttemptContext
+  ): Promise<ProviderAttemptOutcome> {
+    const contentType = upstreamResponse.headers.get("content-type") ?? "";
+    const looksLikeEventStream = contentType.toLowerCase().includes("text/event-stream")
+      || contentType.length === 0;
+
+    if (!upstreamResponse.ok || !looksLikeEventStream) {
+      return super.handleProviderAttempt(reply, upstreamResponse, context);
+    }
+
+    const streamText = await upstreamResponse.text();
+    const upstreamError = responsesEventStreamToErrorPayload(streamText);
+    if (upstreamError) {
+      reply.header("x-open-hax-upstream-provider", context.providerId);
+      reply.code(400);
+      reply.header("content-type", "application/json");
+      reply.send({ error: upstreamError });
+      return { kind: "handled" };
+    }
+
+    let chatCompletion: Record<string, unknown>;
+    try {
+      chatCompletion = responsesEventStreamToChatCompletion(streamText, context.routedModel);
+    } catch {
+      return {
+        kind: "continue",
+        requestError: true
+      };
+    }
+
+    if (context.needsReasoningTrace && !chatCompletionHasReasoningContent(chatCompletion) && context.hasMoreCandidates) {
+      return {
+        kind: "continue",
+        requestError: true
+      };
+    }
+
+    reply.header("x-open-hax-upstream-provider", context.providerId);
+    if (context.clientWantsStream) {
+      reply.code(200);
+      reply.header("content-type", "text/event-stream; charset=utf-8");
+      reply.header("cache-control", "no-cache");
+      reply.header("x-accel-buffering", "no");
+      reply.send(chatCompletionToSse(chatCompletion));
+      return { kind: "handled" };
+    }
+
+    reply.code(200);
+    reply.header("content-type", "application/json");
+    reply.send(chatCompletion);
+    return { kind: "handled" };
+  }
+
+  protected convertResponseToChatCompletion(upstreamJson: unknown, routedModel: string): Record<string, unknown> {
+    return responsesToChatCompletion(upstreamJson, routedModel);
+  }
+}
+
+/**
+ * Factory.ai Common Chat Completions strategy.
+ *
+ * Routes non-Claude, non-GPT models (gemini, glm, kimi, DeepSeek, etc.)
+ * to Factory's `/api/llm/o/v1/chat/completions` endpoint.
+ * Passes through standard chat completions format with Factory-specific headers.
+ */
+class FactoryChatCompletionsProviderStrategy extends BaseProviderStrategy {
+  public readonly mode = "chat_completions" as const;
+
+  public readonly isLocal = false;
+
+  public matches(context: StrategyRequestContext): boolean {
+    return context.factoryPrefixed
+      && getFactoryModelType(context.routedModel) === "common";
+  }
+
+  public getUpstreamPath(_context: StrategyRequestContext): string {
+    return getFactoryEndpointPath("common");
+  }
+
+  public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
+    return buildPayloadResult(buildRequestBodyForUpstream(context), context);
+  }
+
+  public override applyRequestHeaders(headers: Headers, context: ProviderAttemptContext, _payload: Record<string, unknown>): void {
+    const factoryHeaders = buildFactoryCommonHeaders(context.routedModel);
+    for (const [name, value] of Object.entries(factoryHeaders)) {
+      headers.set(name, value);
+    }
+  }
+}
+
 const PROVIDER_STRATEGIES: readonly ProviderStrategy[] = [
   new OllamaProviderStrategy(),
   new LocalOllamaProviderStrategy(),
+  new FactoryMessagesProviderStrategy(),
+  new FactoryResponsesProviderStrategy(),
+  new FactoryChatCompletionsProviderStrategy(),
   new OpenAiResponsesProviderStrategy(),
   new OpenAiChatCompletionsProviderStrategy(),
   new MessagesProviderStrategy(),
@@ -1364,7 +1550,9 @@ function selectRemoteProviderStrategyForRoute(
   providerId: string,
 ): ProviderStrategy {
   if (providerUsesOpenAiChatCompletions(providerId)) {
-    return PROVIDER_STRATEGIES.find((entry) => entry.mode === "chat_completions")
+    // Use the generic ChatCompletionsProviderStrategy (the one that always matches),
+    // not a Factory-specific strategy which would produce Factory endpoint paths.
+    return PROVIDER_STRATEGIES.find((entry) => entry.mode === "chat_completions" && entry.matches({ ...context, factoryPrefixed: false, openAiPrefixed: false, explicitOllama: false, localOllama: false }))
       ?? PROVIDER_STRATEGIES[PROVIDER_STRATEGIES.length - 1]!;
   }
 
