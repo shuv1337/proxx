@@ -309,7 +309,17 @@ async function buildUsageOverview(
   };
 }
 
+export function escapeHtml(str: string): string {
+  return str
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function htmlSuccess(message: string): string {
+  const safe = escapeHtml(message);
   return `<!doctype html>
 <html>
   <head>
@@ -324,7 +334,7 @@ function htmlSuccess(message: string): string {
   <body>
     <section class="card">
       <h1>Authorization Successful</h1>
-      <p>${message}</p>
+      <p>${safe}</p>
     </section>
     <script>setTimeout(() => window.close(), 1500)</script>
   </body>
@@ -332,6 +342,7 @@ function htmlSuccess(message: string): string {
 }
 
 function htmlError(message: string): string {
+  const safe = escapeHtml(message);
   return `<!doctype html>
 <html>
   <head>
@@ -346,7 +357,7 @@ function htmlError(message: string): string {
   <body>
     <section class="card">
       <h1>Authorization Failed</h1>
-      <p>${message}</p>
+      <p>${safe}</p>
     </section>
   </body>
 </html>`;
