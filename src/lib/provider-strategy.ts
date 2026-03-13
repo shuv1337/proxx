@@ -1389,6 +1389,7 @@ class FactoryResponsesProviderStrategy extends TransformedJsonProviderStrategy {
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload = chatRequestToResponsesRequest(buildRequestBodyForUpstream(context));
     applyRequestedServiceTier(upstreamPayload, context);
+    delete upstreamPayload["max_output_tokens"];
     upstreamPayload["store"] = false;
     upstreamPayload["stream"] = true;
     return buildPayloadResult(upstreamPayload, context);
