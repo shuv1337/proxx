@@ -1,7 +1,9 @@
-import { readFile } from "node:fs/promises";
-import { createDecipheriv } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
+import { createDecipheriv, createCipheriv, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
+
+import type { ProviderCredential } from "./key-pool.js";
 
 function defaultAuthV2FilePath(): string {
   return process.env.FACTORY_AUTH_V2_FILE ?? join(homedir(), ".factory", "auth.v2.file");
@@ -109,4 +111,140 @@ export function parseJwtExpiry(token: string): number | null {
   }
 
   return null;
+}
+
+// ─── WorkOS OAuth Token Refresh ─────────────────────────────────────────────
+
+const WORKOS_CLIENT_ID = "client_01HNM792M5G5G1A2THWPXKFMXB";
+const WORKOS_REFRESH_URL = "https://api.workos.com/user_management/authenticate";
+
+/** Buffer before JWT expiry to trigger proactive refresh (30 minutes). */
+export const FACTORY_REFRESH_BUFFER_MS = 30 * 60 * 1000;
+
+export interface FactoryRefreshedTokens {
+  readonly accessToken: string;
+  readonly refreshToken: string;
+  readonly expiresAt: number | undefined;
+}
+
+/**
+ * Check whether a Factory OAuth credential needs a proactive token refresh.
+ * Returns true when the JWT exp claim is within 30 minutes of current time,
+ * or when expiresAt is missing but the credential has a refresh token.
+ */
+export function factoryCredentialNeedsRefresh(credential: ProviderCredential): boolean {
+  if (credential.providerId !== "factory") {
+    return false;
+  }
+  if (credential.authType !== "oauth_bearer") {
+    return false;
+  }
+  if (!credential.refreshToken) {
+    return false;
+  }
+
+  // Check JWT exp claim directly from the token for accuracy
+  const jwtExpiry = parseJwtExpiry(credential.token);
+  if (jwtExpiry !== null) {
+    return jwtExpiry - Date.now() < FACTORY_REFRESH_BUFFER_MS;
+  }
+
+  // If we have an expiresAt from the credential store, use that
+  if (typeof credential.expiresAt === "number") {
+    return credential.expiresAt - Date.now() < FACTORY_REFRESH_BUFFER_MS;
+  }
+
+  // No expiry information available but we have a refresh token — don't force refresh
+  return false;
+}
+
+/**
+ * Refresh a Factory OAuth token via the WorkOS API.
+ *
+ * POST https://api.workos.com/user_management/authenticate
+ * Body (URL-encoded form): grant_type=refresh_token&refresh_token={token}&client_id={clientId}
+ *
+ * Returns the new access token, refresh token, and parsed JWT expiry.
+ */
+export async function refreshFactoryOAuthToken(
+  refreshToken: string,
+  fetchFn: typeof fetch = globalThis.fetch,
+): Promise<FactoryRefreshedTokens> {
+  const formBody = new URLSearchParams();
+  formBody.append("grant_type", "refresh_token");
+  formBody.append("refresh_token", refreshToken);
+  formBody.append("client_id", WORKOS_CLIENT_ID);
+
+  const response = await fetchFn(WORKOS_REFRESH_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: formBody.toString(),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`WorkOS token refresh failed: ${response.status} ${errorText}`);
+  }
+
+  const data: unknown = await response.json();
+  if (typeof data !== "object" || data === null) {
+    throw new Error("WorkOS token refresh returned invalid JSON");
+  }
+
+  const record = data as Record<string, unknown>;
+  const newAccessToken = typeof record["access_token"] === "string" ? record["access_token"].trim() : "";
+  const newRefreshToken = typeof record["refresh_token"] === "string" ? record["refresh_token"].trim() : "";
+
+  if (newAccessToken.length === 0) {
+    throw new Error("WorkOS token refresh response missing access_token");
+  }
+  if (newRefreshToken.length === 0) {
+    throw new Error("WorkOS token refresh response missing refresh_token");
+  }
+
+  const expiresAt = parseJwtExpiry(newAccessToken) ?? undefined;
+
+  return {
+    accessToken: newAccessToken,
+    refreshToken: newRefreshToken,
+    expiresAt,
+  };
+}
+
+// ─── Auth V2 Encryption (for persisting refreshed tokens) ───────────────────
+
+/**
+ * Encrypt Factory auth.v2 credentials using AES-256-GCM.
+ * Returns string in format: base64(iv):base64(authTag):base64(ciphertext)
+ */
+export function encryptAuthV2(keyBase64: string, data: { readonly access_token: string; readonly refresh_token: string }): string {
+  const key = Buffer.from(keyBase64.trim(), "base64");
+  const iv = randomBytes(16);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(data), "utf-8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `${iv.toString("base64")}:${authTag.toString("base64")}:${ciphertext.toString("base64")}`;
+}
+
+/**
+ * Persist refreshed Factory OAuth tokens back to the encrypted auth.v2 file.
+ * Only writes if the auth.v2.key file exists and is readable.
+ * Never throws — logs warnings on failure.
+ */
+export async function persistFactoryAuthV2(accessToken: string, refreshToken: string): Promise<void> {
+  const authV2File = defaultAuthV2FilePath();
+  const authV2Key = defaultAuthV2KeyPath();
+
+  try {
+    const keyContent = await readFile(authV2Key, "utf-8");
+    const encrypted = encryptAuthV2(keyContent.trim(), {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    });
+    await writeFile(authV2File, encrypted, "utf-8");
+  } catch (error) {
+    console.warn(
+      `[factory-auth] Failed to persist refreshed tokens to ${authV2File}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }

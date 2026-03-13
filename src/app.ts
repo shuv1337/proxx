@@ -4,6 +4,12 @@ import { DEFAULT_MODELS, type ProxyConfig } from "./lib/config.js";
 import { KeyPool, type ProviderCredential } from "./lib/key-pool.js";
 import { CredentialStore } from "./lib/credential-store.js";
 import { OpenAiOAuthManager } from "./lib/openai-oauth.js";
+import {
+  factoryCredentialNeedsRefresh,
+  parseJwtExpiry,
+  persistFactoryAuthV2,
+  refreshFactoryOAuthToken,
+} from "./lib/factory-auth.js";
 import { loadModels, toOpenAiModel } from "./lib/models.js";
 import { buildForwardHeaders } from "./lib/proxy.js";
 import { initializePolicyEngine, createPolicyEngine, type PolicyEngine } from "./lib/policy/index.js";
@@ -242,6 +248,11 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return null;
     }
 
+    // Factory OAuth credentials use WorkOS refresh, not OpenAI OAuth
+    if (credential.providerId === "factory") {
+      return refreshFactoryAccount(credential);
+    }
+
     try {
       app.log.info({ accountId: credential.accountId, providerId: credential.providerId }, "refreshing expired OAuth token");
       
@@ -289,11 +300,73 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     }
   }
 
+  async function refreshFactoryAccount(credential: ProviderCredential): Promise<ProviderCredential | null> {
+    if (!credential.refreshToken) {
+      return null;
+    }
+
+    try {
+      app.log.info({ accountId: credential.accountId, providerId: "factory" }, "refreshing Factory OAuth token via WorkOS");
+
+      const refreshed = await refreshFactoryOAuthToken(credential.refreshToken);
+      const expiresAt = refreshed.expiresAt ?? parseJwtExpiry(refreshed.accessToken) ?? undefined;
+
+      const newCredential: ProviderCredential = {
+        providerId: "factory",
+        accountId: credential.accountId,
+        token: refreshed.accessToken,
+        authType: "oauth_bearer",
+        refreshToken: refreshed.refreshToken,
+        expiresAt,
+      };
+
+      // Update the credential in the KeyPool's in-memory state
+      keyPool.updateAccountCredential("factory", credential, newCredential);
+
+      // Persist to the credential store (file or SQL)
+      await runtimeCredentialStore.upsertOAuthAccount(
+        "factory",
+        newCredential.accountId,
+        newCredential.token,
+        newCredential.refreshToken,
+        newCredential.expiresAt,
+      );
+
+      // Also persist to the encrypted auth.v2 file so credentials survive restarts
+      await persistFactoryAuthV2(refreshed.accessToken, refreshed.refreshToken);
+
+      app.log.info({
+        accountId: newCredential.accountId,
+        providerId: "factory",
+        expiresAt: newCredential.expiresAt,
+      }, "Factory OAuth token refreshed successfully");
+
+      return newCredential;
+    } catch (error) {
+      app.log.warn({
+        error: toErrorMessage(error),
+        accountId: credential.accountId,
+        providerId: "factory",
+      }, "failed to refresh Factory OAuth token");
+      return null;
+    }
+  }
+
   async function ensureFreshAccounts(providerId: string): Promise<void> {
     const expiredAccounts = keyPool.getExpiredAccountsWithRefreshTokens(providerId);
     
     for (const account of expiredAccounts) {
       await refreshExpiredOAuthAccount(account);
+    }
+
+    // Factory OAuth: proactively refresh tokens within 30-min window (before they expire)
+    if (providerId === "factory") {
+      const allFactoryAccounts = await keyPool.getAllAccounts("factory").catch(() => [] as ProviderCredential[]);
+      for (const account of allFactoryAccounts) {
+        if (factoryCredentialNeedsRefresh(account)) {
+          await refreshFactoryAccount(account);
+        }
+      }
     }
   }
 
