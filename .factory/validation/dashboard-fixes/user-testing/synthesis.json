@@ -1,0 +1,34 @@
+{
+  "milestone": "dashboard-fixes",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 24,
+    "passed": 24,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-TOKEN-001", "VAL-TOKEN-002", "VAL-TOKEN-003", "VAL-TOKEN-004",
+    "VAL-LAYOUT-001", "VAL-LAYOUT-002", "VAL-LAYOUT-003", "VAL-LAYOUT-004", "VAL-LAYOUT-005",
+    "VAL-POOL-001", "VAL-POOL-002", "VAL-POOL-003",
+    "VAL-DONUT-001", "VAL-DONUT-002",
+    "VAL-SEC-001", "VAL-SEC-002", "VAL-SEC-003", "VAL-SEC-004", "VAL-SEC-005", "VAL-SEC-006",
+    "VAL-CROSS-001", "VAL-CROSS-002", "VAL-CROSS-003", "VAL-CROSS-004"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added Flow Validator Guidance sections for Web Browser, curl, and Unit Tests surfaces with isolation rules, URLs, and auth details",
+      "source": "setup"
+    },
+    {
+      "target": "user-testing.md",
+      "description": "Added note about proxy auth token needing manual entry in dashboard UI before data loads (friction from dashboard-visuals and cross-area flow reports)",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}

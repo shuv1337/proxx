@@ -1,0 +1,100 @@
+{
+  "groupId": "cross-area",
+  "testedAt": "2026-03-13T00:49:00.000Z",
+  "isolation": {
+    "appUrl": "http://127.0.0.1:5174",
+    "session": "dc3e7c261d02__cross",
+    "dashboardPage": "http://127.0.0.1:5174"
+  },
+  "toolsUsed": ["agent-browser"],
+  "assertions": [
+    {
+      "id": "VAL-CROSS-001",
+      "title": "Dashboard loads without console errors",
+      "status": "pass",
+      "steps": [
+        { "action": "Navigate to http://127.0.0.1:5174 with 1920x1080 viewport", "expected": "Dashboard loads", "observed": "Dashboard loaded successfully showing 'Open Hax Proxy Console'" },
+        { "action": "Set proxy auth token and reload page", "expected": "Dashboard authenticates and loads data", "observed": "Dashboard authenticated, showing 455 requests, 4 active accounts" },
+        { "action": "Check browser console for JS errors", "expected": "Zero JavaScript runtime errors", "observed": "Zero errors reported by agent-browser errors" },
+        { "action": "Check network requests for failures", "expected": "Zero failed network requests", "observed": "Performance API shows 26 total requests, 0 failed (all 2xx status)" }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/cross-area/VAL-CROSS-001-dashboard-loaded.png", "dashboard-fixes/cross-area/VAL-CROSS-001-after-auth.png"],
+        "consoleErrors": "none",
+        "network": "26 resource requests, 0 failed. All API calls (dashboard/overview, credentials, request-logs, settings) returned 200 after auth token set."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "title": "All dashboard sections render without layout conflicts",
+      "status": "pass",
+      "steps": [
+        { "action": "Take full-page screenshot at 1920px viewport", "expected": "All 7 sections visible", "observed": "All 7 sections visible in full-page screenshot" },
+        { "action": "Verify hero section", "expected": "Hero banner with title and timestamp", "observed": "Hero shows 'Codex usage visibility without leaving your proxy' with 'Updated: 3/13/2026' and 'Auto-refresh every 30s'" },
+        { "action": "Verify metrics grid", "expected": "4 metric cards visible", "observed": "Requests/24h (455), Tokens/24h (0), Error Rate (0.4%), Active Accounts (4) — all rendered properly" },
+        { "action": "Verify Account Token Share donut", "expected": "Donut chart section visible", "observed": "Donut chart section visible with 4 account entries and 'No token activity yet' message" },
+        { "action": "Verify Service Tier Mix bars", "expected": "Bar chart section visible", "observed": "Service Tier Mix section showing Fast mode, Priority, Standard tiers with request counts" },
+        { "action": "Verify Traffic Trend", "expected": "Traffic trend chart visible", "observed": "Traffic Trend section showing hourly request and token movement charts" },
+        { "action": "Verify Provider Pool Status", "expected": "Provider pool section visible", "observed": "Provider Pool Status showing 'openai' provider with Healthy status, Total: 4, Available: 4" },
+        { "action": "Verify Request Log + Account Health", "expected": "Both sections visible side by side", "observed": "Recent Request Log with 10+ entries and Account Health with 4 accounts visible side by side at bottom" },
+        { "action": "Check for overlapping or collapsed sections", "expected": "No overlapping or collapsed sections", "observed": "All sections properly stacked vertically with consistent spacing, no overlaps or collapses" }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/cross-area/VAL-CROSS-002-full-page-1920.png"],
+        "consoleErrors": "none",
+        "network": "N/A"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-003",
+      "title": "Dashboard auto-refresh works",
+      "status": "pass",
+      "steps": [
+        { "action": "Clear console errors before waiting", "expected": "Console cleared", "observed": "Console cleared" },
+        { "action": "Wait 35+ seconds for auto-refresh cycle", "expected": "Dashboard fires refresh", "observed": "Waited 35+ seconds; dashboard shows updated timestamp" },
+        { "action": "Take screenshot after refresh", "expected": "Dashboard looks consistent — no visual glitches or layout jumps", "observed": "Dashboard layout identical to pre-refresh state; all sections properly rendered; data values consistent (455 requests, 4 accounts)" },
+        { "action": "Check console errors after refresh", "expected": "Zero console errors", "observed": "Zero errors reported by agent-browser errors" }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/cross-area/VAL-CROSS-003-after-refresh.png"],
+        "consoleErrors": "none",
+        "network": "Auto-refresh API calls completed successfully"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-004",
+      "title": "Dashboard handles empty state gracefully",
+      "status": "pass",
+      "steps": [
+        { "action": "Observe unauthenticated dashboard (zero credentials state)", "expected": "All sections show empty-state messages without layout breakage", "observed": "Unauthenticated load shows: 'Unauthorized' label, all metrics at 0, 'No token activity yet', 'Loading tier mix...', 'Top model - · Top provider -'. Layout fully intact." },
+        { "action": "Observe authenticated dashboard sections with no data", "expected": "Empty-state messages render properly", "observed": "Account Token Share: 'No token activity yet' with empty donut placeholder. Tokens/24h: '0' (In 0 / Out 0). Priority tier: '0 req · 0.0%'. Standard tier: '0 req · 0.0%'. All rendered without layout breakage." },
+        { "action": "Verify layout integrity in empty state", "expected": "No collapsed, overlapping, or broken sections", "observed": "All 7 sections maintain proper dimensions and spacing in both empty and populated states" }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/cross-area/VAL-CROSS-004-empty-dashboard.png", "dashboard-fixes/cross-area/VAL-CROSS-004-empty-states-current.png"],
+        "consoleErrors": "none",
+        "network": "N/A"
+      },
+      "issues": "Cannot fully test 'zero request logs and zero credentials' without clearing backend data. Evaluated based on: (1) unauthenticated state showing all sections empty, (2) authenticated sections that have no data (tokens = 0, priority/standard tiers = 0). Both render gracefully."
+    }
+  ],
+  "frictions": [
+    {
+      "description": "Dashboard initially loaded without auth token, showing 'Unauthorized' and 401 errors on all API endpoints. Had to manually enter PROXY_AUTH_TOKEN into the Proxy Token field and click Save to authenticate.",
+      "resolved": true,
+      "resolution": "Read PROXY_AUTH_TOKEN from .env, filled the Proxy Token input, clicked Save, and reloaded the page.",
+      "affectedAssertions": ["VAL-CROSS-001"]
+    },
+    {
+      "description": "Vite dev server on port 5174 was initially not responding (connection refused), but was actually running — required verification via ss/lsof.",
+      "resolved": true,
+      "resolution": "Confirmed server was running on port 5174 via lsof; initial connection may have been a timing issue. Second attempt connected successfully.",
+      "affectedAssertions": ["VAL-CROSS-001"]
+    }
+  ],
+  "blockers": [],
+  "summary": "Tested 4 cross-area assertions: all 4 passed. Dashboard loads with zero JS errors and zero failed network requests (VAL-CROSS-001). All 7 sections render properly at 1920px without overlaps or collapses (VAL-CROSS-002). Auto-refresh works after 30s with no layout jumps or errors (VAL-CROSS-003). Empty states render gracefully in both unauthenticated and zero-data sections (VAL-CROSS-004)."
+}

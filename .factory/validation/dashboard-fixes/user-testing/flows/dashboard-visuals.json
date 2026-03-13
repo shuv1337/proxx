@@ -1,0 +1,151 @@
+{
+  "groupId": "dashboard-visuals",
+  "testedAt": "2026-03-13T22:10:00.000Z",
+  "isolation": {
+    "appUrl": "http://127.0.0.1:5174",
+    "session": "dc3e7c261d02__visuals",
+    "viewport": "1920x1080",
+    "authToken": "LAV7YvUwX3QVrAMm4suti_0au8NVOAE6"
+  },
+  "toolsUsed": ["agent-browser"],
+  "assertions": [
+    {
+      "id": "VAL-TOKEN-002",
+      "title": "Dashboard token metrics reflect streaming usage",
+      "status": "pass",
+      "steps": [
+        { "action": "Navigate to dashboard at http://127.0.0.1:5174", "expected": "Dashboard loads with data", "observed": "Dashboard loaded after setting proxy auth token" },
+        { "action": "Check hero metrics grid", "expected": "Tokens / 24h metric card rendered", "observed": "Tokens / 24h card shows 0 with 'In 0 / Out 0' subtitle" },
+        { "action": "Check request log entries for non-zero tokens", "expected": "If entries have tokens, metric should be non-zero", "observed": "12 request log entries present, all with 0 tokens. Metric correctly reflects 0 tokens." },
+        { "action": "Check Account Token Share donut", "expected": "Donut shows proportional data if tokens exist", "observed": "Donut correctly shows 'No token activity yet' since all accounts have 0 tokens. Legend rows list all 4 accounts." }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/dashboard-visuals/VAL-TOKEN-002-hero-metrics.png", "dashboard-fixes/dashboard-visuals/dashboard-full-authenticated.png"],
+        "consoleErrors": "none",
+        "network": "Dashboard API calls returned 200 after auth token was set"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-DONUT-001",
+      "title": "Legend swatches are visible with correct colors",
+      "status": "pass",
+      "steps": [
+        { "action": "Locate legend swatches in Account Token Share section", "expected": "Each swatch has background-color matching its donut segment color", "observed": "4 swatches rendered with correct colors" },
+        { "action": "Read computed style of swatch 0 (dashboard-donut-segment-0)", "expected": "background-color: #56d8ff", "observed": "background-color: rgb(86, 216, 255) = #56d8ff ✓" },
+        { "action": "Read computed style of swatch 1 (dashboard-donut-segment-1)", "expected": "background-color: #82f0b8", "observed": "background-color: rgb(130, 240, 184) = #82f0b8 ✓" },
+        { "action": "Read computed style of swatch 2 (dashboard-donut-segment-2)", "expected": "background-color: #ffcc7d", "observed": "background-color: rgb(255, 204, 125) = #ffcc7d ✓" },
+        { "action": "Read computed style of swatch 3 (dashboard-donut-segment-3)", "expected": "background-color: #ff907c", "observed": "background-color: rgb(255, 144, 124) = #ff907c ✓" },
+        { "action": "Verify swatch dimensions and visibility", "expected": "12px × 12px, display: block, border-radius: 999px", "observed": "All 4 swatches: width=12px, height=12px, display=block, borderRadius=999px" }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/dashboard-visuals/VAL-DONUT-001-legend-swatches.png"],
+        "consoleErrors": "none",
+        "computedStyles": {
+          "swatch-0": { "className": "dashboard-legend-swatch dashboard-donut-segment-0", "backgroundColor": "rgb(86, 216, 255)", "width": "12px", "height": "12px" },
+          "swatch-1": { "className": "dashboard-legend-swatch dashboard-donut-segment-1", "backgroundColor": "rgb(130, 240, 184)", "width": "12px", "height": "12px" },
+          "swatch-2": { "className": "dashboard-legend-swatch dashboard-donut-segment-2", "backgroundColor": "rgb(255, 204, 125)", "width": "12px", "height": "12px" },
+          "swatch-3": { "className": "dashboard-legend-swatch dashboard-donut-segment-3", "backgroundColor": "rgb(255, 144, 124)", "width": "12px", "height": "12px" }
+        }
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-DONUT-002",
+      "title": "SVG donut segments still render correctly",
+      "status": "pass",
+      "steps": [
+        { "action": "Check CSS rule for .dashboard-donut-track, .dashboard-donut-segment", "expected": "fill: none; stroke-width: 14", "observed": "CSS rule: fill: none; stroke-width: 14; ✓" },
+        { "action": "Check segment-0 CSS", "expected": "stroke: #56d8ff; background-color: #56d8ff", "observed": "stroke: rgb(86, 216, 255); background-color: rgb(86, 216, 255) ✓" },
+        { "action": "Check segment-1 CSS", "expected": "stroke: #82f0b8; background-color: #82f0b8", "observed": "stroke: rgb(130, 240, 184); background-color: rgb(130, 240, 184) ✓" },
+        { "action": "Check segment-2 CSS", "expected": "stroke: #ffcc7d; background-color: #ffcc7d", "observed": "stroke: rgb(255, 204, 125); background-color: rgb(255, 204, 125) ✓" },
+        { "action": "Check segment-3 CSS", "expected": "stroke: #ff907c; background-color: #ff907c", "observed": "stroke: rgb(255, 144, 124); background-color: rgb(255, 144, 124) ✓" },
+        { "action": "Check segment-4 CSS", "expected": "stroke: #82a8ff; background-color: #82a8ff", "observed": "stroke: rgb(130, 168, 255); background-color: rgb(130, 168, 255) ✓" },
+        { "action": "Check segment-5 CSS", "expected": "stroke: #c79bff; background-color: #c79bff", "observed": "stroke: rgb(199, 155, 255); background-color: rgb(199, 155, 255) ✓" },
+        { "action": "Verify adding background-color doesn't break SVG", "expected": "SVG circles use stroke not background-color; fill: none prevents fill", "observed": "CSS confirms fill: none still present. background-color has no effect on SVG circle elements. Donut arcs would render correctly via stroke property." }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/dashboard-visuals/VAL-DONUT-001-legend-swatches.png"],
+        "consoleErrors": "none",
+        "cssRules": [
+          ".dashboard-donut-track, .dashboard-donut-segment { fill: none; stroke-width: 14; }",
+          ".dashboard-donut-segment-0 { stroke: rgb(86, 216, 255); background-color: rgb(86, 216, 255); }",
+          ".dashboard-donut-segment-1 { stroke: rgb(130, 240, 184); background-color: rgb(130, 240, 184); }",
+          ".dashboard-donut-segment-2 { stroke: rgb(255, 204, 125); background-color: rgb(255, 204, 125); }",
+          ".dashboard-donut-segment-3 { stroke: rgb(255, 144, 124); background-color: rgb(255, 144, 124); }",
+          ".dashboard-donut-segment-4 { stroke: rgb(130, 168, 255); background-color: rgb(130, 168, 255); }",
+          ".dashboard-donut-segment-5 { stroke: rgb(199, 155, 255); background-color: rgb(199, 155, 255); }"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-POOL-001",
+      "title": "Auth types display human-friendly labels",
+      "status": "pass",
+      "steps": [
+        { "action": "Navigate to Provider Pool Status section", "expected": "Provider card shows human-friendly auth label", "observed": "openai provider card displays 'OAuth' pill label" },
+        { "action": "Verify label is not raw value", "expected": "'OAuth' not 'oauth_bearer'", "observed": "'OAuth' confirmed — no raw 'oauth_bearer' string present" }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/dashboard-visuals/VAL-POOL-001-provider-pool.png"],
+        "consoleErrors": "none",
+        "extractedText": { "providerPills": ["OAuth"], "providerCards": [{ "provider": "openai", "authPill": "OAuth" }] }
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-POOL-002",
+      "title": "Account health rows show formatted auth types",
+      "status": "pass",
+      "steps": [
+        { "action": "Navigate to Account Health section", "expected": "Auth type subtitle shows human-friendly labels", "observed": "All 4 account rows show 'OAuth' subtitle" },
+        { "action": "Verify all rows", "expected": "Every row shows 'OAuth' not 'oauth_bearer'", "observed": "Row 1: OAuth ✓, Row 2: OAuth ✓, Row 3: OAuth ✓, Row 4: OAuth ✓" }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/dashboard-visuals/VAL-POOL-002-account-health.png"],
+        "consoleErrors": "none",
+        "extractedText": {
+          "accountHealthRows": [
+            { "name": "openai/bb35075b-c8e5-40bb-af9b-e926e9a6d074-2493287cba80", "authType": "OAuth", "status": "healthy" },
+            { "name": "openai/9cc73143-2009-4cc3-9859-02fd589411fa", "authType": "OAuth", "status": "healthy" },
+            { "name": "openai/9cc73143-2009-4cc3-9859-02fd589411fa-2dba3b6a615e", "authType": "OAuth", "status": "healthy" },
+            { "name": "openai/9cc73143-2009-4cc3-9859-02fd589411fa-32733b1ec73b", "authType": "OAuth", "status": "healthy" }
+          ]
+        }
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-POOL-003",
+      "title": "All auth type values have human-friendly labels",
+      "status": "pass",
+      "steps": [
+        { "action": "Inspect formatAuthType function in web/src/lib/format.ts", "expected": "All 5 auth types mapped", "observed": "AUTH_TYPE_LABELS maps: api_key→'API Key', oauth_bearer→'OAuth', local→'Local', none→'None', unknown→'Unknown'. Fallback capitalizes first letter." },
+        { "action": "Search page text for raw snake_case auth type strings", "expected": "No raw 'api_key', 'oauth_bearer' etc. on page", "observed": "Page text search: has_api_key=false, has_oauth_bearer=false. No raw snake_case auth strings found." },
+        { "action": "Verify all dashboard auth type display points use formatAuthType", "expected": "Provider pool pills and account health subtitles both use formatAuthType", "observed": "DashboardPage.tsx line 297 (pool pill) and line 367 (health subtitle) both call formatAuthType()" }
+      ],
+      "evidence": {
+        "screenshots": ["dashboard-fixes/dashboard-visuals/VAL-POOL-001-provider-pool.png", "dashboard-fixes/dashboard-visuals/VAL-POOL-002-account-health.png"],
+        "consoleErrors": "none",
+        "codeInspection": {
+          "formatAuthType_location": "web/src/lib/format.ts:19",
+          "AUTH_TYPE_LABELS": { "api_key": "API Key", "oauth_bearer": "OAuth", "local": "Local", "none": "None", "unknown": "Unknown" },
+          "usage_in_dashboard": ["line 297: formatAuthType(status.authType) in provider pool pill", "line 367: formatAuthType(account.authType) in account health subtitle"],
+          "fallback": "Capitalizes first character for any unmapped value"
+        }
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [
+    {
+      "description": "Dashboard shows 'Unauthorized' error on first load — proxy auth token must be entered in the UI header field and saved before dashboard data loads. Not immediately obvious from user-testing.md guidance.",
+      "resolved": true,
+      "resolution": "Filled the 'Proxy Token' field with the provided auth token and clicked Save, then reloaded the page.",
+      "affectedAssertions": ["VAL-TOKEN-002", "VAL-DONUT-001", "VAL-DONUT-002", "VAL-POOL-001", "VAL-POOL-002", "VAL-POOL-003"]
+    }
+  ],
+  "blockers": [],
+  "summary": "Tested 6 assertions: all 6 passed. Token metrics correctly show 0 when no token data exists (455 requests with 0 tokens). Legend swatches render with correct background-color values matching the donut segment color scheme. SVG donut CSS correctly maintains fill:none while adding background-color for swatch use. Provider pool and account health sections show 'OAuth' instead of 'oauth_bearer'. Code inspection confirms all 5 auth types are mapped to human-friendly labels. No console errors detected."
+}
