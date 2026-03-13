@@ -1,0 +1,111 @@
+{
+  "milestone": "factory-backend",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "pnpm test", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "pnpm typecheck", "exitCode": 0 },
+    "lint": { "passed": true, "command": "echo \"no lint configured\"", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "factory-config-credentials",
+      "severity": "non_blocking",
+      "description": "Serial OAuth loading in readFactoryOAuthProviders() could be parallelized with file provider reads for marginally faster startup"
+    },
+    {
+      "featureId": "factory-config-credentials",
+      "severity": "non_blocking",
+      "description": "Merged ProviderState authType depends on merge order (api_key wins when env vars loaded first), potentially misleading but matches existing codebase pattern"
+    },
+    {
+      "featureId": "factory-config-credentials",
+      "severity": "non_blocking",
+      "description": "Generic error when factoryPrefixed=true and factory is disabled — could benefit from more specific error message"
+    },
+    {
+      "featureId": "factory-provider-strategy",
+      "severity": "non_blocking",
+      "description": "FactoryResponsesProviderStrategy.buildPayload() does not delete max_output_tokens, unlike OpenAiResponsesProviderStrategy — could cause 400 errors if Factory rejects unknown fields"
+    },
+    {
+      "featureId": "factory-provider-strategy",
+      "severity": "non_blocking",
+      "description": "isFkKey() exported and tested but not consumed by any strategy class — dead code until future use"
+    },
+    {
+      "featureId": "factory-provider-strategy",
+      "severity": "non_blocking",
+      "description": "Duplicated SSE handling in FactoryResponsesProviderStrategy.handleProviderAttempt() (~60 lines same as OpenAiResponsesProviderStrategy) increases maintenance surface"
+    },
+    {
+      "featureId": "factory-oauth-refresh",
+      "severity": "non_blocking",
+      "description": "Redundant parseJwtExpiry fallback in app.ts refresh path — harmless but slightly redundant"
+    },
+    {
+      "featureId": "factory-oauth-refresh",
+      "severity": "non_blocking",
+      "description": "No concurrency guard on Factory token refresh — matches existing OpenAI pattern but could waste WorkOS API calls"
+    },
+    {
+      "featureId": "factory-oauth-refresh",
+      "severity": "non_blocking",
+      "description": "encryptAuthV2 does not validate 32-byte key length — corrupted key produces cryptic error from createCipheriv"
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add convention: New provider integrations should isolate utility code in dedicated files (e.g., factory-compat.ts, factory-auth.ts) and register strategy classes in provider-strategy.ts. This pattern keeps provider logic contained and minimizes merge conflicts.",
+      "evidence": "factory-config-credentials isolated auth in factory-auth.ts; factory-provider-strategy isolated utilities in factory-compat.ts. Both features consistently followed this pattern.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add testing pattern recommendation: Functions that make external HTTP calls should accept an injectable fetch parameter (e.g., fetchFn: typeof fetch = globalThis.fetch) for testability. This enables unit testing with mocked responses without global mock pollution.",
+      "evidence": "factory-oauth-refresh used this pattern in refreshFactoryOAuthToken (factory-auth.ts:175) and it enabled clean unit tests for WorkOS API interaction."
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Clarify skill TDD requirement: The feature-worker skill mandates 'Write Tests First (Red)' but workers consistently write tests alongside implementation in a single commit. Consider relaxing to 'comprehensive test coverage required' rather than strict red-green TDD, which is impractical for config/credential/strategy features where test structure depends on implementation details.",
+      "evidence": "All 3 features in factory-backend milestone committed tests alongside implementation. All achieved excellent coverage (24+24+34 tests). Strict TDD was not followed but quality was not impacted.",
+      "isSystemic": true
+    },
+    {
+      "target": "library",
+      "suggestion": "Update factory-api.md to note that OpenCode sanitization (quirk #4: replacing 'OpenCode' with 'Assistant' in system prompts) is not implemented in the current integration. Either mark it as 'not implemented / deferred' or create a follow-up task if it's still required.",
+      "evidence": "factory-provider-strategy review noted rg 'OpenCode' src/ returns no matches, but factory-api.md still lists it as a known quirk.",
+      "isSystemic": false
+    },
+    {
+      "target": "library",
+      "suggestion": "Update factory-api.md to clarify that x-stainless-helper-method: 'stream' header is only relevant for direct streaming Anthropic requests, not for the proxy's TransformedJson approach (which sends non-streaming requests upstream and generates synthetic SSE). Current docs may confuse future workers.",
+      "evidence": "factory-provider-strategy review noted the header is documented but not implemented. FactoryMessagesProviderStrategy uses chatRequestToMessagesRequest which sets stream: false.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Worker correctly followed AGENTS.md boundary of not modifying existing provider strategies (from factory-config-credentials review)",
+      "reason": "No action needed — this is a positive observation confirming convention adherence, not a gap"
+    },
+    {
+      "observation": "Factory isolation pattern correct in refresh logic (from factory-oauth-refresh review)",
+      "reason": "No action needed — this is a positive observation confirming convention adherence"
+    },
+    {
+      "observation": "Skill deviation for no manual curl in factory-oauth-refresh justified (from factory-oauth-refresh review)",
+      "reason": "Deviation is justified — feature adds no new API endpoints, only internal token refresh logic. Unit tests with mocked fetch adequately cover the WorkOS API interaction."
+    }
+  ],
+  "previousRound": null
+}

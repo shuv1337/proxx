@@ -1,0 +1,56 @@
+{
+  "featureId": "factory-provider-strategy",
+  "reviewedAt": "2026-03-13T09:45:00.000Z",
+  "commitId": "c46c012",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of Factory.ai provider strategy with tri-endpoint routing, correct header generation, model-type mapping, system prompt inlining, and comprehensive tests. The code is well-structured with clean separation between factory-compat.ts (utilities) and provider-strategy.ts (strategy classes). All five feature requirements are met: (1) tri-endpoint routing via getFactoryEndpointPath, (2) all Factory-specific headers via buildFactoryCommonHeaders/buildFactoryAnthropicHeaders, (3) model-to-type and x-api-provider mapping, (4) system prompt inlining, (5) reuse of existing Messages/Responses translation logic. The selectRemoteProviderStrategyForRoute fix correctly prevents Factory strategies from being selected for openrouter/requesty providers. 24 tests cover unit and integration scenarios.",
+    "issues": [
+      {
+        "file": "src/lib/provider-strategy.ts",
+        "line": 1398,
+        "severity": "non_blocking",
+        "description": "FactoryResponsesProviderStrategy.buildPayload() does not delete 'max_output_tokens' from the upstream payload, unlike OpenAiResponsesProviderStrategy (line ~1255) which does `delete upstreamPayload['max_output_tokens']`. If Factory's responses endpoint rejects this parameter, it could cause 400 errors for requests that specify max_tokens/max_completion_tokens. Low risk since Factory likely ignores unknown fields, but inconsistent with the OpenAI variant."
+      },
+      {
+        "file": "src/lib/factory-compat.ts",
+        "line": 195,
+        "severity": "non_blocking",
+        "description": "isFkKey() is exported and tested but not consumed by any strategy class. System prompt inlining is applied unconditionally in FactoryMessagesProviderStrategy.buildPayload() (line 1354), not conditionally based on fk- key detection. The comment explains this is intentional for consistency, but the unused export is effectively dead code until a future feature needs it."
+      },
+      {
+        "file": "src/lib/provider-strategy.ts",
+        "line": 1555,
+        "severity": "non_blocking",
+        "description": "The selectRemoteProviderStrategyForRoute fix for openrouter/requesty creates an inline context object spread with factoryPrefixed: false, openAiPrefixed: false, explicitOllama: false, localOllama: false. This is functionally correct but the inline object construction is verbose and could benefit from a named helper for clarity. Not a correctness issue."
+      },
+      {
+        "file": "src/lib/provider-strategy.ts",
+        "line": 1413,
+        "severity": "non_blocking",
+        "description": "FactoryResponsesProviderStrategy.handleProviderAttempt() is a near-exact duplicate of OpenAiResponsesProviderStrategy.handleProviderAttempt() (~60 lines). This is expected per AGENTS.md ('do not modify existing provider strategies — create new Factory-specific ones') but increases maintenance surface. If the SSE stream handling logic changes in one, the other must be updated manually."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Factory API reference (factory-api.md) documents 'Content sanitization: The word OpenCode should be replaced with Assistant in system prompts before sending to Factory.' This is not implemented in the current feature and no search hits for 'OpenCode' exist in the codebase. If this is still a requirement, it should be tracked as a separate work item or removed from factory-api.md if obsolete.",
+      "evidence": "rg 'OpenCode' src/ returns no matches. factory-api.md mentions it under Known Quirks #4."
+    },
+    {
+      "area": "knowledge",
+      "observation": "Factory API reference documents 'x-stainless-helper-method: stream (streaming only)' as an Anthropic-specific header, but this is not implemented. This is likely not needed since FactoryMessagesProviderStrategy sends non-streaming requests (stream: false via chatRequestToMessagesRequest at messages-compat.ts:637), so the header would never apply. The factory-api.md could clarify that this header is only relevant for direct streaming Anthropic requests, not for the proxy's TransformedJson approach.",
+      "evidence": "rg 'x-stainless-helper-method' src/ returns no matches. buildFactoryAnthropicHeaders in factory-compat.ts does not include it."
+    },
+    {
+      "area": "conventions",
+      "observation": "The worker correctly isolated all Factory-specific utility code in factory-compat.ts and kept strategy classes in provider-strategy.ts, following the established pattern. This convention of 'new provider code in dedicated files, strategy registration in provider-strategy.ts' should be documented in AGENTS.md for future provider integrations.",
+      "evidence": "factory-compat.ts (201 lines) contains all utility functions; provider-strategy.ts additions (~190 lines) are pure strategy classes."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The FactoryProviderStrategy implementation correctly delivers all five required capabilities: tri-endpoint routing (/api/llm/a/v1/messages, /api/llm/o/v1/responses, /api/llm/o/v1/chat/completions), complete Factory-specific header sets (common + Anthropic-specific), model-to-type and x-api-provider mapping for all documented model families, system prompt inlining to avoid Factory 403, and reuse of existing Messages/Responses translation logic. The three Factory strategy classes (FactoryMessagesProviderStrategy, FactoryResponsesProviderStrategy, FactoryChatCompletionsProviderStrategy) are cleanly implemented and registered in PROVIDER_STRATEGIES. 24 comprehensive tests cover unit functions and integration routing. Four non-blocking issues noted: missing max_output_tokens cleanup in Responses strategy, unused isFkKey export, verbose inline context fix, and duplicated SSE handling code. All are minor and don't affect correctness."
+}
