@@ -1,0 +1,39 @@
+{
+  "featureId": "fix-provider-pool-formatting",
+  "reviewedAt": "2026-03-13T07:45:00.000Z",
+  "commitId": "233ce3e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, well-scoped implementation. Created a shared formatAuthType() utility in web/src/lib/format.ts with an explicit lookup table for known auth types and a capitalize-first-letter fallback. Applied in DashboardPage.tsx (provider pool pills and account health rows) and CredentialsPage.tsx (replaced inline authTypeLabel()). All expected behaviors are satisfied: provider pool pills show 'OAuth'/'API Key' instead of raw strings, account health rows show formatted labels, and both pages now share the same utility for consistency. The removed authTypeLabel() had slightly different behavior (returned 'API key' for anything not oauth_bearer), but the new function is strictly more correct.",
+    "issues": [
+      {
+        "file": "web/src/lib/format.ts",
+        "line": 24,
+        "severity": "non_blocking",
+        "description": "Fallback for unknown auth types only capitalizes the first letter without replacing underscores. An unknown value like 'some_custom_type' would render as 'Some_custom_type' rather than 'Some Custom Type'. All currently known values are explicitly mapped so this is unlikely to surface, but a .replace(/_/g, ' ') before capitalize would be more robust."
+      },
+      {
+        "file": "web/src/lib/format.ts",
+        "line": 1,
+        "severity": "non_blocking",
+        "description": "No unit tests were added for formatAuthType(). The worker cited the fix-worker skill's CSS-only exception, but this is a pure TypeScript utility function with branching logic (lookup + fallback), not a visual-only fix. A simple test covering the known mappings and the fallback path would guard against regressions and take minimal effort."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker applied the fix-worker skill's 'CSS-only or purely visual' test-skip exception to a pure TypeScript utility function (formatAuthType). The skill says 'If the fix is CSS-only or purely visual, document what manual verification you'll do instead' — but this was a string formatting utility with a lookup table and fallback logic, not CSS. The skill could be more precise about when test-skipping is appropriate: e.g., 'CSS-only or purely visual fixes where no testable TypeScript logic was added'.",
+      "evidence": "Handoff skillFeedback.deviations[0]: worker's justification says 'This is a formatting-only fix (string display), similar to CSS-only fixes'. Compare to SKILL.md step 2 which says 'If the fix is CSS-only or purely visual'."
+    },
+    {
+      "area": "conventions",
+      "observation": "The new shared utility file web/src/lib/format.ts establishes a pattern for shared frontend utilities in web/src/lib/. This is a reasonable location, but AGENTS.md doesn't document the web/src/lib/ directory as the canonical place for shared frontend utilities. Future workers may not know to check there.",
+      "evidence": "web/src/lib/format.ts is a new file; web/src/lib/ already contained api.ts so the pattern is consistent, but not documented."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The implementation correctly creates a shared formatAuthType() utility and applies it to all required locations in DashboardPage.tsx and CredentialsPage.tsx. All six expectedBehavior items are met: provider pool pills and account health rows show human-friendly labels, all known auth types are mapped, and labels are now consistent across Dashboard and Credentials pages. Two non-blocking issues noted: (1) the fallback for unknown auth types doesn't handle underscores, and (2) no unit tests were added for a testable pure function. Neither blocks acceptance."
+}

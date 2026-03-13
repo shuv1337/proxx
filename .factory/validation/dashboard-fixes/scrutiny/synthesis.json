@@ -1,0 +1,47 @@
+{
+  "milestone": "dashboard-fixes",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "pnpm test", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "pnpm typecheck", "exitCode": 0 },
+    "lint": { "passed": true, "command": "echo \"no lint configured\"", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skills",
+      "suggestion": "Refine the fix-worker skill's test-skip exception to be more precise. Currently says 'If the fix is CSS-only or purely visual, document what manual verification you'll do instead.' A worker interpreted this to skip tests for a pure TypeScript utility function (formatAuthType) because it was 'formatting-only'. Suggest rewording to: 'If the fix is CSS-only or purely visual with no testable TypeScript logic added, document what manual verification you'll do instead.'",
+      "evidence": "fix-provider-pool-formatting worker applied the CSS-only exception to web/src/lib/format.ts, a pure TS function with a lookup table and fallback logic. The function is trivially testable and has branching behavior.",
+      "isSystemic": false
+    },
+    {
+      "target": "skills",
+      "suggestion": "Reinforce the fix-worker skill's TDD requirement (Step 2: write tests first, confirm they fail) and manual verification requirement (Step 5: curl for backend, agent-browser for frontend). The XSS fix worker skipped the TDD red phase (implemented fix before writing tests) and skipped all manual verification (no curl against endpoints). Quality was not affected in this case, but consistent TDD discipline catches more subtle bugs.",
+      "evidence": "fix-xss-oauth-callback transcript shows: Edit ui-routes.ts → Create escape-html.test.ts → pnpm test (no red phase). Handoff has zero interactiveChecks and no curl commands. Worker marked followedProcedure=true despite these omissions.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Architecture.md already documents the token data flow and the streaming SSE parsing fits cleanly into it.",
+      "reason": "already-documented"
+    },
+    {
+      "observation": "Worker correctly used node:test conventions for new test files.",
+      "reason": "already-documented — test conventions are in mission AGENTS.md and are standard for the project"
+    },
+    {
+      "observation": "web/src/lib/ as shared frontend utility location should be documented in AGENTS.md.",
+      "reason": "ambiguous — only 2 files exist in web/src/lib/ (api.ts and format.ts), too early to codify as a convention. If more utilities accumulate, revisit."
+    }
+  ],
+  "previousRound": null
+}

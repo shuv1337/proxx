@@ -1,0 +1,33 @@
+{
+  "featureId": "fix-xss-oauth-callback",
+  "reviewedAt": "2026-03-13T07:45:00.000Z",
+  "commitId": "45c908d",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The implementation correctly adds an escapeHtml() helper that encodes all 5 HTML-significant characters (&, <, >, \", ') in the proper order (& first to prevent double-encoding). It is applied inside both htmlSuccess() and htmlError() before template interpolation, protecting all 4 user-controlled input paths: error_description query param, error query param, chatgptAccountId/accountId from token exchange, and oauthError.message from catch blocks. Both /auth/callback and /api/ui/credentials/openai/oauth/browser/callback routes share the same handleOpenAiBrowserCallback handler, so both are protected. Static strings without special characters pass through unmodified. The 13 unit tests provide thorough coverage of all characters individually, combined, edge cases, and XSS payloads. The diff is minimal and focused — only the necessary changes were made.",
+    "issues": [
+      {
+        "file": "src/lib/ui-routes.ts",
+        "line": 311,
+        "severity": "non_blocking",
+        "description": "escapeHtml is exported solely for testing. Consider placing it in a shared utility module (e.g., src/lib/html-utils.ts) to keep ui-routes.ts focused on route registration. Very minor — not blocking since the function is small and the export is justified for test access."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The fix-worker skill requires TDD red-green-refactor (Step 2: 'Write Tests First, run pnpm test to confirm the tests fail'). The worker implemented the fix and tests together without a red phase. handoff.skillFeedback.followedProcedure is true, but the transcript shows the Edit (code change) happened before the Create (test file), and tests were only run after both were in place. This is a minor procedural deviation that didn't affect quality.",
+      "evidence": "Transcript skeleton shows: Edit ui-routes.ts → Edit ui-routes.ts → Create escape-html.test.ts → Execute pnpm typecheck → Execute pnpm test. No red-phase test run before the fix."
+    },
+    {
+      "area": "skills",
+      "observation": "The fix-worker skill Step 5 requires manual verification: 'Backend fixes: Use curl to hit the relevant endpoint and verify the response.' The AGENTS.md also states 'XSS assertions can be tested with curl against the backend endpoints.' The worker skipped all manual/interactive verification — handoff contains no interactiveChecks. skillFeedback.followedProcedure is marked true despite this omission.",
+      "evidence": "handoff.verification.commandsRun only includes pnpm typecheck and pnpm test. No curl commands or agent-browser usage. No interactiveChecks array in the handoff."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The XSS fix is correct, complete, and well-tested. escapeHtml() properly encodes all 5 HTML-significant characters in the right order, and is applied in both htmlSuccess() and htmlError() before template interpolation. All 4 user-controlled input paths are protected, both OAuth callback routes share the same handler so both are covered. 13 unit tests provide thorough coverage including XSS payloads, edge cases, and no-double-encoding verification. Two non-blocking observations: (1) worker skipped TDD red phase, (2) worker skipped manual curl verification per skill requirements."
+}
