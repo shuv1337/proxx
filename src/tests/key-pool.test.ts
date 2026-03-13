@@ -301,6 +301,52 @@ test("loads inline JSON credentials from env without a keys file", { concurrency
   );
 });
 
+test("ignores malformed inline JSON credentials from env when another source is available", { concurrency: false }, async () => {
+  await withEnv(
+    {
+      PROXY_KEYS_JSON: "{not-valid-json",
+    },
+    async () => {
+      await withKeysFile(
+        {
+          providers: {
+            vivgrid: {
+              auth: "api_key",
+              accounts: [{ id: "file-vg", token: "vg-file-token" }],
+            },
+          },
+        },
+        async (keysFilePath) => {
+          const warnings: string[] = [];
+          const originalWarn = console.warn;
+          console.warn = (message?: unknown, ...args: unknown[]) => {
+            warnings.push([message, ...args].map((value) => String(value)).join(" "));
+          };
+
+          try {
+            const keyPool = new KeyPool({
+              keysFilePath,
+              reloadIntervalMs: 10,
+              defaultCooldownMs: 1000,
+              defaultProviderId: "vivgrid",
+            });
+
+            await keyPool.warmup();
+            const accounts = await keyPool.getRequestOrder("vivgrid");
+
+            assert.equal(accounts.length, 1);
+            assert.equal(accounts[0]?.accountId, "file-vg");
+            assert.equal(accounts[0]?.token, "vg-file-token");
+            assert.ok(warnings.some((entry) => entry.includes("Failed to parse inline keys JSON from env")));
+          } finally {
+            console.warn = originalWarn;
+          }
+        },
+      );
+    },
+  );
+});
+
 test("loads credentials from account store when database-backed source is configured", async () => {
   const accountStore = {
     async getAllProviders(): Promise<Map<string, { authType: ProviderAuthType }>> {

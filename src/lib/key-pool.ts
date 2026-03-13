@@ -315,8 +315,15 @@ function readProvidersFromJsonEnv(defaultProviderId: string): Map<string, Provid
     return new Map<string, ProviderState>();
   }
 
-  const parsed: unknown = JSON.parse(normalized);
-  return readProvidersFromJsonValue(parsed, defaultProviderId);
+  try {
+    const parsed: unknown = JSON.parse(normalized);
+    return readProvidersFromJsonValue(parsed, defaultProviderId);
+  } catch (error) {
+    console.warn(
+      `[key-pool] Failed to parse inline keys JSON from env: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return new Map<string, ProviderState>();
+  }
 }
 
 function createEnvProviderState(providerId: string, token: string): ProviderState {

@@ -39,7 +39,6 @@ import {
   buildFactoryCommonHeaders,
   getFactoryEndpointPath,
   getFactoryModelType,
-  isFkKey,
   inlineSystemPrompt,
 } from "./factory-compat.js";
 import {
@@ -1914,6 +1913,7 @@ export async function executeProviderFallback(
         if (refreshedCredential) {
           const refreshedHeaders = buildUpstreamHeadersForCredential(context.clientHeaders, refreshedCredential);
           const refreshedRelease = keyPool.markInFlight(refreshedCredential);
+          const refreshedAttemptStartedAt = Date.now();
           let refreshedResponse: Response;
           try {
             refreshedResponse = await fetchWithResponseTimeout(upstreamUrl, {
@@ -1926,43 +1926,52 @@ export async function executeProviderFallback(
             releaseInFlight();
             throw error;
           }
-          const refreshedAttemptStartedAt = Date.now();
-          const refreshedLogId = recordAttempt(requestLogStore, providerContext, {
-            providerId: candidate.providerId,
-            accountId: refreshedCredential.accountId,
-            authType: refreshedCredential.authType,
-            upstreamPath,
-            status: refreshedResponse.status,
-            latencyMs: Date.now() - refreshedAttemptStartedAt
-          }, candidateStrategy.mode);
-          await updateUsageCountsFromResponse(requestLogStore, refreshedLogId, refreshedResponse, candidateStrategy.mode, context.routedModel);
-          if (isRateLimitResponse(refreshedResponse)) {
-            accumulator.sawRateLimit = true;
-            keyPool.markRateLimited(refreshedCredential, parseRetryAfterMs(refreshedResponse.headers.get("retry-after")));
-            try {
-              await refreshedResponse.arrayBuffer();
-            } catch {}
-            break;
-          }
-          reply.header("x-open-hax-upstream-mode", candidateStrategy.mode);
-          const refreshedOutcome = await candidateStrategy.handleProviderAttempt(reply, refreshedResponse, providerContext);
-          if (refreshedOutcome.kind === "handled") {
-            releaseInFlight();
-            return { handled: true, candidateCount: candidates.length, summary: accumulator };
-          }
-          accumulator.sawRateLimit ||= refreshedOutcome.rateLimit === true;
-          accumulator.sawRequestError ||= refreshedOutcome.requestError === true;
-          accumulator.sawUpstreamServerError ||= refreshedOutcome.upstreamServerError === true;
-          accumulator.sawUpstreamInvalidRequest ||= refreshedOutcome.upstreamInvalidRequest === true;
-          accumulator.sawModelNotFound ||= refreshedOutcome.modelNotFound === true;
-          accumulator.sawModelNotSupportedForAccount ||= refreshedOutcome.modelNotSupportedForAccount === true;
-          if (!refreshedResponse.ok && refreshedOutcome.requestError === true && (refreshedResponse.status === 401 || refreshedResponse.status === 403)) {
-            keyPool.markRateLimited(refreshedCredential, Math.min(context.config.keyCooldownMs, 10_000));
-            if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && refreshedCredential.accountId === preferredAffinity.accountId) {
-              preferredReassignmentAllowed = true;
+
+          try {
+            const refreshedLatencyMs = Date.now() - refreshedAttemptStartedAt;
+            const refreshedLogId = recordAttempt(requestLogStore, providerContext, {
+              providerId: candidate.providerId,
+              accountId: refreshedCredential.accountId,
+              authType: refreshedCredential.authType,
+              upstreamPath,
+              status: refreshedResponse.status,
+              latencyMs: refreshedLatencyMs,
+              serviceTier: candidatePayload.serviceTier,
+              serviceTierSource: candidatePayload.serviceTierSource
+            }, candidateStrategy.mode);
+            await updateUsageCountsFromResponse(requestLogStore, refreshedLogId, refreshedResponse, candidateStrategy.mode, context.routedModel);
+            if (isRateLimitResponse(refreshedResponse)) {
+              accumulator.sawRateLimit = true;
+              keyPool.markRateLimited(refreshedCredential, parseRetryAfterMs(refreshedResponse.headers.get("retry-after")));
+              try {
+                await refreshedResponse.arrayBuffer();
+              } catch {
+                // Ignore body read failures while failing over after refresh.
+              }
+              break;
             }
+            reply.header("x-open-hax-upstream-mode", candidateStrategy.mode);
+            const refreshedOutcome = await candidateStrategy.handleProviderAttempt(reply, refreshedResponse, providerContext);
+            if (refreshedOutcome.kind === "handled") {
+              releaseInFlight();
+              return { handled: true, candidateCount: candidates.length, summary: accumulator };
+            }
+            accumulator.sawRateLimit ||= refreshedOutcome.rateLimit === true;
+            accumulator.sawRequestError ||= refreshedOutcome.requestError === true;
+            accumulator.sawUpstreamServerError ||= refreshedOutcome.upstreamServerError === true;
+            accumulator.sawUpstreamInvalidRequest ||= refreshedOutcome.upstreamInvalidRequest === true;
+            accumulator.sawModelNotFound ||= refreshedOutcome.modelNotFound === true;
+            accumulator.sawModelNotSupportedForAccount ||= refreshedOutcome.modelNotSupportedForAccount === true;
+            if (!refreshedResponse.ok && refreshedOutcome.requestError === true && (refreshedResponse.status === 401 || refreshedResponse.status === 403)) {
+              keyPool.markRateLimited(refreshedCredential, Math.min(context.config.keyCooldownMs, 10_000));
+              if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && refreshedCredential.accountId === preferredAffinity.accountId) {
+                preferredReassignmentAllowed = true;
+              }
+            }
+            break;
+          } finally {
+            refreshedRelease();
           }
-          break;
         }
         keyPool.markRateLimited(candidate.account, Math.min(context.config.keyCooldownMs, 10_000));
         if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && candidate.account.accountId === preferredAffinity.accountId) {

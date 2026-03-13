@@ -3719,7 +3719,7 @@ test("rejects invalid ollama num_ctx values", async () => {
   );
 });
 
-test("serves native /api/tags from the upstream ollama endpoint", async () => {
+test("serves native /api/tags from the local model catalog without an upstream request", async () => {
   let observedPath = "";
   await withProxyApp(
     {
@@ -3746,7 +3746,7 @@ test("serves native /api/tags from the upstream ollama endpoint", async () => {
   );
 });
 
-test("proxies native /api/chat through the upstream ollama chat endpoint", async () => {
+test("bridges native /api/chat requests through the OpenAI-compatible upstream chat endpoint", async () => {
   let observedPath = "";
   let observedBody: unknown;
 
