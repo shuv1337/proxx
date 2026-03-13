@@ -1,0 +1,45 @@
+{
+  "featureId": "factory-oauth-routes",
+  "reviewedAt": "2026-03-13T10:15:00.000Z",
+  "commitId": "b80b877",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, well-structured implementation that faithfully follows the OpenAiOAuthManager pattern. The FactoryOAuthManager class in factory-oauth.ts implements both device flow (WorkOS device authorization + authenticate endpoints) and browser flow (authorization code exchange via WorkOS). The ui-routes.ts integration correctly registers all four endpoints (device/start, device/poll, browser/start, /auth/factory/callback) with proper error handling and credential persistence. The max_output_tokens fix in provider-strategy.ts is a one-liner that matches the existing OpenAiResponsesProviderStrategy pattern exactly. The code is well-typed, uses dependency injection for testability (fetchFn, now), implements proper state management with TTL-based pruning, caching, and in-flight deduplication. 18 comprehensive tests cover both flows end-to-end, error cases, caching, state pruning, and the provider-strategy fix.",
+    "issues": [
+      {
+        "file": "src/lib/factory-oauth.ts",
+        "line": 10,
+        "severity": "non_blocking",
+        "description": "WorkOS client ID is hardcoded as a constant (WORKOS_CLIENT_ID = 'client_01HNM792M5G5G1A2THWPXKFMXB'). This is consistent with how OPENAI_CLIENT_ID is handled in openai-oauth.ts, so it follows the established pattern — but if the client ID ever needs to change, it would require a code change. Not a blocker since the OpenAI equivalent does the same."
+      },
+      {
+        "file": "src/lib/factory-oauth.ts",
+        "line": 247,
+        "severity": "non_blocking",
+        "description": "In slow_down handling (line 247-255), the spread operator creates a new DeviceFlowState object but the old reference in the in-flight closure still points to the original object. This is safe because inFlight is set to undefined in the new object and the .finally() handler looks up the map entry by key, so it won't corrupt state. However, the pattern is slightly different from how other fields are mutated directly (e.g., nextPollAt on line 238). Minor inconsistency but functionally correct."
+      },
+      {
+        "file": "src/lib/ui-routes.ts",
+        "line": 792,
+        "severity": "non_blocking",
+        "description": "Factory device poll route passes undefined for chatgptAccountId and omits subject/planType in the upsertOAuthAccount call (line 792-799). This is correct — Factory OAuth tokens don't have ChatGPT-specific fields. The undefined values align with the optional parameters in the credential store interface."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Worker researched WorkOS device flow and browser flow API endpoints via web search during implementation (multiple WebSearch and FetchUrl calls to workos.com docs and blog). The factory-api.md library file documents WorkOS refresh token endpoint and client ID, but does NOT document the device authorization endpoint (POST /user_management/authorize/device) or the browser authorization flow (GET /user_management/authorize with code flow). Future workers implementing similar OAuth features would benefit from having these documented.",
+      "evidence": "Transcript shows WebSearch calls for 'WorkOS OAuth device flow API' and 'WorkOS user_management authorize browser flow'. factory-api.md only documents: 'POST https://api.workos.com/user_management/authenticate' for refresh, but not device/authorize or browser authorize endpoints."
+    },
+    {
+      "area": "conventions",
+      "observation": "The Factory OAuth callback route is registered at /auth/factory/callback (different path prefix than the OpenAI one at /auth/callback and /api/ui/credentials/openai/oauth/browser/callback). This is a reasonable choice but the emerging pattern of auth callback routes is not documented anywhere. AGENTS.md doesn't mention the unauthenticated route allowlist in app.ts that must be updated for new callback paths.",
+      "evidence": "app.ts line 501-502 has the allowUnauthenticatedRoute check. Worker correctly added /auth/factory/callback to this list. But there's no documented convention about this requirement."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The factory-oauth-routes feature is well-implemented and passes review. The FactoryOAuthManager faithfully mirrors the OpenAiOAuthManager's architecture with WorkOS-specific adaptations for both device and browser flows. All four required endpoints are registered with proper error handling, credential persistence, and the unauthenticated route allowlist is correctly updated. The max_output_tokens fix is clean and matches the existing pattern. 18 tests provide comprehensive coverage. No blocking issues found — only minor non-blocking observations about hardcoded client ID (following existing pattern) and a slight inconsistency in slow_down handling. Two shared state observations noted for potential knowledge base improvements."
+}

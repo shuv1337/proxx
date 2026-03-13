@@ -20,7 +20,20 @@ Reference for workers implementing Factory.ai provider integration. Source: `/tm
 2. `~/.factory/auth.v2.file` + `~/.factory/auth.v2.key` — AES-256-GCM encrypted OAuth tokens
 3. `~/.factory/auth.json` — legacy plaintext JSON with `access_token` and `refresh_token`
 
-**WorkOS OAuth refresh:**
+**WorkOS OAuth flows:**
+
+*Device flow:*
+- Start: `POST https://api.workos.com/user_management/authorize/device` with body `client_id=client_01HNM792M5G5G1A2THWPXKFMXB&grant_type=urn:ietf:params:oauth:grant-type:device_code`
+- Returns: `{ device_code, user_code, verification_uri, verification_uri_complete, interval, expires_in }`
+- Poll: `POST https://api.workos.com/user_management/authenticate` with body `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={code}&client_id=...`
+- Returns: `{ access_token, refresh_token }` on success, error `authorization_pending` or `slow_down` or `expired_token` while waiting
+
+*Browser flow:*
+- Authorize URL: `https://api.workos.com/user_management/authorize?response_type=code&client_id=client_01HNM792M5G5G1A2THWPXKFMXB&redirect_uri={callbackUrl}&provider=authkit&state={state}`
+- Callback: exchange code via `POST https://api.workos.com/user_management/authenticate` with body `grant_type=authorization_code&code={code}&client_id=...`
+- Returns: `{ access_token, refresh_token, user: { id, email, ... } }`
+
+*Token refresh:*
 - Endpoint: `POST https://api.workos.com/user_management/authenticate`
 - Body: `grant_type=refresh_token&refresh_token={token}&client_id=client_01HNM792M5G5G1A2THWPXKFMXB` (URL-encoded form)
 - Refresh window: 30 minutes before JWT expiry
