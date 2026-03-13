@@ -63,3 +63,12 @@ Testing surface, tools, and resource cost classification.
 **Command**: `cd /home/shuv/repos/proxx && pnpm test`
 **Note**: This builds the project first, then runs tests. Takes ~30 seconds.
 **Isolation**: Runs in its own process, no interference with other validators.
+
+## Factory.ai Provider Testing Notes
+
+- **Factory API key**: Available via `FACTORY_API_KEY` env var (sourced from `~/.env` in init.sh, also added to project .env)
+- **Factory OAuth tokens**: `~/.factory/auth.v2.file` + `~/.factory/auth.v2.key` (encrypted)
+- **Factory models**: Use `factory/claude-opus-4-5` prefix for explicit Factory routing, or ensure Factory is the primary/fallback provider
+- **Credentials page**: Factory provider section appears automatically when Factory credentials exist — no hardcoded provider list
+- **API testing**: Use `curl -H "Authorization: Bearer $PROXY_AUTH_TOKEN" http://127.0.0.1:8789/v1/models` to verify Factory models appear
+- **Dashboard**: Factory accounts should appear in provider pool status section with health indicators
