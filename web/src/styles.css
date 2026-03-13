@@ -1103,6 +1103,28 @@ button:disabled {
   max-width: 540px;
 }
 
+.credentials-form-shortcuts {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.credentials-shortcut-button {
+  font-size: 0.8rem;
+  padding: 4px 12px;
+  border-radius: 8px;
+  background: rgba(130, 220, 174, 0.15);
+  border: 1px solid rgba(130, 220, 174, 0.4);
+  color: var(--text-main);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.credentials-shortcut-button:hover {
+  background: rgba(130, 220, 174, 0.25);
+  border-color: rgba(130, 220, 174, 0.6);
+}
+
 .credentials-oauth-row,
 .credentials-log-filters,
 .tools-model-form {
