@@ -250,7 +250,7 @@ function providerUsesOpenAiChatCompletions(providerId: string): boolean {
   return normalized === "openrouter" || normalized === "requesty";
 }
 
-interface UsageCounts {
+export interface UsageCounts {
   readonly promptTokens?: number;
   readonly completionTokens?: number;
   readonly totalTokens?: number;
@@ -517,13 +517,183 @@ function usageCountsForMode(mode: UpstreamMode, upstreamJson: unknown, routedMod
   return usageCountsFromUpstreamJson(upstreamJson, routedModel);
 }
 
+/**
+ * Parse SSE stream text to extract token usage counts.
+ *
+ * Handles four distinct SSE wire formats:
+ *
+ * 1. **OpenAI Chat Completions** (`chat_completions`, `openai_chat_completions`):
+ *    The final chunk before `data: [DONE]` carries a `usage` object with
+ *    `prompt_tokens`, `completion_tokens`, `total_tokens` when the request
+ *    included `stream_options.include_usage: true`.
+ *
+ * 2. **Anthropic Messages** (`messages`):
+ *    `message_start` contains `message.usage.input_tokens`;
+ *    `message_delta` contains `usage.output_tokens`.
+ *
+ * 3. **OpenAI Responses** (`responses`, `openai_responses`):
+ *    `response.completed` events embed the full response object which includes
+ *    `usage.input_tokens`, `usage.output_tokens`, `usage.total_tokens`.
+ *
+ * 4. **Ollama** (`ollama_chat`, `local_ollama_chat`):
+ *    Newline-delimited JSON; the final object with `done: true` carries
+ *    `prompt_eval_count` and `eval_count`.
+ *
+ * Returns `{}` (no usage) when the stream does not contain usage data — this
+ * is the expected path for providers that omit it.  Never throws.
+ */
+export function extractUsageCountsFromSseText(
+  streamText: string,
+  mode: UpstreamMode,
+  routedModel: string,
+): UsageCounts {
+  try {
+    if (mode === "messages") {
+      return extractUsageFromAnthropicSse(streamText);
+    }
+
+    if (mode === "responses" || mode === "openai_responses") {
+      return extractUsageFromResponsesSse(streamText, routedModel);
+    }
+
+    if (mode === "ollama_chat" || mode === "local_ollama_chat") {
+      return extractUsageFromOllamaNdjson(streamText);
+    }
+
+    // chat_completions / openai_chat_completions — standard OpenAI SSE
+    return extractUsageFromOpenAiChatSse(streamText);
+  } catch {
+    return {};
+  }
+}
+
+function extractUsageFromOpenAiChatSse(streamText: string): UsageCounts {
+  const lines = streamText.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith("data: ") || line === "data: [DONE]") {
+      continue;
+    }
+
+    try {
+      const payload: unknown = JSON.parse(line.slice(6));
+      if (!isRecord(payload)) continue;
+      const usage = isRecord(payload["usage"]) ? payload["usage"] : null;
+      if (!usage) continue;
+
+      const promptTokens = asNumber(usage["prompt_tokens"]);
+      const completionTokens = asNumber(usage["completion_tokens"]);
+      const totalTokens = asNumber(usage["total_tokens"])
+        ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined);
+
+      if (promptTokens !== undefined || completionTokens !== undefined) {
+        return { promptTokens, completionTokens, totalTokens };
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return {};
+}
+
+function extractUsageFromAnthropicSse(streamText: string): UsageCounts {
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
+
+  const chunks = streamText.split("\n\n");
+  for (const chunk of chunks) {
+    const dataLine = chunk.split("\n").find((l) => l.startsWith("data: "));
+    if (!dataLine) continue;
+
+    try {
+      const payload: unknown = JSON.parse(dataLine.slice(6));
+      if (!isRecord(payload)) continue;
+      const type = asString(payload["type"]);
+
+      if (type === "message_start") {
+        const message = isRecord(payload["message"]) ? payload["message"] : null;
+        const usage = message && isRecord(message["usage"]) ? message["usage"] : null;
+        if (usage) {
+          inputTokens = asNumber(usage["input_tokens"]) ?? inputTokens;
+        }
+      }
+
+      if (type === "message_delta") {
+        const usage = isRecord(payload["usage"]) ? payload["usage"] : null;
+        if (usage) {
+          outputTokens = asNumber(usage["output_tokens"]) ?? outputTokens;
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  if (inputTokens === undefined && outputTokens === undefined) {
+    return {};
+  }
+
+  const promptTokens = inputTokens;
+  const completionTokens = outputTokens ?? 0;
+  const totalTokens = (promptTokens ?? 0) + completionTokens;
+
+  return { promptTokens, completionTokens, totalTokens };
+}
+
+function extractUsageFromResponsesSse(streamText: string, routedModel: string): UsageCounts {
+  try {
+    const chatCompletion = responsesEventStreamToChatCompletion(streamText, routedModel);
+    return usageCountsFromCompletion(chatCompletion);
+  } catch {
+    return {};
+  }
+}
+
+function extractUsageFromOllamaNdjson(streamText: string): UsageCounts {
+  const lines = streamText.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    try {
+      const payload: unknown = JSON.parse(line);
+      if (!isRecord(payload)) continue;
+      if (payload["done"] !== true) continue;
+
+      const promptTokens = asNumber(payload["prompt_eval_count"]);
+      const completionTokens = asNumber(payload["eval_count"]);
+      if (promptTokens !== undefined && completionTokens !== undefined) {
+        return {
+          promptTokens,
+          completionTokens,
+          totalTokens: promptTokens + completionTokens,
+        };
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return {};
+}
+
 async function extractUsageCounts(
   response: Response,
   mode: UpstreamMode,
   routedModel: string,
 ): Promise<UsageCounts> {
-  if (!response.ok || responseIsEventStream(response)) {
+  if (!response.ok) {
     return {};
+  }
+
+  if (responseIsEventStream(response)) {
+    try {
+      const streamText = await response.clone().text();
+      return extractUsageCountsFromSseText(streamText, mode, routedModel);
+    } catch {
+      return {};
+    }
   }
 
   try {
