@@ -68,7 +68,15 @@ import { getTelemetry } from "./telemetry/otel.js";
 
 function joinUrl(baseUrl: string, path: string): string {
   const normalizedBase = baseUrl.replace(/\/+$/, "");
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  let normalizedPath = path.startsWith("/") ? path : `/${path}`;
+
+  // Avoid accidental `/v1/v1/...` joins when the provider base URL already includes the OpenAI version segment.
+  const baseLower = normalizedBase.toLowerCase();
+  const pathLower = normalizedPath.toLowerCase();
+  if (pathLower.startsWith("/v1/") && baseLower.endsWith("/v1")) {
+    normalizedPath = normalizedPath.slice(3);
+  }
+
   return `${normalizedBase}${normalizedPath}`;
 }
 
@@ -123,6 +131,8 @@ type UpstreamMode =
   | "responses"
   | "responses_passthrough"
   | "openai_responses_passthrough"
+  | "images"
+  | "gemini_chat"
   | "messages"
   | "openai_chat_completions"
   | "openai_responses"
@@ -144,6 +154,7 @@ interface StrategyRequestContext {
   readonly needsReasoningTrace: boolean;
   readonly upstreamAttemptTimeoutMs: number;
   readonly responsesPassthrough?: boolean;
+  readonly imagesPassthrough?: boolean;
 }
 
 interface ProviderAttemptContext extends StrategyRequestContext {
@@ -197,6 +208,7 @@ interface PreferredAffinity {
 
 export interface ProviderAvailabilitySummary {
   readonly sawConfiguredProvider: boolean;
+  readonly prompt_cache_key?: string;
 }
 
 interface BuildPayloadResult {
@@ -293,10 +305,76 @@ function providerUsesOpenAiChatCompletions(providerId: string): boolean {
   return normalized === "openrouter" || normalized === "requesty";
 }
 
+function planCostTier(planType: string | undefined): number {
+  const normalized = (planType ?? "").trim().toLowerCase();
+  switch (normalized) {
+    case "free":
+      return 0;
+    case "team":
+      return 1;
+    case "plus":
+    case "pro":
+    case "business":
+    case "enterprise":
+      return 2;
+    case "unknown":
+    default:
+      return 1;
+  }
+}
+
+function reorderAccountsForLatency(
+  requestLogStore: RequestLogStore,
+  providerId: string,
+  accounts: readonly ProviderCredential[],
+  routedModel: string,
+  upstreamMode: string,
+): ProviderCredential[] {
+  const TTFT_GRACE_MS = 120;
+  const WINDOW_SIZE = 6;
+
+  const window = [...accounts.slice(0, WINDOW_SIZE)];
+  const tail = accounts.slice(window.length);
+
+  const perfFor = (account: ProviderCredential) => {
+    return requestLogStore.getPerfSummary(providerId, account.accountId, routedModel, upstreamMode);
+  };
+
+  window.sort((a, b) => {
+    const perfA = perfFor(a);
+    const perfB = perfFor(b);
+
+    const ttftA = perfA?.ewmaTtftMs ?? Number.POSITIVE_INFINITY;
+    const ttftB = perfB?.ewmaTtftMs ?? Number.POSITIVE_INFINITY;
+
+    const ttftDelta = Math.abs(ttftA - ttftB);
+    if (ttftDelta > TTFT_GRACE_MS) {
+      return ttftA - ttftB;
+    }
+
+    const costA = planCostTier(a.planType);
+    const costB = planCostTier(b.planType);
+    if (costA !== costB) {
+      return costA - costB;
+    }
+
+    const tpsA = perfA?.ewmaTps ?? Number.NEGATIVE_INFINITY;
+    const tpsB = perfB?.ewmaTps ?? Number.NEGATIVE_INFINITY;
+    if (tpsA !== tpsB) {
+      return tpsB - tpsA;
+    }
+
+    return 0;
+  });
+
+  return [...window, ...tail];
+}
+
 export interface UsageCounts {
   readonly promptTokens?: number;
   readonly completionTokens?: number;
   readonly totalTokens?: number;
+  readonly cachedPromptTokens?: number;
 }
 
 interface ProviderStrategy {
@@ -402,6 +480,22 @@ function buildRequestBodyForUpstream(context: StrategyRequestContext): Record<st
   return upstreamBody;
 }
 
+function ensureChatCompletionsUsageInStream(upstreamBody: Record<string, unknown>): void {
+  if (upstreamBody["stream"] !== true) {
+    return;
+  }
+
+  const existing = isRecord(upstreamBody["stream_options"]) ? upstreamBody["stream_options"] : null;
+  if (existing) {
+    if (existing["include_usage"] === undefined) {
+      existing["include_usage"] = true;
+    }
+    return;
+  }
+
+  upstreamBody["stream_options"] = { include_usage: true };
+}
+
 function readHeaderValue(headers: IncomingHttpHeaders, name: string): string | undefined {
   const value = headers[name.toLowerCase()];
   if (Array.isArray(value)) {
@@ -478,6 +572,7 @@ function recordAttempt(
     readonly promptTokens?: number;
     readonly completionTokens?: number;
     readonly totalTokens?: number;
+    readonly promptCacheKeyUsed?: boolean;
     readonly error?: string;
   },
   mode: UpstreamMode
@@ -496,10 +591,33 @@ function recordAttempt(
     promptTokens: values.promptTokens,
     completionTokens: values.completionTokens,
     totalTokens: values.totalTokens,
+    promptCacheKeyUsed: values.promptCacheKeyUsed,
+    ttftMs: values.latencyMs,
     error: values.error
   });
 
   return entry.id;
+}
+
+function cachedPromptTokensFromUsage(usage: Record<string, unknown>): number | undefined {
+  const direct = asNumber(usage["cached_tokens"]);
+  if (direct !== undefined) {
+    return direct;
+  }
+
+  const promptDetails = isRecord(usage["prompt_tokens_details"]) ? usage["prompt_tokens_details"] : null;
+  const cachedFromPromptDetails = promptDetails ? asNumber(promptDetails["cached_tokens"]) : undefined;
+  if (cachedFromPromptDetails !== undefined) {
+    return cachedFromPromptDetails;
+  }
+
+  const inputDetails = isRecord(usage["input_tokens_details"]) ? usage["input_tokens_details"] : null;
+  const cachedFromInputDetails = inputDetails ? asNumber(inputDetails["cached_tokens"]) : undefined;
+  if (cachedFromInputDetails !== undefined) {
+    return cachedFromInputDetails;
+  }
+
+  return undefined;
 }
 
 function usageCountsFromCompletion(completion: Record<string, unknown>): UsageCounts {
@@ -512,11 +630,13 @@ function usageCountsFromCompletion(completion: Record<string, unknown>): UsageCo
   const completionTokens = asNumber(usage["completion_tokens"]);
   const totalTokens = asNumber(usage["total_tokens"])
     ?? (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined);
+  const cachedPromptTokens = cachedPromptTokensFromUsage(usage);
 
   return {
     promptTokens,
     completionTokens,
     totalTokens,
+    cachedPromptTokens,
   };
 }
 
@@ -754,16 +874,33 @@ async function updateUsageCountsFromResponse(
   mode: UpstreamMode,
   routedModel: string,
 ): Promise<void> {
+  const readStartedAt = Date.now();
   const usageCounts = await extractUsageCounts(response, mode, routedModel);
+  const readDurationMs = Math.max(0, Date.now() - readStartedAt);
+
   if (
     usageCounts.promptTokens === undefined
     && usageCounts.completionTokens === undefined
     && usageCounts.totalTokens === undefined
+    && usageCounts.cachedPromptTokens === undefined
   ) {
     return;
   }
 
-  requestLogStore.update(entryId, usageCounts);
+  const isStream = responseIsEventStream(response);
+  const tps = isStream
+    && typeof usageCounts.completionTokens === "number"
+    && Number.isFinite(usageCounts.completionTokens)
+    && usageCounts.completionTokens > 0
+    && readDurationMs > 0
+      ? usageCounts.completionTokens / (readDurationMs / 1000)
+      : undefined;
+
+  requestLogStore.update(entryId, {
+    ...usageCounts,
+    cacheHit: typeof usageCounts.cachedPromptTokens === "number" && usageCounts.cachedPromptTokens > 0,
+    tps,
+  });
 }
 
 abstract class BaseProviderStrategy implements ProviderStrategy {
@@ -1320,7 +1457,6 @@ class OpenAiResponsesProviderStrategy extends TransformedJsonProviderStrategy {
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload = chatRequestToResponsesRequest(buildRequestBodyForUpstream(context));
     applyRequestedServiceTier(upstreamPayload, context);
-    delete upstreamPayload["max_output_tokens"];
     upstreamPayload["store"] = false;
     upstreamPayload["stream"] = true;
     return buildPayloadResult(upstreamPayload, context);
@@ -1422,7 +1558,9 @@ class OpenAiChatCompletionsProviderStrategy extends BaseProviderStrategy {
   }
 
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
-    return buildPayloadResult(buildRequestBodyForUpstream(context), context);
+    const upstreamPayload = buildRequestBodyForUpstream(context);
+    ensureChatCompletionsUsageInStream(upstreamPayload);
+    return buildPayloadResult(upstreamPayload, context);
   }
 }
 
@@ -1440,7 +1578,29 @@ class ChatCompletionsProviderStrategy extends BaseProviderStrategy {
   }
 
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
-    return buildPayloadResult(buildRequestBodyForUpstream(context), context);
+    const upstreamPayload = buildRequestBodyForUpstream(context);
+    ensureChatCompletionsUsageInStream(upstreamPayload);
+    return buildPayloadResult(upstreamPayload, context);
+  }
+}
+
+class ImagesGenerationsPassthroughStrategy extends BaseProviderStrategy {
+  public readonly mode = "images" as const;
+
+  public readonly isLocal = false;
+
+  public matches(context: StrategyRequestContext): boolean {
+    return context.imagesPassthrough === true;
+  }
+
+  public getUpstreamPath(context: StrategyRequestContext): string {
+    return context.config.imagesGenerationsPath;
+  }
+
+  public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
+    const upstreamPayload: Record<string, unknown> = { ...context.requestBody };
+    delete upstreamPayload["open_hax"];
+    return buildPayloadResult(upstreamPayload, context);
   }
 }
 
@@ -1460,7 +1620,6 @@ class ResponsesPassthroughStrategy extends BaseProviderStrategy {
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload: Record<string, unknown> = { ...context.requestBody };
     delete upstreamPayload["open_hax"];
-    delete upstreamPayload["max_output_tokens"];
     return buildPayloadResult(upstreamPayload, context);
   }
 
@@ -1536,7 +1695,6 @@ class OpenAiResponsesPassthroughStrategy extends BaseProviderStrategy {
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload: Record<string, unknown> = { ...context.requestBody };
     delete upstreamPayload["open_hax"];
-    delete upstreamPayload["max_output_tokens"];
     upstreamPayload["store"] = false;
     upstreamPayload["stream"] = true;
     if (upstreamPayload["instructions"] === undefined) {
@@ -1720,7 +1878,6 @@ class FactoryResponsesProviderStrategy extends TransformedJsonProviderStrategy {
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload = chatRequestToResponsesRequest(buildRequestBodyForUpstream(context));
     applyRequestedServiceTier(upstreamPayload, context);
-    delete upstreamPayload["max_output_tokens"];
     upstreamPayload["store"] = false;
     upstreamPayload["stream"] = true;
     return buildPayloadResult(upstreamPayload, context);
@@ -1827,7 +1984,185 @@ class FactoryChatCompletionsProviderStrategy extends BaseProviderStrategy {
   }
 }
 
+function openAiContentToText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .map((part) => {
+      if (typeof part === "string") {
+        return part;
+      }
+
+      if (isRecord(part) && typeof part.text === "string") {
+        return part.text;
+      }
+
+      return "";
+    })
+    .join("");
+}
+
+class GeminiChatProviderStrategy extends TransformedJsonProviderStrategy {
+  public readonly mode = "gemini_chat" as const;
+
+  public readonly isLocal = false;
+
+  public matches(_context: StrategyRequestContext): boolean {
+    // Selected explicitly in selectRemoteProviderStrategyForRoute for providerId === "gemini".
+    return false;
+  }
+
+  public getUpstreamPath(context: StrategyRequestContext): string {
+    const model = encodeURIComponent(context.routedModel);
+    const accountToken = (context as ProviderAttemptContext | undefined)?.account?.token ?? "";
+    const key = encodeURIComponent(accountToken);
+    return `/models/${model}:generateContent?key=${key}`;
+  }
+
+  public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
+    const upstreamBody = buildRequestBodyForUpstream(context);
+    const rawMessages = Array.isArray(upstreamBody.messages) ? upstreamBody.messages : [];
+
+    const contents: Array<{ readonly role: string; readonly parts: Array<{ readonly text: string }> }> = [];
+    const systemParts: string[] = [];
+
+    for (const message of rawMessages) {
+      if (!isRecord(message)) {
+        continue;
+      }
+
+      const role = asString(message.role)?.trim().toLowerCase() ?? "";
+      const text = openAiContentToText(message.content).trim();
+      if (text.length === 0) {
+        continue;
+      }
+
+      if (role === "system") {
+        systemParts.push(text);
+        continue;
+      }
+
+      if (role === "user") {
+        contents.push({ role: "user", parts: [{ text }] });
+        continue;
+      }
+
+      if (role === "assistant") {
+        contents.push({ role: "model", parts: [{ text }] });
+        continue;
+      }
+    }
+
+    const generationConfig: Record<string, unknown> = {};
+    const temperature = asNumber(upstreamBody.temperature);
+    if (temperature !== undefined) {
+      generationConfig.temperature = temperature;
+    }
+    const maxTokens = asNumber(upstreamBody.max_output_tokens)
+      ?? asNumber(upstreamBody.max_tokens)
+      ?? asNumber(upstreamBody.maxTokens);
+    if (maxTokens !== undefined) {
+      generationConfig.maxOutputTokens = maxTokens;
+    }
+
+    const payload: Record<string, unknown> = {
+      contents,
+    };
+
+    if (systemParts.length > 0) {
+      payload.systemInstruction = {
+        parts: [{ text: systemParts.join("\n\n") }],
+      };
+    }
+
+    if (Object.keys(generationConfig).length > 0) {
+      payload.generationConfig = generationConfig;
+    }
+
+    return buildPayloadResult(payload, context);
+  }
+
+  public override applyRequestHeaders(headers: Headers, _context: ProviderAttemptContext, _payload: Record<string, unknown>): void {
+    // Gemini uses API key auth (query param) rather than OpenAI bearer headers.
+    headers.delete("authorization");
+    headers.set("content-type", "application/json");
+  }
+
+  protected convertResponseToChatCompletion(upstreamJson: unknown, routedModel: string): Record<string, unknown> {
+    const created = Math.floor(Date.now() / 1000);
+
+    if (!isRecord(upstreamJson)) {
+      return {
+        id: `chatcmpl-gemini-${created}`,
+        object: "chat.completion",
+        created,
+        model: routedModel,
+        choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }],
+      };
+    }
+
+    const candidates = Array.isArray(upstreamJson.candidates) ? upstreamJson.candidates : [];
+    const firstCandidate = candidates.length > 0 && isRecord(candidates[0]) ? candidates[0] : undefined;
+    const candidateContent = firstCandidate && isRecord(firstCandidate.content) ? firstCandidate.content : undefined;
+    const parts = candidateContent && Array.isArray(candidateContent.parts) ? candidateContent.parts : [];
+    const text = parts
+      .map((part) => (isRecord(part) ? asString(part.text) ?? "" : ""))
+      .join("")
+      .trim();
+
+    const finishReasonRaw = firstCandidate ? asString(firstCandidate.finishReason) ?? asString(firstCandidate.finish_reason) : undefined;
+    const finishReason = finishReasonRaw
+      ? finishReasonRaw.toLowerCase() === "stop"
+        ? "stop"
+        : finishReasonRaw.toLowerCase() === "max_tokens"
+          ? "length"
+          : "stop"
+      : "stop";
+
+    const usageMetadata = isRecord(upstreamJson.usageMetadata) ? upstreamJson.usageMetadata : null;
+    const promptTokens = usageMetadata ? asNumber(usageMetadata.promptTokenCount) : undefined;
+    const completionTokens = usageMetadata ? asNumber(usageMetadata.candidatesTokenCount) : undefined;
+    const totalTokens = usageMetadata ? asNumber(usageMetadata.totalTokenCount) : undefined;
+
+    return {
+      id: `chatcmpl-gemini-${created}`,
+      object: "chat.completion",
+      created,
+      model: routedModel,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: text },
+          finish_reason: finishReason,
+        },
+      ],
+      ...(promptTokens !== undefined || completionTokens !== undefined || totalTokens !== undefined
+        ? {
+            usage: {
+              ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}),
+              ...(completionTokens !== undefined ? { completion_tokens: completionTokens } : {}),
+              ...(totalTokens !== undefined
+                ? { total_tokens: totalTokens }
+                : promptTokens !== undefined && completionTokens !== undefined
+                  ? { total_tokens: promptTokens + completionTokens }
+                  : {}),
+            },
+          }
+        : {}),
+    };
+  }
+}
+
+const GEMINI_CHAT_STRATEGY = new GeminiChatProviderStrategy();
+
 const PROVIDER_STRATEGIES: readonly ProviderStrategy[] = [
+  new ImagesGenerationsPassthroughStrategy(),
   new OpenAiResponsesPassthroughStrategy(),
   new ResponsesPassthroughStrategy(),
   new OllamaProviderStrategy(),
@@ -1916,11 +2251,49 @@ export function buildResponsesPassthroughContext(
   return { strategy, context };
 }
 
+export function buildImagesPassthroughContext(
+  config: ProxyConfig,
+  clientHeaders: IncomingHttpHeaders,
+  requestBody: Record<string, unknown>,
+  model: string,
+): {
+  readonly strategy: ProviderStrategy;
+  readonly context: StrategyRequestContext;
+} {
+  const routingState = resolveRequestRoutingState(config, model);
+
+  const context: StrategyRequestContext = {
+    config,
+    clientHeaders,
+    requestBody,
+    requestedModelInput: model,
+    routingModelInput: model,
+    routedModel: routingState.routedModel,
+    explicitOllama: false,
+    openAiPrefixed: routingState.openAiPrefixed,
+    factoryPrefixed: routingState.factoryPrefixed,
+    localOllama: false,
+    clientWantsStream: false,
+    needsReasoningTrace: false,
+    upstreamAttemptTimeoutMs: config.requestTimeoutMs,
+    imagesPassthrough: true,
+  };
+
+  const strategy = PROVIDER_STRATEGIES.find((entry) => entry.matches(context)) ?? PROVIDER_STRATEGIES[PROVIDER_STRATEGIES.length - 1]!;
+  return { strategy, context };
+}
+
 function selectRemoteProviderStrategyForRoute(
   context: StrategyRequestContext,
   providerId: string,
 ): ProviderStrategy {
-  if (providerUsesOpenAiChatCompletions(providerId)) {
+  const normalizedProviderId = providerId.trim().toLowerCase();
+
+  if (normalizedProviderId === "gemini" && context.responsesPassthrough !== true && context.imagesPassthrough !== true) {
+    return GEMINI_CHAT_STRATEGY;
+  }
+
+  if (providerUsesOpenAiChatCompletions(providerId) && context.responsesPassthrough !== true && context.imagesPassthrough !== true) {
     // Use the generic ChatCompletionsProviderStrategy (the one that always matches),
     // not a Factory-specific strategy which would produce Factory endpoint paths.
     return PROVIDER_STRATEGIES.find((entry) => entry.mode === "chat_completions" && entry.matches({ ...context, factoryPrefixed: false, openAiPrefixed: false, explicitOllama: false, localOllama: false }))
@@ -2018,7 +2391,12 @@ export async function executeLocalStrategy(
       serviceTierSource: payload.serviceTierSource
     }, strategy.mode);
 
-    await updateUsageCountsFromResponse(requestLogStore, requestLogEntryId, upstreamResponse, strategy.mode, context.routedModel);
+    const usagePromise = updateUsageCountsFromResponse(requestLogStore, requestLogEntryId, upstreamResponse, strategy.mode, context.routedModel);
+    if (responseIsEventStream(upstreamResponse) && context.clientWantsStream) {
+      void usagePromise;
+    } else {
+      await usagePromise;
+    }
 
     await strategy.handleLocalAttempt(reply, upstreamResponse, {
       ...context,
@@ -2072,6 +2450,8 @@ export async function executeProviderFallback(
       continue;
     }
 
+    routeAccounts = reorderAccountsForLatency(requestLogStore, route.providerId, routeAccounts, context.routedModel, strategy.mode);
+
     const routeCandidates = routeAccounts.map((account) => ({
       providerId: route.providerId,
       baseUrl: route.baseUrl,
@@ -2091,18 +2471,38 @@ export async function executeProviderFallback(
 
   const allCandidates = providerRoutes.flatMap((route) => candidatesByProvider[route.providerId] ?? []);
 
-  let candidates: typeof allCandidates;
-  if (healthStore) {
-    const withScores = allCandidates.map((candidate) => ({
-      candidate,
-      score: healthStore.getHealthScore(candidate.providerId, candidate.account.accountId, candidate.account.expiresAt),
-    }));
-    withScores.sort((a, b) => b.score - a.score);
-    const sorted = withScores.map((item) => item.candidate);
-    candidates = reorderCandidatesForAffinity(sorted, preferredAffinity);
-  } else {
-    candidates = reorderCandidatesForAffinity(allCandidates, preferredAffinity);
-  }
+  const providerIndex = new Map(providerRoutes.map((route, index) => [route.providerId, index] as const));
+
+  const sortedCandidates = [...allCandidates].sort((left, right) => {
+    const idxLeft = providerIndex.get(left.providerId) ?? Number.MAX_SAFE_INTEGER;
+    const idxRight = providerIndex.get(right.providerId) ?? Number.MAX_SAFE_INTEGER;
+
+    // Respect provider ordering first (already policy-ordered), with an escape hatch
+    // for significant TTFT differences.
+    if (idxLeft !== idxRight) {
+      const perfLeft = requestLogStore.getPerfSummary(left.providerId, left.account.accountId, context.routedModel, strategy.mode);
+      const perfRight = requestLogStore.getPerfSummary(right.providerId, right.account.accountId, context.routedModel, strategy.mode);
+
+      const ttftLeft = perfLeft?.ewmaTtftMs;
+      const ttftRight = perfRight?.ewmaTtftMs;
+      if (
+        typeof ttftLeft === "number" && Number.isFinite(ttftLeft)
+        && typeof ttftRight === "number" && Number.isFinite(ttftRight)
+      ) {
+        const ttftDelta = Math.abs(ttftLeft - ttftRight);
+        if (ttftDelta > 120) {
+          return ttftLeft - ttftRight;
+        }
+      }
+
+      return idxLeft - idxRight;
+    }
+
+    // Within a provider, preserve upstream ordering (policy + account ordering + latency window).
+    return 0;
+  });
+
+  const candidates = reorderCandidatesForAffinity(sortedCandidates, preferredAffinity);
 
   if (candidates.length === 0) {
     return {
@@ -2197,10 +2597,16 @@ export async function executeProviderFallback(
         status: upstreamResponse.status,
         latencyMs,
         serviceTier: candidatePayload.serviceTier,
-        serviceTierSource: candidatePayload.serviceTierSource
+        serviceTierSource: candidatePayload.serviceTierSource,
+        promptCacheKeyUsed: Boolean(promptCacheKey),
       }, candidateStrategy.mode);
 
-      await updateUsageCountsFromResponse(requestLogStore, requestLogEntryId, upstreamResponse, candidateStrategy.mode, context.routedModel);
+      const usagePromise = updateUsageCountsFromResponse(requestLogStore, requestLogEntryId, upstreamResponse, candidateStrategy.mode, context.routedModel);
+      if (responseIsEventStream(upstreamResponse) && context.clientWantsStream) {
+        void usagePromise;
+      } else {
+        await usagePromise;
+      }
 
       if (isRateLimitResponse(upstreamResponse)) {
         accumulator.sawRateLimit = true;
@@ -2296,7 +2702,7 @@ export async function executeProviderFallback(
         };
       }
 
-      if (healthStore && !upstreamResponse.ok) {
+      if (healthStore && !upstreamResponse.ok && upstreamResponse.status >= 500) {
         healthStore.recordFailure(candidate.account, upstreamResponse.status);
       }
 
@@ -2336,9 +2742,15 @@ export async function executeProviderFallback(
               status: refreshedResponse.status,
               latencyMs: refreshedLatencyMs,
               serviceTier: candidatePayload.serviceTier,
-              serviceTierSource: candidatePayload.serviceTierSource
+              serviceTierSource: candidatePayload.serviceTierSource,
+              promptCacheKeyUsed: Boolean(promptCacheKey),
             }, candidateStrategy.mode);
-            await updateUsageCountsFromResponse(requestLogStore, refreshedLogId, refreshedResponse, candidateStrategy.mode, context.routedModel);
+            const usagePromise = updateUsageCountsFromResponse(requestLogStore, refreshedLogId, refreshedResponse, candidateStrategy.mode, context.routedModel);
+            if (responseIsEventStream(refreshedResponse) && context.clientWantsStream) {
+              void usagePromise;
+            } else {
+              await usagePromise;
+            }
             if (isRateLimitResponse(refreshedResponse)) {
               accumulator.sawRateLimit = true;
               keyPool.markRateLimited(refreshedCredential, parseRetryAfterMs(refreshedResponse.headers.get("retry-after")));
@@ -2410,7 +2822,8 @@ export async function inspectProviderAvailability(
   keyPool: {
     getStatus(providerId: string): Promise<{ readonly totalAccounts: number }>;
   },
-  providerRoutes: readonly ProviderRoute[]
+  providerRoutes: readonly ProviderRoute[],
+  promptCacheKey?: string,
 ): Promise<ProviderAvailabilitySummary> {
   let sawConfiguredProvider = false;
 
@@ -2425,5 +2838,5 @@ export async function inspectProviderAvailability(
     }
   }
 
-  return { sawConfiguredProvider };
+  return { sawConfiguredProvider, prompt_cache_key: promptCacheKey };
 }

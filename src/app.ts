@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 
 import { DEFAULT_MODELS, type ProxyConfig } from "./lib/config.js";
@@ -20,6 +22,7 @@ import {
   buildProviderRoutes,
   dedupeModelIds,
   filterResponsesApiRoutes,
+  filterImagesApiRoutes,
   minMsUntilAnyProviderKeyReady,
   parseModelIdsFromCatalogPayload,
   resolveProviderRoutesForModel,
@@ -28,6 +31,7 @@ import {
 } from "./lib/provider-routing.js";
 import {
   buildResponsesPassthroughContext,
+  buildImagesPassthroughContext,
   executeLocalStrategy,
   executeProviderFallback,
   inspectProviderAvailability,
@@ -113,9 +117,107 @@ function extractPromptCacheKey(body: Record<string, unknown>): string | undefine
   return normalized && normalized.length > 0 ? normalized : undefined;
 }
 
+function hashPromptCacheKey(promptCacheKey: string): string {
+  const trimmed = promptCacheKey.trim();
+  if (trimmed.length === 0) {
+    return "<REDACTED>";
+  }
+
+  const digest = createHash("sha256").update(trimmed).digest("hex").slice(0, 12);
+  return `sha256:${digest}`;
+}
+
+function summarizeResponsesRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+  const summary: Record<string, unknown> = {};
+
+  if (typeof body.model === "string" && body.model.trim().length > 0) {
+    summary.model = body.model;
+  }
+
+  if (typeof body.stream === "boolean") {
+    summary.stream = body.stream;
+  }
+
+  if (typeof body.max_output_tokens === "number" && Number.isFinite(body.max_output_tokens)) {
+    summary.max_output_tokens = body.max_output_tokens;
+  }
+
+  const input = body.input;
+  if (typeof input === "string") {
+    summary.input = { kind: "text", length: input.length, preview: input.slice(0, 200) };
+    return summary;
+  }
+
+  if (!Array.isArray(input)) {
+    summary.input = { kind: typeof input };
+    return summary;
+  }
+
+  let textChars = 0;
+  let firstTextPreview: string | undefined;
+  let imageCount = 0;
+
+  for (const item of input) {
+    if (!isRecord(item)) {
+      continue;
+    }
+
+    const content = item.content;
+    if (typeof content === "string") {
+      textChars += content.length;
+      if (firstTextPreview === undefined && content.length > 0) {
+        firstTextPreview = content.slice(0, 200);
+      }
+      continue;
+    }
+
+    if (!Array.isArray(content)) {
+      continue;
+    }
+
+    for (const part of content) {
+      if (!isRecord(part)) {
+        continue;
+      }
+
+      const partType = typeof part.type === "string" ? part.type.toLowerCase() : "";
+      const text = typeof part.text === "string" ? part.text : undefined;
+
+      if (text) {
+        textChars += text.length;
+        if (firstTextPreview === undefined && text.length > 0) {
+          firstTextPreview = text.slice(0, 200);
+        }
+      }
+
+      if (partType.includes("image") || part.image_url !== undefined || part.imageUrl !== undefined) {
+        imageCount += 1;
+      }
+    }
+  }
+
+  summary.input = {
+    kind: "structured",
+    itemCount: input.length,
+    textChars,
+    textPreview: firstTextPreview,
+    imageCount,
+  };
+
+  return summary;
+}
+
 function joinUrl(baseUrl: string, path: string): string {
   const normalizedBase = baseUrl.replace(/\/+$/, "");
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  let normalizedPath = path.startsWith("/") ? path : `/${path}`;
+
+  // Avoid accidental `/v1/v1/...` joins when the provider base URL already includes the OpenAI version segment.
+  const baseLower = normalizedBase.toLowerCase();
+  const pathLower = normalizedPath.toLowerCase();
+  if (pathLower.startsWith("/v1/") && baseLower.endsWith("/v1")) {
+    normalizedPath = normalizedPath.slice(3);
+  }
+
   return `${normalizedBase}${normalizedPath}`;
 }
 
@@ -144,6 +246,7 @@ function copyInjectedResponseHeaders(reply: FastifyReply, headers: Record<string
 const SUPPORTED_V1_ENDPOINTS = [
   "POST /v1/chat/completions",
   "POST /v1/responses",
+  "POST /v1/images/generations",
   "POST /v1/embeddings",
   "GET /v1/models",
   "GET /v1/models/:model"
@@ -279,6 +382,8 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         expiresAt: newTokens.expiresAt,
       };
 
+      keyPool.updateAccountCredential(credential.providerId, credential, newCredential);
+
       await runtimeCredentialStore.upsertOAuthAccount(
         credential.providerId,
         newCredential.accountId,
@@ -287,8 +392,6 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         newCredential.expiresAt,
         newCredential.chatgptAccountId,
       );
-
-      keyPool.updateAccountCredential(credential.providerId, credential, newCredential);
 
       app.log.info({
         accountId: newCredential.accountId,
@@ -567,6 +670,10 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   });
 
   app.options("/v1/responses", async (_request, reply) => {
+    reply.code(204).send();
+  });
+
+  app.options("/v1/images/generations", async (_request, reply) => {
     reply.code(204).send();
   });
 
@@ -883,11 +990,14 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     }
 
     const requestBody = request.body;
-    app.log.info({ 
-      responsesBody: JSON.stringify(requestBody).slice(0, 5000),
-      hasPromptCacheKey: !!requestBody.prompt_cache_key || !!requestBody.promptCacheKey,
-      promptCacheKey: requestBody.prompt_cache_key || requestBody.promptCacheKey
+    const promptCacheKey = extractPromptCacheKey(requestBody);
+
+    app.log.info({
+      responsesBody: summarizeResponsesRequestBody(requestBody),
+      hasPromptCacheKey: Boolean(promptCacheKey),
+      promptCacheKey: promptCacheKey ? hashPromptCacheKey(promptCacheKey) : undefined,
     }, "responses passthrough: incoming body");
+
     const model = typeof requestBody.model === "string" ? requestBody.model : "";
     if (model.length === 0) {
       sendOpenAiError(reply, 400, "Missing required field: model", "invalid_request_error", "missing_model");
@@ -905,9 +1015,17 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
-    let providerRoutes = filterResponsesApiRoutes(
-      buildProviderRoutes(config, context.openAiPrefixed, true)
-    );
+    let providerRoutes: ProviderRoute[];
+    if (context.factoryPrefixed) {
+      const factoryBaseUrl = config.upstreamProviderBaseUrls["factory"] ?? "https://api.factory.ai";
+      providerRoutes = config.disabledProviderIds.includes("factory")
+        ? []
+        : [{ providerId: "factory", baseUrl: factoryBaseUrl }];
+    } else {
+      providerRoutes = buildProviderRoutes(config, context.openAiPrefixed, true);
+    }
+
+    providerRoutes = filterResponsesApiRoutes(providerRoutes, config.openaiProviderId);
     providerRoutes = orderProviderRoutesByPolicy(policyEngine, providerRoutes, context.requestedModelInput, context.routedModel, {
       openAiPrefixed: context.openAiPrefixed,
       localOllama: false,
@@ -918,7 +1036,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       await ensureFreshAccounts(providerId);
     }
 
-    const availability = await inspectProviderAvailability(keyPool, providerRoutes);
+    const availability = await inspectProviderAvailability(keyPool, providerRoutes, promptCacheKey);
     const execution = await executeProviderFallback(
       strategy,
       reply,
@@ -928,7 +1046,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       providerRoutes,
       context,
       payload,
-      undefined,
+      availability.prompt_cache_key,
       refreshExpiredOAuthAccount,
       policyEngine,
       accountHealthStore,
@@ -1019,6 +1137,143 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       : "Upstream rejected the request with no successful fallback.";
 
     app.log.error({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode, sawRequestError: summary.sawRequestError }, "responses passthrough: all upstream attempts exhausted");
+    sendOpenAiError(reply, 502, message, "server_error", "upstream_unavailable");
+  });
+
+  app.post<{ Body: Record<string, unknown> }>("/v1/images/generations", async (request, reply) => {
+    if (!isRecord(request.body)) {
+      sendOpenAiError(reply, 400, "Request body must be a JSON object", "invalid_request_error", "invalid_body");
+      return;
+    }
+
+    const requestBody = request.body;
+    const model = typeof requestBody.model === "string" ? requestBody.model : "";
+    if (model.length === 0) {
+      sendOpenAiError(reply, 400, "Missing required field: model", "invalid_request_error", "missing_model");
+      return;
+    }
+
+    const { strategy, context } = buildImagesPassthroughContext(config, request.headers, requestBody, model);
+    reply.header("x-open-hax-upstream-mode", strategy.mode);
+
+    let payload: ReturnType<typeof strategy.buildPayload>;
+    try {
+      payload = strategy.buildPayload(context);
+    } catch (error) {
+      sendOpenAiError(reply, 400, toErrorMessage(error), "invalid_request_error", "invalid_provider_options");
+      return;
+    }
+
+    let providerRoutes = filterImagesApiRoutes(
+      buildProviderRoutes(config, context.openAiPrefixed, true),
+      config.openaiProviderId,
+    );
+    providerRoutes = orderProviderRoutesByPolicy(policyEngine, providerRoutes, context.requestedModelInput, context.routedModel, {
+      openAiPrefixed: context.openAiPrefixed,
+      localOllama: false,
+      explicitOllama: false,
+    });
+
+    for (const providerId of new Set(providerRoutes.map((route) => route.providerId))) {
+      await ensureFreshAccounts(providerId);
+    }
+
+    const availability = await inspectProviderAvailability(keyPool, providerRoutes);
+    const execution = await executeProviderFallback(
+      strategy,
+      reply,
+      requestLogStore,
+      promptAffinityStore,
+      keyPool,
+      providerRoutes,
+      context,
+      payload,
+      undefined,
+      refreshExpiredOAuthAccount,
+      policyEngine,
+      accountHealthStore,
+    );
+
+    if (execution.handled) {
+      return;
+    }
+
+    if (execution.candidateCount === 0) {
+      const retryInMs = await minMsUntilAnyProviderKeyReady(keyPool, providerRoutes);
+      if (retryInMs > 0) {
+        reply.header("retry-after", Math.ceil(retryInMs / 1000));
+      }
+
+      if (!availability.sawConfiguredProvider) {
+        sendOpenAiError(reply, 500, "Proxy is missing upstream account configuration for image generation providers", "server_error", "keys_unavailable");
+        return;
+      }
+
+      sendOpenAiError(
+        reply,
+        429,
+        "All upstream accounts are currently rate-limited. Retry after the cooldown window.",
+        "rate_limit_error",
+        "all_keys_rate_limited",
+      );
+      return;
+    }
+
+    const { summary } = execution;
+
+    if (summary.sawUpstreamInvalidRequest) {
+      sendOpenAiError(
+        reply,
+        400,
+        "No upstream account accepted the image generation payload. Check model availability and request parameters.",
+        "invalid_request_error",
+        "upstream_rejected_request",
+      );
+      return;
+    }
+
+    if (summary.sawRateLimit) {
+      const retryInMs = await minMsUntilAnyProviderKeyReady(keyPool, providerRoutes);
+      if (retryInMs > 0) {
+        reply.header("retry-after", Math.ceil(retryInMs / 1000));
+      }
+
+      sendOpenAiError(
+        reply,
+        429,
+        "No upstream account succeeded. Accounts may be rate-limited, quota-exhausted, or have outstanding balances.",
+        "rate_limit_error",
+        "no_available_key",
+      );
+      return;
+    }
+
+    if (summary.sawUpstreamServerError) {
+      sendOpenAiError(
+        reply,
+        502,
+        "Upstream returned transient server errors across all available accounts.",
+        "server_error",
+        "upstream_server_error",
+      );
+      return;
+    }
+
+    if (summary.sawModelNotFound && !summary.sawRequestError) {
+      sendOpenAiError(
+        reply,
+        404,
+        `Model not found across available upstream providers: ${context.routedModel}`,
+        "invalid_request_error",
+        "model_not_found",
+      );
+      return;
+    }
+
+    const message = summary.sawRequestError
+      ? "All upstream attempts failed due to network/transport errors."
+      : "Upstream rejected the request with no successful fallback.";
+
     sendOpenAiError(reply, 502, message, "server_error", "upstream_unavailable");
   });
 

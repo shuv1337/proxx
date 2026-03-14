@@ -364,12 +364,38 @@ export function resolveProviderRoutesForModel(
   return [...ollamaRoutes, ...nonOllamaRoutes];
 }
 
-const RESPONSES_API_CAPABLE_PROVIDERS = new Set(["vivgrid", "openai"]);
+const RESPONSES_API_CAPABLE_PROVIDERS = new Set(["vivgrid", "openai", "factory", "requesty"]);
 
-export function providerSupportsResponsesApi(providerId: string): boolean {
-  return RESPONSES_API_CAPABLE_PROVIDERS.has(providerId.trim().toLowerCase());
+export function providerSupportsResponsesApi(providerId: string, openAiProviderId?: string): boolean {
+  const normalized = providerId.trim().toLowerCase();
+  if (RESPONSES_API_CAPABLE_PROVIDERS.has(normalized)) {
+    return true;
+  }
+
+  const normalizedOpenAiProviderId = openAiProviderId?.trim().toLowerCase();
+  return typeof normalizedOpenAiProviderId === "string"
+    && normalizedOpenAiProviderId.length > 0
+    && normalized === normalizedOpenAiProviderId;
 }
 
-export function filterResponsesApiRoutes(routes: readonly ProviderRoute[]): ProviderRoute[] {
-  return routes.filter((route) => providerSupportsResponsesApi(route.providerId));
+export function filterResponsesApiRoutes(routes: readonly ProviderRoute[], openAiProviderId?: string): ProviderRoute[] {
+  return routes.filter((route) => providerSupportsResponsesApi(route.providerId, openAiProviderId));
+}
+
+const IMAGES_API_CAPABLE_PROVIDERS = new Set(["vivgrid", "openai", "factory", "requesty"]);
+
+export function providerSupportsImagesApi(providerId: string, openAiProviderId?: string): boolean {
+  const normalized = providerId.trim().toLowerCase();
+  if (IMAGES_API_CAPABLE_PROVIDERS.has(normalized)) {
+    return true;
+  }
+
+  const normalizedOpenAiProviderId = openAiProviderId?.trim().toLowerCase();
+  return typeof normalizedOpenAiProviderId === "string"
+    && normalizedOpenAiProviderId.length > 0
+    && normalized === normalizedOpenAiProviderId;
+}
+
+export function filterImagesApiRoutes(routes: readonly ProviderRoute[], openAiProviderId?: string): ProviderRoute[] {
+  return routes.filter((route) => providerSupportsImagesApi(route.providerId, openAiProviderId));
 }

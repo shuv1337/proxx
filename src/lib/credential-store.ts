@@ -360,6 +360,7 @@ function toPersistedJson(normalized: NormalizedCredentials): Record<string, unkn
 export class CredentialStore {
   private cachedCredentials: NormalizedCredentials | null = null;
   private dirty = false;
+  private writeEpoch = 0;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushInFlight: Promise<void> | null = null;
   private static readonly FLUSH_DEBOUNCE_MS = 500;
@@ -496,6 +497,7 @@ export class CredentialStore {
 
     normalized.providers[id] = provider;
     await this.writeNormalized(normalized);
+    await this.flush();
   }
 
   public async upsertOAuthAccount(
@@ -536,6 +538,7 @@ export class CredentialStore {
 
     normalized.providers[id] = provider;
     await this.writeNormalized(normalized);
+    await this.flush();
   }
 
   public async removeAccount(providerId: string, accountId: string): Promise<boolean> {
@@ -558,6 +561,7 @@ export class CredentialStore {
     }
 
     await this.writeNormalized(normalized);
+    await this.flush();
     return true;
   }
 
@@ -580,6 +584,7 @@ export class CredentialStore {
   private async writeNormalized(normalized: NormalizedCredentials): Promise<void> {
     this.cachedCredentials = normalized;
     this.dirty = true;
+    this.writeEpoch += 1;
     this.scheduleDebouncedFlush();
   }
 
@@ -587,13 +592,17 @@ export class CredentialStore {
     if (this.flushTimer) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
-      void this.flushToDisk();
+      void this.flushToDisk().catch(() => {});
     }, CredentialStore.FLUSH_DEBOUNCE_MS);
   }
 
   private async flushToDisk(): Promise<void> {
-    if (!this.dirty || !this.cachedCredentials) return;
+    if (!this.cachedCredentials) {
+      return;
+    }
 
+    // If a write is already in-flight, always await it first so callers
+    // observe bind/write errors and so we serialize writes.
     if (this.flushInFlight) {
       await this.flushInFlight;
       if (this.dirty) {
@@ -602,15 +611,33 @@ export class CredentialStore {
       return;
     }
 
-    this.dirty = false;
+    if (!this.dirty) {
+      return;
+    }
+
+    const epoch = this.writeEpoch;
     const payload = toPersistedJson(this.cachedCredentials);
-    this.flushInFlight = (async () => {
+
+    const writePromise = (async () => {
       await mkdir(dirname(this.filePath), { recursive: true });
       await writeFile(this.filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    })().finally(() => {
-      this.flushInFlight = null;
-    });
+    })();
 
-    await this.flushInFlight;
+    this.flushInFlight = writePromise;
+
+    try {
+      await writePromise;
+    } finally {
+      this.flushInFlight = null;
+    }
+
+    // Only clear dirty if no new writes occurred during this flush.
+    if (this.writeEpoch === epoch) {
+      this.dirty = false;
+    }
+
+    if (this.dirty) {
+      return this.flushToDisk();
+    }
   }
 }
