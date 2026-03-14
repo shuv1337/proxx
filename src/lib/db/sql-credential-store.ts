@@ -252,20 +252,25 @@ export class SqlCredentialStore {
   }
 
   public async removeAccount(providerId: string, accountId: string): Promise<boolean> {
-    const deleted = await this.sql.unsafe<Array<{ readonly id: string }>>(
-      "DELETE FROM accounts WHERE id = $1 AND provider_id = $2 RETURNING id",
-      [accountId, providerId],
-    );
+    const deleted = await this.sql.begin(async (tx) => {
+      const deleted = await tx.unsafe<Array<{ readonly id: string }>>(
+        "DELETE FROM accounts WHERE id = $1 AND provider_id = $2 RETURNING id",
+        [accountId, providerId],
+      );
 
-    await this.sql.unsafe(
-      "DELETE FROM account_cooldown WHERE provider_id = $1 AND account_id = $2",
-      [providerId, accountId],
-    );
-    await this.sql.unsafe(
-      "DELETE FROM account_health WHERE provider_id = $1 AND account_id = $2",
-      [providerId, accountId],
-    );
+      await tx.unsafe(
+        "DELETE FROM account_cooldown WHERE provider_id = $1 AND account_id = $2",
+        [providerId, accountId],
+      );
+      await tx.unsafe(
+        "DELETE FROM account_health WHERE provider_id = $1 AND account_id = $2",
+        [providerId, accountId],
+      );
 
+      return deleted;
+    });
+
+    // Only mutate in-memory state after the transaction commits.
     this.cooldowns.delete(`${providerId}:${accountId}`);
     return deleted.length > 0;
   }

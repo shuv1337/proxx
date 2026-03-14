@@ -168,24 +168,13 @@ export async function seedFromJsonValue(
 
   let accountCount = 0;
   for (const [providerId, { authType, accounts }] of providers) {
-    if (skipExistingProviders) {
-      const existingProviders = await sql<{ id: string }[]>`
-        SELECT id FROM providers WHERE id = ${providerId} LIMIT 1
-      `;
-      if (existingProviders.length === 0) {
-        await sql`
-          INSERT INTO providers (id, auth_type)
-          VALUES (${providerId}, ${authType})
-          ON CONFLICT (id) DO UPDATE SET auth_type = EXCLUDED.auth_type
-        `;
-      }
-    } else {
-      await sql`
-        INSERT INTO providers (id, auth_type)
-        VALUES (${providerId}, ${authType})
-        ON CONFLICT (id) DO UPDATE SET auth_type = EXCLUDED.auth_type
-      `;
-    }
+    // Always upsert the provider row so metadata (e.g. auth_type) stays in sync,
+    // even when skipExistingProviders is enabled.
+    await sql`
+      INSERT INTO providers (id, auth_type)
+      VALUES (${providerId}, ${authType})
+      ON CONFLICT (id) DO UPDATE SET auth_type = EXCLUDED.auth_type
+    `;
 
     for (const account of accounts) {
       await sql`

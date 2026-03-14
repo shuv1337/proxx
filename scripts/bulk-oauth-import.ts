@@ -6,6 +6,10 @@ import { ImapFlow } from "imapflow";
 
 const PROXY_BASE = process.env.PROXY_BASE_URL ?? "http://localhost:8789";
 const PROXY_TOKEN = process.env.PROXY_AUTH_TOKEN ?? "";
+const OPENAI_OAUTH_CALLBACK_PORT = Number(process.env.OPENAI_OAUTH_CALLBACK_PORT ?? "1455");
+const CALLBACK_PORT = Number.isFinite(OPENAI_OAUTH_CALLBACK_PORT) && OPENAI_OAUTH_CALLBACK_PORT > 0
+  ? OPENAI_OAUTH_CALLBACK_PORT
+  : 1455;
 const CSV_PATH = process.env.CSV_PATH ?? resolve(process.cwd(), "../../passwords.csv");
 const DELAY_MS = Number(process.env.DELAY_MS ?? "4000");
 const HEADLESS = process.env.HEADLESS === "true";
@@ -28,7 +32,7 @@ interface CsvRow {
 
 function parseCsv(path: string): CsvRow[] {
   const raw = readFileSync(path, "utf8");
-  const lines = raw.split("\n").filter((line) => line.trim().length > 0);
+  const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
   if (lines.length < 2) return [];
 
   const rows: CsvRow[] = [];
@@ -116,8 +120,26 @@ async function fetchVerificationCode(
   const lock = await client.getMailboxLock("INBOX");
   try {
     const existingUids = await client.search({ subject: "ChatGPT code" });
-    if (existingUids.length > 0) {
-      baselineMaxUid = Math.max(...existingUids);
+
+    // Set our UID baseline to the newest message that is strictly before sinceDate.
+    // This avoids skipping a verification email that arrives during the initial snapshot.
+    for (let i = existingUids.length - 1; i >= 0; i--) {
+      const uid = existingUids[i] ?? 0;
+      if (uid <= 0) continue;
+
+      const meta = await client.fetchOne(uid, { internalDate: true });
+      const internalDateRaw = (meta as { internalDate?: unknown } | undefined)?.internalDate;
+      const internalDate = internalDateRaw instanceof Date
+        ? internalDateRaw
+        : typeof internalDateRaw === "string" || typeof internalDateRaw === "number"
+          ? new Date(internalDateRaw)
+          : undefined;
+      const internalDateMs = internalDate?.getTime();
+
+      if (typeof internalDateMs === "number" && Number.isFinite(internalDateMs) && internalDateMs < sinceDate.getTime()) {
+        baselineMaxUid = uid;
+        break;
+      }
     }
   } finally {
     lock.release();
@@ -132,10 +154,24 @@ async function fetchVerificationCode(
       try {
         const uids = await client.search({ subject: "ChatGPT code" });
 
-        // only check UIDs newer than our baseline
-        const newUids = uids.filter((uid) => uid > baselineMaxUid && !checkedUids.has(uid));
+        const candidateUids = uids.filter((uid) => !checkedUids.has(uid));
 
-        for (const uid of newUids.reverse()) {
+        for (const uid of candidateUids.reverse()) {
+          if (uid <= baselineMaxUid) {
+            const meta = await client.fetchOne(uid, { internalDate: true });
+            const internalDateRaw = (meta as { internalDate?: unknown } | undefined)?.internalDate;
+            const internalDate = internalDateRaw instanceof Date
+              ? internalDateRaw
+              : typeof internalDateRaw === "string" || typeof internalDateRaw === "number"
+                ? new Date(internalDateRaw)
+                : undefined;
+            const internalDateMs = internalDate?.getTime();
+
+            if (typeof internalDateMs === "number" && Number.isFinite(internalDateMs) && internalDateMs < sinceDate.getTime()) {
+              break;
+            }
+          }
+
           checkedUids.add(uid);
 
           const msg = await client.fetchOne(uid, { source: true });
@@ -216,18 +252,20 @@ async function waitForCloudflare(page: Page, timeout: number = 30000): Promise<v
   throw new Error("Cloudflare challenge did not resolve");
 }
 
-// ── Local callback server on port 1455 ──
+// ── Local callback server on CALLBACK_PORT ──
 
 interface CallbackCapture {
   code: string;
   state: string;
 }
 
-function startCallbackServer(): { server: Server; getCapture: () => CallbackCapture; reset: () => void } {
+async function startCallbackServer(
+  port: number,
+): Promise<{ server: Server; getCapture: () => CallbackCapture; reset: () => void }> {
   let capture: CallbackCapture = { code: "", state: "" };
 
   const server = createServer((req, res) => {
-    const url = new URL(req.url ?? "/", "http://localhost:1455");
+    const url = new URL(req.url ?? "/", `http://localhost:${port}`);
     const code = url.searchParams.get("code") ?? "";
     const state = url.searchParams.get("state") ?? "";
     if (code) {
@@ -237,8 +275,26 @@ function startCallbackServer(): { server: Server; getCapture: () => CallbackCapt
     res.end("<html><body><h1>OAuth callback captured. You can close this tab.</h1></body></html>");
   });
 
-  server.on("error", () => {});
-  server.listen(1455, "127.0.0.1");
+  await new Promise<void>((resolve, reject) => {
+    function cleanup(): void {
+      server.off("error", onError);
+      server.off("listening", onListening);
+    }
+
+    function onError(err: unknown): void {
+      cleanup();
+      reject(err);
+    }
+
+    function onListening(): void {
+      cleanup();
+      resolve();
+    }
+
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, "127.0.0.1");
+  });
 
   return {
     server,
@@ -316,7 +372,7 @@ async function automateOpenAiLogin(
 
   // ── Step 3: Check for errors or email verification ──
   const curUrl = page.url();
-  const bodyText = await page.locator("body").textContent().catch(() => "");
+  const bodyText = (await page.locator("body").textContent().catch(() => null)) ?? "";
 
   if (bodyText.includes("Incorrect email address or password")) {
     throw new Error("Wrong password");
@@ -360,7 +416,7 @@ async function automateOpenAiLogin(
     await screenshot(page, `${label}-after-verify`);
 
     // check for account errors after verification
-    const postVerifyText = await page.locator("body").textContent().catch(() => "");
+    const postVerifyText = (await page.locator("body").textContent().catch(() => null)) ?? "";
     if (postVerifyText.includes("deleted or deactivated") || postVerifyText.includes("do not have an account")) {
       throw new Error("Account deleted or deactivated");
     }
@@ -383,7 +439,7 @@ async function automateOpenAiLogin(
   // ── Step 5: Wait for OAuth callback ──
   const deadline = Date.now() + 30000;
   while (!getCapture().code && Date.now() < deadline) {
-    const bText = await page.locator("body").textContent().catch(() => "");
+    const bText = (await page.locator("body").textContent().catch(() => null)) ?? "";
     if (bText.includes("Incorrect") || bText.includes("invalid code") || bText.includes("expired")) {
       throw new Error(`Verification failed: ${bText.slice(0, 100)}`);
     }
@@ -406,9 +462,13 @@ async function automateOpenAiLogin(
       }
     }
 
-    // check if we landed on localhost:1455 (callback completed)
+    // check if we landed on localhost:<callback-port> (callback completed)
     const curPageUrl = page.url();
-    if (curPageUrl.includes("localhost:1455") || curPageUrl.includes("chrome-error")) {
+    if (
+      curPageUrl.includes(`localhost:${CALLBACK_PORT}`)
+      || curPageUrl.includes(`127.0.0.1:${CALLBACK_PORT}`)
+      || curPageUrl.includes("chrome-error")
+    ) {
       // callback server should have captured it, give it a moment
       await page.waitForTimeout(1000);
       if (getCapture().code) return getCapture();
@@ -486,9 +546,9 @@ async function main(): Promise<void> {
     console.log("IMAP connection OK\n");
   }
 
-  // start local callback server on port 1455 to capture OAuth redirects
-  console.log("Starting callback server on :1455...");
-  const { server: callbackServer, getCapture, reset: resetCapture } = startCallbackServer();
+  // start local callback server to capture OAuth redirects
+  console.log(`Starting callback server on :${CALLBACK_PORT}...`);
+  const { server: callbackServer, getCapture, reset: resetCapture } = await startCallbackServer(CALLBACK_PORT);
 
   const browser = await chromium.launch({
     headless: HEADLESS,

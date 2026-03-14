@@ -207,12 +207,12 @@ interface BuildPayloadResult {
 }
 
 function gptModelRequiresPaidPlan(routedModel: string): boolean {
-  const match = routedModel.match(/^gpt-(\d+)\.(\d+)/);
+  const match = routedModel.match(/^gpt-(\d+)(?:[.-](\d+))?/);
   if (!match) {
     return false;
   }
   const major = parseInt(match[1], 10);
-  const minor = parseInt(match[2], 10);
+  const minor = match[2] ? parseInt(match[2], 10) : 0;
   if (major > 5) {
     return true;
   }

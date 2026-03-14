@@ -1185,6 +1185,11 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
 
   app.addHook("onClose", async () => {
     tokenRefreshManager.stopBackgroundRefresh();
+
+    if (accountHealthStore) {
+      await accountHealthStore.close();
+    }
+
     await requestLogStore.close();
     if (sql) {
       await closeConnection(sql);

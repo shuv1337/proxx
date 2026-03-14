@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -363,10 +364,65 @@ export class CredentialStore {
   private flushInFlight: Promise<void> | null = null;
   private static readonly FLUSH_DEBOUNCE_MS = 500;
 
+  private static processHooksInstalled = false;
+  private static readonly stores = new Set<CredentialStore>();
+
   public constructor(
     private readonly filePath: string,
     private readonly defaultProviderId: string,
-  ) {}
+  ) {
+    CredentialStore.stores.add(this);
+    CredentialStore.installProcessHooks();
+  }
+
+  private static installProcessHooks(): void {
+    if (CredentialStore.processHooksInstalled) {
+      return;
+    }
+
+    CredentialStore.processHooksInstalled = true;
+
+    const flushAll = (): void => {
+      for (const store of CredentialStore.stores) {
+        try {
+          store.flushOnExit();
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    process.once("beforeExit", flushAll);
+    process.once("exit", flushAll);
+    process.once("SIGINT", () => {
+      flushAll();
+      process.exit(130);
+    });
+    process.once("SIGTERM", () => {
+      flushAll();
+      process.exit(143);
+    });
+  }
+
+  public flushOnExit(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+
+    if (!this.dirty || !this.cachedCredentials) {
+      return;
+    }
+
+    try {
+      const payload = toPersistedJson(this.cachedCredentials);
+      mkdirSync(dirname(this.filePath), { recursive: true });
+      writeFileSync(this.filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+      this.dirty = false;
+    } catch {
+      // ignore exit flush errors
+    }
+  }
 
   public async flush(): Promise<void> {
     if (this.flushTimer) {

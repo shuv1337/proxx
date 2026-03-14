@@ -125,6 +125,9 @@ Notes:
 
 - `PROXY_HOST` (default: `127.0.0.1`)
 - `PROXY_PORT` (default: `8789`)
+- `OPENAI_OAUTH_CALLBACK_PORT` (default: `1455`; port used when building the browser OAuth redirect URL)
+- `STREAM_CHUNK_DELAY_MS` (optional; default: `0`; fixed delay added between synthetic SSE chunks)
+- `STREAM_CHUNK_DELAY_MS_MIN` / `STREAM_CHUNK_DELAY_MS_MAX` (optional; default: unset; random delay range between chunks)
 - `UPSTREAM_PROVIDER_ID` (default: `vivgrid`; provider key in `keys.json`)
 - `UPSTREAM_FALLBACK_PROVIDER_IDS` (default: auto `ollama-cloud` when primary is `vivgrid`, or `vivgrid` when primary is `ollama-cloud`; comma-separated)
 - `UPSTREAM_BASE_URL` (default: `https://api.vivgrid.com`)

@@ -144,6 +144,14 @@ const GPT_FREE_BLOCKED_MODELS: readonly string[] = [
   "gpt-5-mini",
 ];
 
+function escapeRegexLiteral(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const GPT_FREE_BLOCKED_MODEL_PATTERN = new RegExp(
+  `^(?:${GPT_FREE_BLOCKED_MODELS.map(escapeRegexLiteral).join("|")})$`,
+);
+
 const PAID_PLAN_WEIGHTS: Record<PlanType, number> = {
   plus: 5,
   pro: 4,
@@ -154,7 +162,7 @@ const PAID_PLAN_WEIGHTS: Record<PlanType, number> = {
   free: 0,
 };
 
-const PAID_PLANS: PlanType[] = ["plus", "pro", "business", "enterprise"];
+const PAID_PLANS: PlanType[] = ["plus", "pro", "business", "enterprise", "team"];
 
 function buildFreeBlockedConstraints(
   models: readonly string[],
@@ -176,13 +184,7 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
     rules: [
       // Paid-only GPT models (free-account blocked — see list above)
       {
-        modelPattern: /^gpt-5\.(3|4)/,
-        requiresPaidPlan: true,
-        preferredProviders: DEFAULT_GPT_PROVIDER_ORDER,
-        accountOrdering: { kind: "custom_weight", weights: PAID_PLAN_WEIGHTS },
-      },
-      {
-        modelPattern: /^gpt-5-mini/,
+        modelPattern: GPT_FREE_BLOCKED_MODEL_PATTERN,
         requiresPaidPlan: true,
         preferredProviders: DEFAULT_GPT_PROVIDER_ORDER,
         accountOrdering: { kind: "custom_weight", weights: PAID_PLAN_WEIGHTS },

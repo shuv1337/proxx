@@ -385,7 +385,7 @@ async function fetchUsagePayload(
   accessToken: string,
   chatgptAccountId: string | undefined,
   fetchFn: typeof fetch,
-): Promise<unknown> {
+): Promise<{ readonly payload: unknown; readonly resolvedChatgptAccountId?: string }> {
   const attempt = async (workspaceId: string | undefined): Promise<{ readonly ok: true; readonly payload: unknown } | { readonly ok: false; readonly status: number; readonly text: string }> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => {
@@ -422,7 +422,7 @@ async function fetchUsagePayload(
 
   const primary = await attempt(chatgptAccountId);
   if (primary.ok) {
-    return primary.payload;
+    return { payload: primary.payload, resolvedChatgptAccountId: chatgptAccountId };
   }
 
   const code = quotaErrorCode(primary.text);
@@ -433,7 +433,7 @@ async function fetchUsagePayload(
   if (shouldRetryWithoutWorkspace) {
     const fallback = await attempt(undefined);
     if (fallback.ok) {
-      return fallback.payload;
+      return { payload: fallback.payload, resolvedChatgptAccountId: undefined };
     }
     throw new Error(quotaErrorMessage(fallback.status, fallback.text));
   }
@@ -498,19 +498,27 @@ async function fetchQuotaForAccount(
       };
     }
 
-    const chatgptAccountId = freshAccount.chatgptAccountId?.trim();
-    const payload = await fetchUsagePayload(accessToken, chatgptAccountId, fetchFn);
+    const rawChatgptAccountId = freshAccount.chatgptAccountId?.trim();
+    const chatgptAccountId = rawChatgptAccountId && rawChatgptAccountId.length > 0 ? rawChatgptAccountId : undefined;
+
+    const usageResult = await fetchUsagePayload(accessToken, chatgptAccountId, fetchFn);
+    const payload = usageResult.payload;
+    const resolvedChatgptAccountId = usageResult.resolvedChatgptAccountId;
+
     const { fiveHour, weekly } = extractQuotaWindows(payload);
     const planType = normalizePlanType(payload, freshAccount.planType);
 
-    if (planType && planType !== freshAccount.planType) {
+    const shouldPersistPlanType = Boolean(planType && planType !== freshAccount.planType);
+    const shouldPersistWorkspace = resolvedChatgptAccountId !== chatgptAccountId;
+
+    if (shouldPersistPlanType || shouldPersistWorkspace) {
       await credentialStore.upsertOAuthAccount(
         providerId,
         freshAccount.id,
         accessToken,
         freshAccount.refreshToken,
         freshAccount.expiresAt,
-        chatgptAccountId,
+        resolvedChatgptAccountId,
         freshAccount.email,
         freshAccount.subject,
         planType,
@@ -519,18 +527,18 @@ async function fetchQuotaForAccount(
       await credentialStore.flush?.();
     }
 
-      return {
-        providerId,
-        accountId: freshAccount.id,
-        displayName: freshAccount.displayName,
-        email: freshAccount.email,
-        planType,
-        chatgptAccountId,
-        status: "ok",
-        fetchedAt,
-        fiveHour,
-        weekly,
-      };
+    return {
+      providerId,
+      accountId: freshAccount.id,
+      displayName: freshAccount.displayName,
+      email: freshAccount.email,
+      planType,
+      chatgptAccountId: resolvedChatgptAccountId,
+      status: "ok",
+      fetchedAt,
+      fiveHour,
+      weekly,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger?.warn?.({ providerId, accountId: account.id, error: message }, "failed to fetch OpenAI quota usage");

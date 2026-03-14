@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 const OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_ISSUER = "https://auth.openai.com";
-const OPENAI_BROWSER_CALLBACK_PORT = "1455";
+const OPENAI_BROWSER_CALLBACK_PORT = (process.env.OPENAI_OAUTH_CALLBACK_PORT ?? "").trim() || "1455";
 
 interface PkceCodes {
   readonly verifier: string;

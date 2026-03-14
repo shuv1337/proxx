@@ -121,8 +121,21 @@ export class AccountHealthStore {
         const health = parseHealthRow(row);
         this.healthByAccount.set(healthKey(health.providerId, health.accountId), health);
       }
-    } catch {
-      // Table may not exist yet, will be created by migrations
+    } catch (e) {
+      const code = typeof e === "object" && e !== null && "code" in e
+        ? (e as { readonly code?: unknown }).code
+        : undefined;
+
+      // Ignore "table not found" (migrations may not have run yet).
+      if (code === "42P01") {
+        // account_health does not exist
+      } else {
+        console.error("AccountHealthStore.init failed", {
+          query: SELECT_ALL_ACCOUNT_HEALTH,
+          error: e,
+        });
+        throw e;
+      }
     }
 
     this.startFlushTimer();
@@ -253,29 +266,178 @@ export class AccountHealthStore {
 
     const writes = this.pendingWrites.splice(0, this.pendingWrites.length);
 
+    type SuccessAggregate = {
+      providerId: string;
+      accountId: string;
+      count: number;
+      lastSuccessAt: number;
+      lastStatus: number;
+    };
+
+    type FailureAggregate = {
+      providerId: string;
+      accountId: string;
+      count: number;
+      lastFailureAt: number;
+      lastError: string | null;
+      lastStatus: number;
+    };
+
+    const successes = new Map<string, SuccessAggregate>();
+    const failures = new Map<string, FailureAggregate>();
+
+    let lastWriteType: "success" | "failure" = "success";
+    let lastWriteTimestamp = 0;
+
     for (const write of writes) {
-      try {
-        if (write.type === "success") {
-          await this.sql.unsafe(UPSERT_ACCOUNT_HEALTH_SUCCESS, [
-            write.providerId,
-            write.accountId,
-            write.timestamp,
-            write.status,
-            Date.now(),
-          ]);
-        } else {
-          await this.sql.unsafe(UPSERT_ACCOUNT_HEALTH_FAILURE, [
-            write.providerId,
-            write.accountId,
-            write.timestamp,
-            write.error ?? null,
-            write.status,
-            Date.now(),
-          ]);
-        }
-      } catch {
-        // Ignore individual write errors
+      if (write.timestamp >= lastWriteTimestamp) {
+        lastWriteTimestamp = write.timestamp;
+        lastWriteType = write.type;
       }
+
+      const key = healthKey(write.providerId, write.accountId);
+      if (write.type === "success") {
+        const current = successes.get(key);
+        if (current) {
+          current.count += 1;
+          if (write.timestamp >= current.lastSuccessAt) {
+            current.lastSuccessAt = write.timestamp;
+            current.lastStatus = write.status;
+          }
+        } else {
+          successes.set(key, {
+            providerId: write.providerId,
+            accountId: write.accountId,
+            count: 1,
+            lastSuccessAt: write.timestamp,
+            lastStatus: write.status,
+          });
+        }
+      } else {
+        const current = failures.get(key);
+        if (current) {
+          current.count += 1;
+          if (write.timestamp >= current.lastFailureAt) {
+            current.lastFailureAt = write.timestamp;
+            current.lastError = write.error ?? null;
+            current.lastStatus = write.status;
+          }
+        } else {
+          failures.set(key, {
+            providerId: write.providerId,
+            accountId: write.accountId,
+            count: 1,
+            lastFailureAt: write.timestamp,
+            lastError: write.error ?? null,
+            lastStatus: write.status,
+          });
+        }
+      }
+    }
+
+    const aggregatesSuccess = [...successes.values()];
+    const aggregatesFailure = [...failures.values()];
+    const BATCH_SIZE = 200;
+
+    const flushSuccessChunk = async (chunk: readonly SuccessAggregate[]): Promise<void> => {
+      if (chunk.length === 0) return;
+
+      const updatedAt = Date.now();
+      const values: Array<string | number | null> = [];
+      const placeholders: string[] = [];
+
+      for (let i = 0; i < chunk.length; i++) {
+        const row = chunk[i]!;
+        const base = i * 6;
+        placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`);
+        values.push(
+          row.providerId,
+          row.accountId,
+          row.count,
+          row.lastSuccessAt,
+          row.lastStatus,
+          updatedAt,
+        );
+      }
+
+      const query = `
+INSERT INTO account_health (provider_id, account_id, success_count, last_success_at, last_status, updated_at)
+VALUES ${placeholders.join(", ")}
+ON CONFLICT (provider_id, account_id) DO UPDATE SET
+  success_count = account_health.success_count + EXCLUDED.success_count,
+  last_success_at = EXCLUDED.last_success_at,
+  last_status = EXCLUDED.last_status,
+  updated_at = EXCLUDED.updated_at;
+`;
+
+      await this.sql.unsafe(query, values);
+    };
+
+    const flushFailureChunk = async (chunk: readonly FailureAggregate[]): Promise<void> => {
+      if (chunk.length === 0) return;
+
+      const updatedAt = Date.now();
+      const values: Array<string | number | null> = [];
+      const placeholders: string[] = [];
+
+      for (let i = 0; i < chunk.length; i++) {
+        const row = chunk[i]!;
+        const base = i * 7;
+        placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`);
+        values.push(
+          row.providerId,
+          row.accountId,
+          row.count,
+          row.lastFailureAt,
+          row.lastError,
+          row.lastStatus,
+          updatedAt,
+        );
+      }
+
+      const query = `
+INSERT INTO account_health (provider_id, account_id, failure_count, last_failure_at, last_error, last_status, updated_at)
+VALUES ${placeholders.join(", ")}
+ON CONFLICT (provider_id, account_id) DO UPDATE SET
+  failure_count = account_health.failure_count + EXCLUDED.failure_count,
+  last_failure_at = EXCLUDED.last_failure_at,
+  last_error = EXCLUDED.last_error,
+  last_status = EXCLUDED.last_status,
+  updated_at = EXCLUDED.updated_at;
+`;
+
+      await this.sql.unsafe(query, values);
+    };
+
+    const flushSuccesses = async (): Promise<void> => {
+      for (let i = 0; i < aggregatesSuccess.length; i += BATCH_SIZE) {
+        const chunk = aggregatesSuccess.slice(i, i + BATCH_SIZE);
+        try {
+          await flushSuccessChunk(chunk);
+        } catch {
+          // Ignore batch errors
+        }
+      }
+    };
+
+    const flushFailures = async (): Promise<void> => {
+      for (let i = 0; i < aggregatesFailure.length; i += BATCH_SIZE) {
+        const chunk = aggregatesFailure.slice(i, i + BATCH_SIZE);
+        try {
+          await flushFailureChunk(chunk);
+        } catch {
+          // Ignore batch errors
+        }
+      }
+    };
+
+    // Try to preserve the semantics of last_status by flushing the other type first.
+    if (lastWriteType === "success") {
+      await flushFailures();
+      await flushSuccesses();
+    } else {
+      await flushSuccesses();
+      await flushFailures();
     }
   }
 

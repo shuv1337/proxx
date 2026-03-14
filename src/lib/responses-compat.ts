@@ -1,3 +1,5 @@
+import { setTimeout } from "node:timers/promises";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -977,9 +979,46 @@ function chunkTextByWords(text: string, wordsPerChunk: number): string[] {
 }
 
 function sleepMs(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+  return setTimeout(ms);
+}
+
+// Optional streaming throttle for synthetic SSE chunking.
+// Operators can tune/disable this under load.
+// - STREAM_CHUNK_DELAY_MS=<n> sets a fixed per-chunk delay.
+// - STREAM_CHUNK_DELAY_MS_MIN/MAX=<n> sets a random delay range.
+// Defaults to 0ms.
+const STREAM_CHUNK_DELAY_RANGE_MS = (() => {
+  const fixedRaw = process.env.STREAM_CHUNK_DELAY_MS;
+  if (fixedRaw !== undefined) {
+    const fixed = Number(fixedRaw);
+    return Number.isFinite(fixed) && fixed >= 0 ? { min: fixed, max: fixed } : { min: 0, max: 0 };
+  }
+
+  const minRaw = process.env.STREAM_CHUNK_DELAY_MS_MIN;
+  const maxRaw = process.env.STREAM_CHUNK_DELAY_MS_MAX;
+
+  if (minRaw === undefined && maxRaw === undefined) {
+    return { min: 0, max: 0 };
+  }
+
+  const min = Number(minRaw ?? "0");
+  const max = Number(maxRaw ?? minRaw ?? "0");
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max < 0) {
+    return { min: 0, max: 0 };
+  }
+
+  return { min: Math.min(min, max), max: Math.max(min, max) };
+})();
+
+function nextStreamChunkDelayMs(): number {
+  const { min, max } = STREAM_CHUNK_DELAY_RANGE_MS;
+  if (max <= 0) {
+    return 0;
+  }
+  if (min >= max) {
+    return min;
+  }
+  return min + Math.random() * (max - min);
 }
 
 export async function writeInterleavedResponsesSse(
@@ -1027,7 +1066,10 @@ export async function writeInterleavedResponsesSse(
       }
 
       emitChunk(delta, null);
-      await sleepMs(15 + Math.random() * 15);
+      const delayMs = nextStreamChunkDelayMs();
+      if (delayMs > 0) {
+        await sleepMs(delayMs);
+      }
     }
   };
 
@@ -1120,7 +1162,10 @@ export async function writeInterleavedResponsesSse(
 
       emitChunk(delta, null);
       toolCallIndex++;
-      await sleepMs(15 + Math.random() * 15);
+      const delayMs = nextStreamChunkDelayMs();
+      if (delayMs > 0) {
+        await sleepMs(delayMs);
+      }
       continue;
     }
   }
