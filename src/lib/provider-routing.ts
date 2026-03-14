@@ -357,3 +357,13 @@ export function resolveProviderRoutesForModel(
   const nonOllamaRoutes = routes.filter((route) => !providerIdLooksLikeOllama(route.providerId));
   return [...ollamaRoutes, ...nonOllamaRoutes];
 }
+
+const RESPONSES_API_CAPABLE_PROVIDERS = new Set(["vivgrid", "openai"]);
+
+export function providerSupportsResponsesApi(providerId: string): boolean {
+  return RESPONSES_API_CAPABLE_PROVIDERS.has(providerId.trim().toLowerCase());
+}
+
+export function filterResponsesApiRoutes(routes: readonly ProviderRoute[]): ProviderRoute[] {
+  return routes.filter((route) => providerSupportsResponsesApi(route.providerId));
+}

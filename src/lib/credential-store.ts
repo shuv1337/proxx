@@ -59,6 +59,7 @@ export interface CredentialStoreLike {
     expiresAt?: number,
     chatgptAccountId?: string,
   ): Promise<void>;
+  removeAccount?(providerId: string, accountId: string): Promise<boolean>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -352,6 +353,12 @@ function toPersistedJson(normalized: NormalizedCredentials): Record<string, unkn
 }
 
 export class CredentialStore {
+  private cachedCredentials: NormalizedCredentials | null = null;
+  private dirty = false;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private flushInFlight: Promise<void> | null = null;
+  private static readonly FLUSH_DEBOUNCE_MS = 500;
+
   public constructor(
     private readonly filePath: string,
     private readonly defaultProviderId: string,
@@ -486,18 +493,55 @@ export class CredentialStore {
   }
 
   private async readNormalized(): Promise<NormalizedCredentials> {
+    if (this.cachedCredentials) {
+      return this.cachedCredentials;
+    }
+
     try {
       const contents = await readFile(this.filePath, "utf8");
       const parsed: unknown = JSON.parse(contents);
-      return normalizeCredentials(parsed, this.defaultProviderId);
+      const normalized = normalizeCredentials(parsed, this.defaultProviderId);
+      this.cachedCredentials = normalized;
+      return normalized;
     } catch {
       return { providers: {} };
     }
   }
 
   private async writeNormalized(normalized: NormalizedCredentials): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const payload = toPersistedJson(normalized);
-    await writeFile(this.filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    this.cachedCredentials = normalized;
+    this.dirty = true;
+    this.scheduleDebouncedFlush();
+  }
+
+  private scheduleDebouncedFlush(): void {
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flushToDisk();
+    }, CredentialStore.FLUSH_DEBOUNCE_MS);
+  }
+
+  private async flushToDisk(): Promise<void> {
+    if (!this.dirty || !this.cachedCredentials) return;
+
+    if (this.flushInFlight) {
+      await this.flushInFlight;
+      if (this.dirty) {
+        return this.flushToDisk();
+      }
+      return;
+    }
+
+    this.dirty = false;
+    const payload = toPersistedJson(this.cachedCredentials);
+    this.flushInFlight = (async () => {
+      await mkdir(dirname(this.filePath), { recursive: true });
+      await writeFile(this.filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    })().finally(() => {
+      this.flushInFlight = null;
+    });
+
+    await this.flushInFlight;
   }
 }

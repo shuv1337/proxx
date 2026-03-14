@@ -8,6 +8,7 @@ import type { ProviderCredential } from "./key-pool.js";
 import type { RequestLogStore } from "./request-log-store.js";
 import type { PromptAffinityStore } from "./prompt-affinity-store.js";
 import type { PolicyEngine } from "./policy/index.js";
+import type { AccountHealthStore } from "./db/account-health-store.js";
 import { orderAccountsByPolicy } from "./provider-policy.js";
 import {
   buildForwardHeaders,
@@ -23,6 +24,9 @@ import {
   responsesEventStreamToErrorPayload,
   responsesToChatCompletion,
   shouldUseResponsesUpstream,
+  responsesOutputHasReasoning,
+  writeInterleavedResponsesSse,
+  extractTerminalResponseFromEventStream,
 } from "./responses-compat.js";
 import {
   chatRequestToMessagesRequest,
@@ -98,6 +102,8 @@ function reorderCandidatesForAffinity<T extends { readonly providerId: string; r
 type UpstreamMode =
   | "chat_completions"
   | "responses"
+  | "responses_passthrough"
+  | "openai_responses_passthrough"
   | "messages"
   | "openai_chat_completions"
   | "openai_responses"
@@ -117,6 +123,7 @@ interface StrategyRequestContext {
   readonly clientWantsStream: boolean;
   readonly needsReasoningTrace: boolean;
   readonly upstreamAttemptTimeoutMs: number;
+  readonly responsesPassthrough?: boolean;
 }
 
 interface ProviderAttemptContext extends StrategyRequestContext {
@@ -179,6 +186,22 @@ interface BuildPayloadResult {
   readonly serviceTierSource: "fast_mode" | "explicit" | "none";
 }
 
+function gptModelRequiresPaidPlan(routedModel: string): boolean {
+  const match = routedModel.match(/^gpt-(\d+)\.(\d+)/);
+  if (!match) {
+    return false;
+  }
+  const major = parseInt(match[1], 10);
+  const minor = parseInt(match[2], 10);
+  if (major > 5) {
+    return true;
+  }
+  if (major === 5 && minor >= 3) {
+    return true;
+  }
+  return false;
+}
+
 function providerAccountsForRequest(
   accounts: readonly ProviderCredential[],
   providerId: string,
@@ -193,7 +216,7 @@ function providerAccountsForRequest(
     return [...accounts];
   }
 
-  if (routedModel === "gpt-5.4") {
+  if (gptModelRequiresPaidPlan(routedModel)) {
     const stronglySupportedPlans = new Set(["plus", "pro", "business", "enterprise"]);
     const stronglySupportedAccounts = accounts.filter((account) => stronglySupportedPlans.has(account.planType ?? ""));
     const paidAccounts = accounts.filter((account) => account.planType !== "free");
@@ -619,11 +642,10 @@ abstract class BaseProviderStrategy implements ProviderStrategy {
 
     if (upstreamResponse.status === 400 || upstreamResponse.status === 422) {
       try {
-        await upstreamResponse.arrayBuffer();
+        await upstreamResponse.text();
       } catch {
         // Ignore body read failures while failing over.
       }
-
       return {
         kind: "continue",
         requestError: true,
@@ -1015,6 +1037,76 @@ class ResponsesProviderStrategy extends TransformedJsonProviderStrategy {
     return buildPayloadResult(upstreamPayload, context);
   }
 
+  public override async handleProviderAttempt(
+    reply: FastifyReply,
+    upstreamResponse: Response,
+    context: ProviderAttemptContext
+  ): Promise<ProviderAttemptOutcome> {
+    if (!upstreamResponse.ok) {
+      return this.handleStandardProviderAttempt(reply, upstreamResponse, context);
+    }
+
+    let upstreamJson: unknown;
+    try {
+      upstreamJson = await upstreamResponse.json();
+    } catch {
+      return {
+        kind: "continue",
+        requestError: true
+      };
+    }
+
+    if (!isRecord(upstreamJson)) {
+      return {
+        kind: "continue",
+        requestError: true
+      };
+    }
+
+    const chatCompletion = this.convertResponseToChatCompletion(upstreamJson, context.routedModel);
+    if (context.needsReasoningTrace && !chatCompletionHasReasoningContent(chatCompletion) && context.hasMoreCandidates) {
+      return {
+        kind: "continue",
+        requestError: true
+      };
+    }
+
+    reply.header("x-open-hax-upstream-provider", context.providerId);
+
+    if (context.clientWantsStream && responsesOutputHasReasoning(upstreamJson)) {
+      reply.code(200);
+      reply.header("content-type", "text/event-stream; charset=utf-8");
+      reply.header("cache-control", "no-cache");
+      reply.header("x-accel-buffering", "no");
+      reply.hijack();
+      const rawResponse = reply.raw;
+      rawResponse.statusCode = 200;
+      for (const [name, value] of Object.entries(reply.getHeaders())) {
+        if (value !== undefined) {
+          rawResponse.setHeader(name, value as never);
+        }
+      }
+      rawResponse.flushHeaders();
+      await writeInterleavedResponsesSse(upstreamJson, context.routedModel, (data) => rawResponse.write(data));
+      rawResponse.end();
+      return { kind: "handled" };
+    }
+
+    if (context.clientWantsStream) {
+      reply.code(200);
+      reply.header("content-type", "text/event-stream; charset=utf-8");
+      reply.header("cache-control", "no-cache");
+      reply.header("x-accel-buffering", "no");
+      reply.send(chatCompletionToSse(chatCompletion));
+      return { kind: "handled" };
+    }
+
+    reply.code(upstreamResponse.status);
+    reply.header("content-type", "application/json");
+    reply.send(chatCompletion);
+    return { kind: "handled" };
+  }
+
   protected convertResponseToChatCompletion(upstreamJson: unknown, routedModel: string): Record<string, unknown> {
     return responsesToChatCompletion(upstreamJson, routedModel);
   }
@@ -1085,7 +1177,28 @@ class OpenAiResponsesProviderStrategy extends TransformedJsonProviderStrategy {
     }
 
     reply.header("x-open-hax-upstream-provider", context.providerId);
+
     if (context.clientWantsStream) {
+      const terminalResponse = extractTerminalResponseFromEventStream(streamText);
+      if (terminalResponse && responsesOutputHasReasoning(terminalResponse)) {
+        reply.code(200);
+        reply.header("content-type", "text/event-stream; charset=utf-8");
+        reply.header("cache-control", "no-cache");
+        reply.header("x-accel-buffering", "no");
+        reply.hijack();
+        const rawResponse = reply.raw;
+        rawResponse.statusCode = 200;
+        for (const [name, value] of Object.entries(reply.getHeaders())) {
+          if (value !== undefined) {
+            rawResponse.setHeader(name, value as never);
+          }
+        }
+        rawResponse.flushHeaders();
+        await writeInterleavedResponsesSse(terminalResponse, context.routedModel, (data) => rawResponse.write(data));
+        rawResponse.end();
+        return { kind: "handled" };
+      }
+
       reply.code(200);
       reply.header("content-type", "text/event-stream; charset=utf-8");
       reply.header("cache-control", "no-cache");
@@ -1141,7 +1254,211 @@ class ChatCompletionsProviderStrategy extends BaseProviderStrategy {
   }
 }
 
+class ResponsesPassthroughStrategy extends BaseProviderStrategy {
+  public readonly mode = "responses_passthrough" as const;
+
+  public readonly isLocal = false;
+
+  public matches(context: StrategyRequestContext): boolean {
+    return context.responsesPassthrough === true && !context.openAiPrefixed;
+  }
+
+  public getUpstreamPath(context: StrategyRequestContext): string {
+    return context.config.responsesPath;
+  }
+
+  public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
+    const upstreamPayload: Record<string, unknown> = { ...context.requestBody };
+    delete upstreamPayload["open_hax"];
+    delete upstreamPayload["max_output_tokens"];
+    return buildPayloadResult(upstreamPayload, context);
+  }
+
+  public override async handleProviderAttempt(
+    reply: FastifyReply,
+    upstreamResponse: Response,
+    context: ProviderAttemptContext,
+  ): Promise<ProviderAttemptOutcome> {
+    if (!upstreamResponse.ok) {
+      return this.handleStandardProviderAttempt(reply, upstreamResponse, context);
+    }
+
+    const contentType = upstreamResponse.headers.get("content-type") ?? "";
+    const isEventStream = contentType.toLowerCase().includes("text/event-stream");
+
+    reply.header("x-open-hax-upstream-provider", context.providerId);
+    reply.code(upstreamResponse.status);
+    copyUpstreamHeaders(reply, upstreamResponse.headers);
+
+    if (isEventStream) {
+      if (!upstreamResponse.body) {
+        return { kind: "continue", requestError: true };
+      }
+
+      reply.removeHeader("content-length");
+      reply.header("cache-control", "no-cache");
+      reply.header("x-accel-buffering", "no");
+      reply.header("content-type", "text/event-stream; charset=utf-8");
+      reply.hijack();
+      const rawResponse = reply.raw;
+      rawResponse.statusCode = upstreamResponse.status;
+      for (const [name, value] of Object.entries(reply.getHeaders())) {
+        if (value !== undefined) {
+          rawResponse.setHeader(name, value as never);
+        }
+      }
+      rawResponse.flushHeaders();
+      const nodeStream = Readable.fromWeb(upstreamResponse.body as never);
+      nodeStream.on("error", () => {
+        if (!rawResponse.writableEnded) {
+          rawResponse.end();
+        }
+      });
+      nodeStream.pipe(rawResponse);
+      return { kind: "handled" };
+    }
+
+    if (!upstreamResponse.body) {
+      const responseText = await upstreamResponse.text();
+      reply.send(responseText);
+      return { kind: "handled" };
+    }
+
+    const bytes = Buffer.from(await upstreamResponse.arrayBuffer());
+    reply.send(bytes);
+    return { kind: "handled" };
+  }
+}
+
+class OpenAiResponsesPassthroughStrategy extends BaseProviderStrategy {
+  public readonly mode = "openai_responses_passthrough" as const;
+
+  public readonly isLocal = false;
+
+  public matches(context: StrategyRequestContext): boolean {
+    return context.responsesPassthrough === true && context.openAiPrefixed;
+  }
+
+  public getUpstreamPath(context: StrategyRequestContext): string {
+    return context.config.openaiResponsesPath;
+  }
+
+  public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
+    const upstreamPayload: Record<string, unknown> = { ...context.requestBody };
+    delete upstreamPayload["open_hax"];
+    upstreamPayload["store"] = false;
+    upstreamPayload["stream"] = true;
+    if (upstreamPayload["instructions"] === undefined) {
+      upstreamPayload["instructions"] = "";
+    }
+    return buildPayloadResult(upstreamPayload, context);
+  }
+
+  public override async handleProviderAttempt(
+    reply: FastifyReply,
+    upstreamResponse: Response,
+    context: ProviderAttemptContext,
+  ): Promise<ProviderAttemptOutcome> {
+    const contentType = upstreamResponse.headers.get("content-type") ?? "";
+    const looksLikeEventStream = contentType.toLowerCase().includes("text/event-stream")
+      || contentType.length === 0;
+
+    if (!upstreamResponse.ok && !looksLikeEventStream) {
+      return this.handleStandardProviderAttempt(reply, upstreamResponse, context);
+    }
+
+    if (!upstreamResponse.ok) {
+      // For error SSE streams, try to extract the error payload
+      const streamText = await upstreamResponse.text();
+      const upstreamError = responsesEventStreamToErrorPayload(streamText);
+      if (upstreamError) {
+        reply.header("x-open-hax-upstream-provider", context.providerId);
+        reply.code(400);
+        reply.header("content-type", "application/json");
+        reply.send({ error: upstreamError });
+        return { kind: "handled" };
+      }
+
+      return { kind: "continue", requestError: true };
+    }
+
+    // Client wants streaming — pipe SSE through directly
+    if (context.clientWantsStream && looksLikeEventStream) {
+      if (!upstreamResponse.body) {
+        return { kind: "continue", requestError: true };
+      }
+
+      reply.header("x-open-hax-upstream-provider", context.providerId);
+      reply.code(upstreamResponse.status);
+      copyUpstreamHeaders(reply, upstreamResponse.headers);
+      reply.removeHeader("content-length");
+      reply.header("cache-control", "no-cache");
+      reply.header("x-accel-buffering", "no");
+      reply.header("content-type", "text/event-stream; charset=utf-8");
+      reply.hijack();
+      const rawResponse = reply.raw;
+      rawResponse.statusCode = upstreamResponse.status;
+      for (const [name, value] of Object.entries(reply.getHeaders())) {
+        if (value !== undefined) {
+          rawResponse.setHeader(name, value as never);
+        }
+      }
+      rawResponse.flushHeaders();
+      const nodeStream = Readable.fromWeb(upstreamResponse.body as never);
+      nodeStream.on("error", () => {
+        if (!rawResponse.writableEnded) {
+          rawResponse.end();
+        }
+      });
+      nodeStream.pipe(rawResponse);
+      return { kind: "handled" };
+    }
+
+    // Client wants non-streaming but we forced stream=true for chatgpt backend.
+    // Buffer the SSE events and extract the terminal response object.
+    if (looksLikeEventStream) {
+      const streamText = await upstreamResponse.text();
+      const upstreamError = responsesEventStreamToErrorPayload(streamText);
+      if (upstreamError) {
+        reply.header("x-open-hax-upstream-provider", context.providerId);
+        reply.code(400);
+        reply.header("content-type", "application/json");
+        reply.send({ error: upstreamError });
+        return { kind: "handled" };
+      }
+
+      const terminalResponse = extractTerminalResponseFromEventStream(streamText);
+      if (!terminalResponse) {
+        return { kind: "continue", requestError: true };
+      }
+
+      reply.header("x-open-hax-upstream-provider", context.providerId);
+      reply.code(200);
+      reply.header("content-type", "application/json");
+      reply.send(terminalResponse);
+      return { kind: "handled" };
+    }
+
+    // Non-SSE successful response — pass through as-is
+    reply.header("x-open-hax-upstream-provider", context.providerId);
+    reply.code(upstreamResponse.status);
+    copyUpstreamHeaders(reply, upstreamResponse.headers);
+
+    if (!upstreamResponse.body) {
+      const responseText = await upstreamResponse.text();
+      reply.send(responseText);
+      return { kind: "handled" };
+    }
+
+    const bytes = Buffer.from(await upstreamResponse.arrayBuffer());
+    reply.send(bytes);
+    return { kind: "handled" };
+  }
+}
+
 const PROVIDER_STRATEGIES: readonly ProviderStrategy[] = [
+  new OpenAiResponsesPassthroughStrategy(),
+  new ResponsesPassthroughStrategy(),
   new OllamaProviderStrategy(),
   new LocalOllamaProviderStrategy(),
   new OpenAiResponsesProviderStrategy(),
@@ -1181,6 +1498,41 @@ export function selectProviderStrategy(
     clientWantsStream,
     needsReasoningTrace,
     upstreamAttemptTimeoutMs,
+  };
+
+  const strategy = PROVIDER_STRATEGIES.find((entry) => entry.matches(context)) ?? PROVIDER_STRATEGIES[PROVIDER_STRATEGIES.length - 1]!;
+  return { strategy, context };
+}
+
+export function buildResponsesPassthroughContext(
+  config: ProxyConfig,
+  clientHeaders: IncomingHttpHeaders,
+  requestBody: Record<string, unknown>,
+  model: string,
+): {
+  readonly strategy: ProviderStrategy;
+  readonly context: StrategyRequestContext;
+} {
+  const routingState = resolveRequestRoutingState(config, model);
+  const clientWantsStream = requestBody.stream === true;
+  const upstreamAttemptTimeoutMs = clientWantsStream
+    ? Math.min(config.requestTimeoutMs, config.streamBootstrapTimeoutMs)
+    : config.requestTimeoutMs;
+
+  const context: StrategyRequestContext = {
+    config,
+    clientHeaders,
+    requestBody,
+    requestedModelInput: model,
+    routingModelInput: model,
+    routedModel: routingState.routedModel,
+    explicitOllama: false,
+    openAiPrefixed: routingState.openAiPrefixed,
+    localOllama: false,
+    clientWantsStream,
+    needsReasoningTrace: false,
+    upstreamAttemptTimeoutMs,
+    responsesPassthrough: true,
   };
 
   const strategy = PROVIDER_STRATEGIES.find((entry) => entry.matches(context)) ?? PROVIDER_STRATEGIES[PROVIDER_STRATEGIES.length - 1]!;
@@ -1311,6 +1663,7 @@ export async function executeProviderFallback(
   promptCacheKey?: string,
   refreshExpiredToken?: (credential: ProviderCredential) => Promise<ProviderCredential | null>,
   policy?: PolicyEngine,
+  healthStore?: AccountHealthStore,
 ): Promise<ProviderFallbackExecutionResult> {
   const accumulator: FallbackAccumulator = {
     sawRateLimit: false,
@@ -1356,10 +1709,21 @@ export async function executeProviderFallback(
       : undefined)
     : undefined;
 
-  const candidates = reorderCandidatesForAffinity(
-    providerRoutes.flatMap((route) => candidatesByProvider[route.providerId] ?? []),
-    preferredAffinity,
-  );
+  const allCandidates = providerRoutes.flatMap((route) => candidatesByProvider[route.providerId] ?? []);
+
+  let candidates: typeof allCandidates;
+  if (healthStore) {
+    const withScores = allCandidates.map((candidate) => ({
+      candidate,
+      score: healthStore.getHealthScore(candidate.providerId, candidate.account.accountId, candidate.account.expiresAt),
+    }));
+    withScores.sort((a, b) => b.score - a.score);
+    const sorted = withScores.map((item) => item.candidate);
+    candidates = reorderCandidatesForAffinity(sorted, preferredAffinity);
+  } else {
+    candidates = reorderCandidatesForAffinity(allCandidates, preferredAffinity);
+  }
+
   if (candidates.length === 0) {
     return {
       handled: false,
@@ -1475,7 +1839,16 @@ export async function executeProviderFallback(
 
       if (await responseIndicatesQuotaError(upstreamResponse)) {
         accumulator.sawRateLimit = true;
-        keyPool.markRateLimited(candidate.account, Math.min(context.config.keyCooldownMs, 60_000));
+        // A 402 indicates a payment/balance issue — the account is unusable
+        // until the user pays, so apply a long cooldown (24 hours) instead of
+        // the short transient cooldown used for normal quota exhaustion.
+        const quotaCooldownMs = upstreamResponse.status === 402
+          ? 24 * 60 * 60 * 1000
+          : Math.min(context.config.keyCooldownMs, 60_000);
+        keyPool.markRateLimited(candidate.account, quotaCooldownMs);
+        if (healthStore) {
+          healthStore.recordFailure(candidate.account, upstreamResponse.status, "quota_exhausted");
+        }
         if (
           preferredAffinity
           && candidate.providerId === preferredAffinity.providerId
@@ -1522,6 +1895,9 @@ export async function executeProviderFallback(
       if (outcome.kind === "handled") {
         upstreamSpan.setStatus("ok");
         upstreamSpan.end();
+        if (healthStore) {
+          healthStore.recordSuccess(candidate.account, upstreamResponse.status);
+        }
         if (
           promptCacheKey
           && (
@@ -1538,6 +1914,10 @@ export async function executeProviderFallback(
           candidateCount: candidates.length,
           summary: accumulator
         };
+      }
+
+      if (healthStore && !upstreamResponse.ok) {
+        healthStore.recordFailure(candidate.account, upstreamResponse.status);
       }
 
       accumulator.sawRateLimit ||= outcome.rateLimit === true;

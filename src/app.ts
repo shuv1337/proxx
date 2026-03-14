@@ -13,6 +13,7 @@ import {
   buildOllamaCatalogRoutes,
   buildProviderRoutes,
   dedupeModelIds,
+  filterResponsesApiRoutes,
   minMsUntilAnyProviderKeyReady,
   parseModelIdsFromCatalogPayload,
   resolveProviderRoutesForModel,
@@ -20,6 +21,7 @@ import {
   type ResolvedModelCatalog,
 } from "./lib/provider-routing.js";
 import {
+  buildResponsesPassthroughContext,
   executeLocalStrategy,
   executeProviderFallback,
   inspectProviderAvailability,
@@ -56,11 +58,13 @@ import { applyNativeOllamaAuth } from "./lib/native-auth.js";
 import { requestHasExplicitNumCtx } from "./lib/ollama-compat.js";
 import { createSqlConnection, closeConnection, type Sql } from "./lib/db/index.js";
 import { SqlCredentialStore } from "./lib/db/sql-credential-store.js";
+import { AccountHealthStore } from "./lib/db/account-health-store.js";
 import { SqlAuthPersistence } from "./lib/auth/sql-persistence.js";
 import { SqlGitHubAllowlist } from "./lib/auth/github-allowlist.js";
 import { seedFromJsonFile, seedFromJsonValue } from "./lib/db/json-seeder.js";
 import { registerOAuthRoutes } from "./lib/oauth-routes.js";
 import { RuntimeCredentialStore } from "./lib/runtime-credential-store.js";
+import { TokenRefreshManager } from "./lib/token-refresh-manager.js";
 
 interface ChatCompletionRequest {
   readonly model?: string;
@@ -133,6 +137,7 @@ function copyInjectedResponseHeaders(reply: FastifyReply, headers: Record<string
 
 const SUPPORTED_V1_ENDPOINTS = [
   "POST /v1/chat/completions",
+  "POST /v1/responses",
   "POST /v1/embeddings",
   "GET /v1/models",
   "GET /v1/models/:model"
@@ -156,6 +161,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   let sqlCredentialStore: SqlCredentialStore | undefined;
   let sqlAuthPersistence: SqlAuthPersistence | undefined;
   let sqlGitHubAllowlist: SqlGitHubAllowlist | undefined;
+  let accountHealthStore: AccountHealthStore | undefined;
 
   if (config.databaseUrl) {
     try {
@@ -165,6 +171,10 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       sqlCredentialStore = new SqlCredentialStore(sql);
       await sqlCredentialStore.init();
       app.log.info("credential store initialized");
+
+      accountHealthStore = new AccountHealthStore(sql);
+      await accountHealthStore.init();
+      app.log.info("account health store initialized");
 
       sqlAuthPersistence = new SqlAuthPersistence(sql);
       await sqlAuthPersistence.init();
@@ -237,16 +247,16 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   const runtimeCredentialStore = new RuntimeCredentialStore(credentialStore, sqlCredentialStore);
   const oauthManager = new OpenAiOAuthManager();
 
-  async function refreshExpiredOAuthAccount(credential: ProviderCredential): Promise<ProviderCredential | null> {
-    if (!credential.refreshToken) {
-      return null;
-    }
+  const tokenRefreshManager = new TokenRefreshManager(
+    async (credential) => {
+      if (!credential.refreshToken) {
+        return null;
+      }
 
-    try {
       app.log.info({ accountId: credential.accountId, providerId: credential.providerId }, "refreshing expired OAuth token");
-      
+
       const newTokens = await oauthManager.refreshToken(credential.refreshToken);
-      
+
       const newCredential: ProviderCredential = {
         providerId: credential.providerId,
         accountId: newTokens.accountId,
@@ -265,37 +275,43 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         newCredential.refreshToken,
         newCredential.expiresAt,
         newCredential.chatgptAccountId,
-        newTokens.email,
-        newTokens.subject,
-        newTokens.planType,
       );
 
-      await keyPool.warmup();
+      keyPool.updateAccountCredential(credential.providerId, credential, newCredential);
 
-      app.log.info({ 
-        accountId: newCredential.accountId, 
+      app.log.info({
+        accountId: newCredential.accountId,
         providerId: newCredential.providerId,
         expiresAt: newCredential.expiresAt,
       }, "OAuth token refreshed successfully");
 
       return newCredential;
-    } catch (error) {
-      app.log.warn({ 
-        error: toErrorMessage(error), 
-        accountId: credential.accountId,
-        providerId: credential.providerId,
-      }, "failed to refresh OAuth token");
-      return null;
-    }
+    },
+    app.log,
+    {
+      maxConcurrency: 5,
+      backgroundIntervalMs: 60_000,
+      expiryBufferMs: 60_000,
+      proactiveRefreshWindowMs: 5 * 60_000,
+      maxConsecutiveFailures: 3,
+    },
+  );
+
+  async function refreshExpiredOAuthAccount(credential: ProviderCredential): Promise<ProviderCredential | null> {
+    return tokenRefreshManager.refresh(credential);
   }
 
   async function ensureFreshAccounts(providerId: string): Promise<void> {
     const expiredAccounts = keyPool.getExpiredAccountsWithRefreshTokens(providerId);
-    
-    for (const account of expiredAccounts) {
-      await refreshExpiredOAuthAccount(account);
-    }
+    if (expiredAccounts.length === 0) return;
+    await tokenRefreshManager.refreshBatch(expiredAccounts);
   }
+
+  tokenRefreshManager.startBackgroundRefresh(() => {
+    const expiring = keyPool.getExpiringAccounts(5 * 60_000);
+    const expired = keyPool.getAllExpiredWithRefreshTokens();
+    return [...expired, ...expiring];
+  });
 
   const ollamaCatalogRoutes = buildOllamaCatalogRoutes(config);
   const modelCatalogTtlMs = 30_000;
@@ -472,6 +488,10 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   });
 
   app.options("/v1/chat/completions", async (_request, reply) => {
+    reply.code(204).send();
+  });
+
+  app.options("/v1/responses", async (_request, reply) => {
     reply.code(204).send();
   });
 
@@ -682,6 +702,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       promptCacheKey,
       refreshExpiredOAuthAccount,
       policyEngine,
+      accountHealthStore,
     );
 
     if (execution.handled) {
@@ -769,6 +790,148 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       : "Upstream rejected the request with no successful fallback.";
 
     app.log.error({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode, sawRequestError: summary.sawRequestError }, "all upstream attempts exhausted");
+    sendOpenAiError(reply, 502, message, "server_error", "upstream_unavailable");
+  });
+
+  app.post<{ Body: Record<string, unknown> }>("/v1/responses", async (request, reply) => {
+    if (!isRecord(request.body)) {
+      sendOpenAiError(reply, 400, "Request body must be a JSON object", "invalid_request_error", "invalid_body");
+      return;
+    }
+
+    const requestBody = request.body;
+    app.log.info({ responsesBody: JSON.stringify(requestBody).slice(0, 2000) }, "responses passthrough: incoming body");
+    const model = typeof requestBody.model === "string" ? requestBody.model : "";
+    if (model.length === 0) {
+      sendOpenAiError(reply, 400, "Missing required field: model", "invalid_request_error", "missing_model");
+      return;
+    }
+
+    const { strategy, context } = buildResponsesPassthroughContext(config, request.headers, requestBody, model);
+    reply.header("x-open-hax-upstream-mode", strategy.mode);
+
+    let payload: ReturnType<typeof strategy.buildPayload>;
+    try {
+      payload = strategy.buildPayload(context);
+    } catch (error) {
+      sendOpenAiError(reply, 400, toErrorMessage(error), "invalid_request_error", "invalid_provider_options");
+      return;
+    }
+
+    let providerRoutes = filterResponsesApiRoutes(
+      buildProviderRoutes(config, context.openAiPrefixed, true)
+    );
+    providerRoutes = orderProviderRoutesByPolicy(policyEngine, providerRoutes, context.requestedModelInput, context.routedModel, {
+      openAiPrefixed: context.openAiPrefixed,
+      localOllama: false,
+      explicitOllama: false,
+    });
+
+    for (const providerId of new Set(providerRoutes.map((route) => route.providerId))) {
+      await ensureFreshAccounts(providerId);
+    }
+
+    const availability = await inspectProviderAvailability(keyPool, providerRoutes);
+    const execution = await executeProviderFallback(
+      strategy,
+      reply,
+      requestLogStore,
+      promptAffinityStore,
+      keyPool,
+      providerRoutes,
+      context,
+      payload,
+      undefined,
+      refreshExpiredOAuthAccount,
+      policyEngine,
+      accountHealthStore,
+    );
+
+    if (execution.handled) {
+      return;
+    }
+
+    if (execution.candidateCount === 0) {
+      const retryInMs = await minMsUntilAnyProviderKeyReady(keyPool, providerRoutes);
+      if (retryInMs > 0) {
+        reply.header("retry-after", Math.ceil(retryInMs / 1000));
+      }
+
+      if (!availability.sawConfiguredProvider) {
+        sendOpenAiError(reply, 500, "Proxy is missing upstream account configuration for Responses API providers", "server_error", "keys_unavailable");
+        return;
+      }
+
+      sendOpenAiError(
+        reply,
+        429,
+        "All upstream accounts are currently rate-limited. Retry after the cooldown window.",
+        "rate_limit_error",
+        "all_keys_rate_limited"
+      );
+      return;
+    }
+
+    const { summary } = execution;
+
+    if (summary.sawUpstreamInvalidRequest) {
+      app.log.warn({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode }, "responses passthrough: all attempts exhausted due to upstream invalid-request responses");
+      sendOpenAiError(
+        reply,
+        400,
+        "No upstream account accepted the request payload. Check model availability and request parameters.",
+        "invalid_request_error",
+        "upstream_rejected_request"
+      );
+      return;
+    }
+
+    if (summary.sawRateLimit) {
+      const retryInMs = await minMsUntilAnyProviderKeyReady(keyPool, providerRoutes);
+      if (retryInMs > 0) {
+        reply.header("retry-after", Math.ceil(retryInMs / 1000));
+      }
+
+      app.log.warn({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode }, "responses passthrough: all attempts exhausted due to upstream rate limits");
+      sendOpenAiError(
+        reply,
+        429,
+        "No upstream account succeeded. Accounts may be rate-limited, quota-exhausted, or have outstanding balances.",
+        "rate_limit_error",
+        "no_available_key"
+      );
+      return;
+    }
+
+    if (summary.sawUpstreamServerError) {
+      app.log.warn({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode }, "responses passthrough: all attempts exhausted due to upstream server errors");
+      sendOpenAiError(
+        reply,
+        502,
+        "Upstream returned transient server errors across all available accounts.",
+        "server_error",
+        "upstream_server_error"
+      );
+      return;
+    }
+
+    if (summary.sawModelNotFound && !summary.sawRequestError) {
+      app.log.warn({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode }, "responses passthrough: all attempts exhausted due to model-not-found responses");
+      sendOpenAiError(
+        reply,
+        404,
+        `Model not found across available Responses API providers: ${context.routedModel}`,
+        "invalid_request_error",
+        "model_not_found"
+      );
+      return;
+    }
+
+    const message = summary.sawRequestError
+      ? "All upstream attempts failed due to network/transport errors."
+      : "Upstream rejected the request with no successful fallback.";
+
+    app.log.error({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode, sawRequestError: summary.sawRequestError }, "responses passthrough: all upstream attempts exhausted");
     sendOpenAiError(reply, 502, message, "server_error", "upstream_unavailable");
   });
 
@@ -934,6 +1097,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   }
 
   app.addHook("onClose", async () => {
+    tokenRefreshManager.stopBackgroundRefresh();
     await requestLogStore.close();
     if (sql) {
       await closeConnection(sql);

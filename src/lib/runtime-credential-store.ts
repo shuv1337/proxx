@@ -53,4 +53,21 @@ export class RuntimeCredentialStore implements CredentialStoreLike {
       chatgptAccountId,
     );
   }
+
+  public async removeAccount(providerId: string, accountId: string): Promise<boolean> {
+    let removed = false;
+
+    if (this.sqlStore) {
+      removed = await this.sqlStore.removeAccount(providerId, accountId);
+    }
+
+    try {
+      const fileRemoved = await this.fileStore.removeAccount(providerId, accountId);
+      removed = removed || fileRemoved;
+    } catch {
+      // file store removal is best-effort
+    }
+
+    return removed;
+  }
 }

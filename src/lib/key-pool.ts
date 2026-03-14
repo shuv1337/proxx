@@ -13,6 +13,7 @@ export interface KeyPoolConfig {
   readonly defaultProviderId: string;
   readonly accountStore?: ProviderAccountStore;
   readonly preferAccountStoreProviders?: boolean;
+  readonly expiryBufferMs?: number;
 }
 
 export interface ProviderCredential {
@@ -489,6 +490,7 @@ export class KeyPool {
     const startOffset = providerState.nextOffset % accountCount;
     providerState.nextOffset = (providerState.nextOffset + 1) % accountCount;
 
+    const expiryBuffer = this.config.expiryBufferMs ?? 60_000;
     const idle: ProviderCredential[] = [];
     const busy: ProviderCredential[] = [];
     for (let index = 0; index < accountCount; index += 1) {
@@ -497,7 +499,7 @@ export class KeyPool {
         continue;
       }
 
-      const isExpired = typeof credential.expiresAt === "number" && credential.expiresAt <= now;
+      const isExpired = typeof credential.expiresAt === "number" && credential.expiresAt <= now + expiryBuffer;
       if (isExpired) {
         continue;
       }
@@ -596,6 +598,47 @@ export class KeyPool {
         && typeof account.refreshToken === "string"
         && account.refreshToken.length > 0
     );
+  }
+
+  public getExpiringAccounts(windowMs: number): ProviderCredential[] {
+    const now = Date.now();
+    const result: ProviderCredential[] = [];
+
+    for (const providerState of this.providers.values()) {
+      for (const account of providerState.accounts) {
+        if (
+          typeof account.expiresAt === "number"
+          && account.expiresAt > now
+          && account.expiresAt <= now + windowMs
+          && typeof account.refreshToken === "string"
+          && account.refreshToken.length > 0
+        ) {
+          result.push(account);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  public getAllExpiredWithRefreshTokens(): ProviderCredential[] {
+    const now = Date.now();
+    const result: ProviderCredential[] = [];
+
+    for (const providerState of this.providers.values()) {
+      for (const account of providerState.accounts) {
+        if (
+          typeof account.expiresAt === "number"
+          && account.expiresAt <= now
+          && typeof account.refreshToken === "string"
+          && account.refreshToken.length > 0
+        ) {
+          result.push(account);
+        }
+      }
+    }
+
+    return result;
   }
 
   public markInFlight(credential: ProviderCredential): () => void {

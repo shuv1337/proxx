@@ -4,7 +4,7 @@ import { access, readFile } from "node:fs/promises";
 import type { FastifyInstance } from "fastify";
 
 import type { ProxyConfig } from "./config.js";
-import type { CredentialStoreLike } from "./credential-store.js";
+import { CredentialStore, type CredentialStoreLike } from "./credential-store.js";
 import type { KeyPool, KeyPoolAccountStatus } from "./key-pool.js";
 import { OpenAiOAuthManager } from "./openai-oauth.js";
 import { fetchOpenAiQuotaSnapshots } from "./openai-quota.js";
@@ -577,7 +577,7 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
   app.get<{
     Querystring: { readonly accountId?: string };
   }>("/api/ui/credentials/openai/quota", async (request, reply) => {
-    const overview = await fetchOpenAiQuotaSnapshots(credentialStore, {
+    const overview = await fetchOpenAiQuotaSnapshots(credentialStore as CredentialStore, {
       providerId: deps.config.openaiProviderId,
       accountId: typeof request.query.accountId === "string" && request.query.accountId.trim().length > 0
         ? request.query.accountId.trim()
@@ -621,6 +621,11 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
 
     if (providerId.length === 0 || accountId.length === 0) {
       reply.code(400).send({ error: "provider_id_and_account_id_required" });
+      return;
+    }
+
+    if (!credentialStore.removeAccount) {
+      reply.code(501).send({ error: "remove_account_not_supported" });
       return;
     }
 
@@ -682,9 +687,6 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
         tokens.refreshToken,
         tokens.expiresAt,
         tokens.chatgptAccountId,
-        tokens.email,
-        tokens.subject,
-        tokens.planType,
       );
       await deps.keyPool.warmup().catch(() => undefined);
       app.log.info({
@@ -738,9 +740,6 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
         result.tokens.refreshToken,
         result.tokens.expiresAt,
         result.tokens.chatgptAccountId,
-        result.tokens.email,
-        result.tokens.subject,
-        result.tokens.planType,
       );
       await deps.keyPool.warmup().catch(() => undefined);
       app.log.info({

@@ -176,7 +176,7 @@ async function withEnv(values: Record<string, string | undefined>, fn: () => Pro
   }
 }
 
-function makeJwt(claims: Record<string, unknown>): string {
+function makeJwtV2(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
   return `${header}.${payload}.signature`;
@@ -1403,7 +1403,7 @@ test("prefers paid codex oauth accounts for gpt-5.4 over free accounts", async (
   );
 });
 
-test("prefers free codex oauth accounts for gpt-5.3-codex before paid accounts", async () => {
+test("prefers free codex oauth accounts for gpt-5.2-codex before paid accounts", async () => {
   const observedAuth: string[] = [];
 
   await withProxyApp(
@@ -1442,7 +1442,7 @@ test("prefers free codex oauth accounts for gpt-5.3-codex before paid accounts",
 
         const parsedBody = JSON.parse(body);
         assert.ok(isRecord(parsedBody));
-        assert.equal(parsedBody.model, "gpt-5.3-codex");
+        assert.equal(parsedBody.model, "gpt-5.2-codex");
         assert.equal(request.headers["chatgpt-account-id"], "cgpt-free");
 
         return {
@@ -1452,7 +1452,7 @@ test("prefers free codex oauth accounts for gpt-5.3-codex before paid accounts",
             id: "resp-free-openai-priority",
             object: "response",
             created_at: 1772916804,
-            model: "gpt-5.3-codex",
+            model: "gpt-5.2-codex",
             output: [
               {
                 id: "msg-free-openai-priority",
@@ -1483,7 +1483,7 @@ test("prefers free codex oauth accounts for gpt-5.3-codex before paid accounts",
           "content-type": "application/json"
         },
         payload: {
-          model: "gpt-5.3-codex",
+          model: "gpt-5.2-codex",
           messages: [{ role: "user", content: "hello" }],
           stream: false
         }
@@ -1497,7 +1497,7 @@ test("prefers free codex oauth accounts for gpt-5.3-codex before paid accounts",
       const payload: unknown = response.json();
       assert.ok(isRecord(payload));
       assert.equal(payload.object, "chat.completion");
-      assert.equal(payload.model, "gpt-5.3-codex");
+      assert.equal(payload.model, "gpt-5.2-codex");
       assert.ok(Array.isArray(payload.choices));
       assert.ok(isRecord(payload.choices[0]));
       assert.ok(isRecord(payload.choices[0].message));

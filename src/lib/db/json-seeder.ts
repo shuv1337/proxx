@@ -172,16 +172,20 @@ export async function seedFromJsonValue(
       const existingProviders = await sql<{ id: string }[]>`
         SELECT id FROM providers WHERE id = ${providerId} LIMIT 1
       `;
-      if (existingProviders.length > 0) {
-        continue;
+      if (existingProviders.length === 0) {
+        await sql`
+          INSERT INTO providers (id, auth_type)
+          VALUES (${providerId}, ${authType})
+          ON CONFLICT (id) DO UPDATE SET auth_type = EXCLUDED.auth_type
+        `;
       }
+    } else {
+      await sql`
+        INSERT INTO providers (id, auth_type)
+        VALUES (${providerId}, ${authType})
+        ON CONFLICT (id) DO UPDATE SET auth_type = EXCLUDED.auth_type
+      `;
     }
-
-    await sql`
-      INSERT INTO providers (id, auth_type)
-      VALUES (${providerId}, ${authType})
-      ON CONFLICT (id) DO UPDATE SET auth_type = EXCLUDED.auth_type
-    `;
 
     for (const account of accounts) {
       await sql`
