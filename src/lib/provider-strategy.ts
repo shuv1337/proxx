@@ -219,19 +219,36 @@ interface BuildPayloadResult {
 }
 
 function gptModelRequiresPaidPlan(routedModel: string): boolean {
-  const match = routedModel.match(/^gpt-(\d+)(?:[.-](\d+))?/);
+  const match = routedModel.match(/^gpt-(\d+)(?:[.-]([a-z0-9]+))?/i);
   if (!match) {
     return false;
   }
-  const major = parseInt(match[1], 10);
-  const minor = match[2] ? parseInt(match[2], 10) : 0;
+
+  const major = Number.parseInt(match[1] ?? "", 10);
+  if (!Number.isFinite(major)) {
+    return false;
+  }
+
   if (major > 5) {
     return true;
   }
-  if (major === 5 && minor >= 3) {
-    return true;
+
+  if (major !== 5) {
+    return false;
   }
-  return false;
+
+  const qualifier = match[2];
+  if (!qualifier) {
+    return false;
+  }
+
+  if (/^\d+$/.test(qualifier)) {
+    const minor = Number.parseInt(qualifier, 10);
+    return Number.isFinite(minor) && minor >= 3;
+  }
+
+  // Non-numeric qualifiers like `gpt-5-mini` should be treated as paid-required.
+  return true;
 }
 
 function providerAccountsForRequest(
@@ -250,31 +267,35 @@ function providerAccountsForRequest(
 
   if (gptModelRequiresPaidPlan(routedModel)) {
     const stronglySupportedPlans = new Set(["plus", "pro", "business", "enterprise"]);
-    const stronglySupportedAccounts = accounts.filter((account) => stronglySupportedPlans.has(account.planType ?? ""));
-    const paidAccounts = accounts.filter((account) => account.planType !== "free");
-    const prioritized = stronglySupportedAccounts.length > 0
-      ? stronglySupportedAccounts
-      : paidAccounts.length > 0
-        ? paidAccounts
-        : [...accounts];
-    const planWeight = (planType: string | undefined): number => {
-      switch (planType) {
-        case "plus":
-          return 5;
-        case "pro":
-        case "business":
-        case "enterprise":
-          return 4;
-        case "team":
-          return 2;
-        case "free":
-          return 0;
-        default:
-          return 1;
-      }
-    };
 
-    return [...prioritized].sort((left, right) => planWeight(right.planType) - planWeight(left.planType));
+    const stronglySupportedAccounts = accounts.filter(
+      (account) => stronglySupportedPlans.has(account.planType ?? ""),
+    );
+
+    const teamAccounts = accounts.filter((account) => account.planType === "team");
+
+    const otherPaidAccounts = accounts.filter((account) => {
+      const planType = account.planType ?? "unknown";
+      if (planType === "free") {
+        return false;
+      }
+      if (planType === "team") {
+        return false;
+      }
+      if (stronglySupportedPlans.has(planType)) {
+        return false;
+      }
+      return true;
+    });
+
+    const freeAccounts = accounts.filter((account) => account.planType === "free");
+
+    return [
+      ...stronglySupportedAccounts,
+      ...teamAccounts,
+      ...otherPaidAccounts,
+      ...freeAccounts,
+    ];
   }
 
   const freeAccounts = accounts.filter((account) => account.planType === "free");
@@ -660,6 +681,19 @@ function usageCountsFromUpstreamJson(upstreamJson: unknown, routedModel: string)
   }
 }
 
+function usageCountsFromGeminiResponse(upstreamJson: Record<string, unknown>): UsageCounts {
+  const usageMetadata = isRecord(upstreamJson["usageMetadata"]) ? upstreamJson["usageMetadata"] : null;
+  if (!usageMetadata) {
+    return {};
+  }
+
+  const promptTokens = asNumber(usageMetadata["promptTokenCount"]);
+  const completionTokens = asNumber(usageMetadata["candidatesTokenCount"]);
+  const totalTokens = asNumber(usageMetadata["totalTokenCount"]);
+
+  return { promptTokens, completionTokens, totalTokens };
+}
+
 function usageCountsForMode(mode: UpstreamMode, upstreamJson: unknown, routedModel: string): UsageCounts {
   if (!isRecord(upstreamJson)) {
     return {};
@@ -669,8 +703,17 @@ function usageCountsForMode(mode: UpstreamMode, upstreamJson: unknown, routedMod
     return usageCountsFromCompletion(messagesToChatCompletion(upstreamJson, routedModel));
   }
 
-  if (mode === "responses" || mode === "openai_responses") {
+  if (
+    mode === "responses"
+    || mode === "openai_responses"
+    || mode === "responses_passthrough"
+    || mode === "openai_responses_passthrough"
+  ) {
     return usageCountsFromCompletion(responsesToChatCompletion(upstreamJson, routedModel));
+  }
+
+  if (mode === "gemini_chat") {
+    return usageCountsFromGeminiResponse(upstreamJson);
   }
 
   if (mode === "ollama_chat" || mode === "local_ollama_chat") {
@@ -715,8 +758,17 @@ export function extractUsageCountsFromSseText(
       return extractUsageFromAnthropicSse(streamText);
     }
 
-    if (mode === "responses" || mode === "openai_responses") {
+    if (
+      mode === "responses"
+      || mode === "openai_responses"
+      || mode === "responses_passthrough"
+      || mode === "openai_responses_passthrough"
+    ) {
       return extractUsageFromResponsesSse(streamText, routedModel);
+    }
+
+    if (mode === "gemini_chat") {
+      return extractUsageFromGeminiStream(streamText);
     }
 
     if (mode === "ollama_chat" || mode === "local_ollama_chat") {
@@ -728,6 +780,36 @@ export function extractUsageCountsFromSseText(
   } catch {
     return {};
   }
+}
+
+function extractUsageFromGeminiStream(streamText: string): UsageCounts {
+  let lastPayload: Record<string, unknown> | undefined;
+
+  for (const line of streamText.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+
+    if (trimmed === "data: [DONE]" || trimmed === "[DONE]") {
+      continue;
+    }
+
+    const jsonText = trimmed.startsWith("data:")
+      ? trimmed.slice("data:".length).trim()
+      : trimmed;
+
+    try {
+      const parsed: unknown = JSON.parse(jsonText);
+      if (isRecord(parsed)) {
+        lastPayload = parsed;
+      }
+    } catch {
+      // ignore parse errors while scanning stream
+    }
+  }
+
+  return lastPayload ? usageCountsFromGeminiResponse(lastPayload) : {};
 }
 
 function extractUsageFromOpenAiChatSse(streamText: string): UsageCounts {
@@ -2020,9 +2102,7 @@ class GeminiChatProviderStrategy extends TransformedJsonProviderStrategy {
 
   public getUpstreamPath(context: StrategyRequestContext): string {
     const model = encodeURIComponent(context.routedModel);
-    const accountToken = (context as ProviderAttemptContext | undefined)?.account?.token ?? "";
-    const key = encodeURIComponent(accountToken);
-    return `/models/${model}:generateContent?key=${key}`;
+    return `/models/${model}:generateContent`;
   }
 
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
@@ -2088,9 +2168,10 @@ class GeminiChatProviderStrategy extends TransformedJsonProviderStrategy {
     return buildPayloadResult(payload, context);
   }
 
-  public override applyRequestHeaders(headers: Headers, _context: ProviderAttemptContext, _payload: Record<string, unknown>): void {
-    // Gemini uses API key auth (query param) rather than OpenAI bearer headers.
+  public override applyRequestHeaders(headers: Headers, context: ProviderAttemptContext, _payload: Record<string, unknown>): void {
+    // Gemini uses API key auth (X-Goog-Api-Key header) rather than OpenAI bearer headers.
     headers.delete("authorization");
+    headers.set("x-goog-api-key", context.account.token);
     headers.set("content-type", "application/json");
   }
 
@@ -2218,12 +2299,13 @@ export function buildResponsesPassthroughContext(
   config: ProxyConfig,
   clientHeaders: IncomingHttpHeaders,
   requestBody: Record<string, unknown>,
-  model: string,
+  requestedModelInput: string,
+  routingModelInput: string,
 ): {
   readonly strategy: ProviderStrategy;
   readonly context: StrategyRequestContext;
 } {
-  const routingState = resolveRequestRoutingState(config, model);
+  const routingState = resolveRequestRoutingState(config, routingModelInput);
   const clientWantsStream = requestBody.stream === true;
   const upstreamAttemptTimeoutMs = clientWantsStream
     ? Math.min(config.requestTimeoutMs, config.streamBootstrapTimeoutMs)
@@ -2233,8 +2315,8 @@ export function buildResponsesPassthroughContext(
     config,
     clientHeaders,
     requestBody,
-    requestedModelInput: model,
-    routingModelInput: model,
+    requestedModelInput,
+    routingModelInput,
     routedModel: routingState.routedModel,
     explicitOllama: false,
     openAiPrefixed: routingState.openAiPrefixed
@@ -2681,7 +2763,7 @@ export async function executeProviderFallback(
       if (outcome.kind === "handled") {
         upstreamSpan.setStatus("ok");
         upstreamSpan.end();
-        if (healthStore) {
+        if (healthStore && upstreamResponse.ok) {
           healthStore.recordSuccess(candidate.account, upstreamResponse.status);
         }
         if (
@@ -2702,7 +2784,14 @@ export async function executeProviderFallback(
         };
       }
 
-      if (healthStore && !upstreamResponse.ok && upstreamResponse.status >= 500) {
+      if (
+        healthStore
+        && !upstreamResponse.ok
+        && upstreamResponse.status >= 500
+        && !outcome.upstreamInvalidRequest
+        && !outcome.modelNotFound
+        && !outcome.modelNotSupportedForAccount
+      ) {
         healthStore.recordFailure(candidate.account, upstreamResponse.status);
       }
 
@@ -2716,7 +2805,9 @@ export async function executeProviderFallback(
       if (!upstreamResponse.ok && outcome.requestError === true && upstreamResponse.status === 401 && candidate.account.authType === "oauth_bearer" && candidate.account.refreshToken && refreshExpiredToken) {
         const refreshedCredential = await refreshExpiredToken(candidate.account);
         if (refreshedCredential) {
+          const refreshedProviderContext: ProviderAttemptContext = { ...providerContext, account: refreshedCredential };
           const refreshedHeaders = buildUpstreamHeadersForCredential(context.clientHeaders, refreshedCredential);
+          candidateStrategy.applyRequestHeaders(refreshedHeaders, refreshedProviderContext, candidatePayload.upstreamPayload);
           const refreshedRelease = keyPool.markInFlight(refreshedCredential);
           const refreshedAttemptStartedAt = Date.now();
           let refreshedResponse: Response;
@@ -2734,7 +2825,7 @@ export async function executeProviderFallback(
 
           try {
             const refreshedLatencyMs = Date.now() - refreshedAttemptStartedAt;
-            const refreshedLogId = recordAttempt(requestLogStore, providerContext, {
+            const refreshedLogId = recordAttempt(requestLogStore, refreshedProviderContext, {
               providerId: candidate.providerId,
               accountId: refreshedCredential.accountId,
               authType: refreshedCredential.authType,
@@ -2762,8 +2853,26 @@ export async function executeProviderFallback(
               break;
             }
             reply.header("x-open-hax-upstream-mode", candidateStrategy.mode);
-            const refreshedOutcome = await candidateStrategy.handleProviderAttempt(reply, refreshedResponse, providerContext);
+            const refreshedOutcome = await candidateStrategy.handleProviderAttempt(reply, refreshedResponse, refreshedProviderContext);
             if (refreshedOutcome.kind === "handled") {
+              upstreamSpan.setStatus("ok");
+              upstreamSpan.end();
+
+              if (healthStore && refreshedResponse.ok) {
+                healthStore.recordSuccess(refreshedCredential, refreshedResponse.status);
+              }
+
+              if (
+                promptCacheKey
+                && (
+                  preferredAffinity === undefined
+                  || preferredReassignmentAllowed
+                  || (candidate.providerId === preferredAffinity.providerId && refreshedCredential.accountId === preferredAffinity.accountId)
+                )
+              ) {
+                await promptAffinityStore.upsert(promptCacheKey, candidate.providerId, refreshedCredential.accountId);
+              }
+
               releaseInFlight();
               return { handled: true, candidateCount: candidates.length, summary: accumulator };
             }
@@ -2773,7 +2882,7 @@ export async function executeProviderFallback(
             accumulator.sawUpstreamInvalidRequest ||= refreshedOutcome.upstreamInvalidRequest === true;
             accumulator.sawModelNotFound ||= refreshedOutcome.modelNotFound === true;
             accumulator.sawModelNotSupportedForAccount ||= refreshedOutcome.modelNotSupportedForAccount === true;
-      if (!refreshedResponse.ok && refreshedOutcome.requestError === true && (refreshedResponse.status === 401 || refreshedResponse.status === 403)) {
+            if (!refreshedResponse.ok && refreshedOutcome.requestError === true && (refreshedResponse.status === 401 || refreshedResponse.status === 403)) {
               if (shouldCooldownCredentialOnAuthFailure(candidate.providerId, refreshedResponse.status)) {
                 keyPool.markRateLimited(refreshedCredential, Math.min(context.config.keyCooldownMs, 10_000));
                 if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && refreshedCredential.accountId === preferredAffinity.accountId) {

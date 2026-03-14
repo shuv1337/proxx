@@ -162,7 +162,7 @@ const PAID_PLAN_WEIGHTS: Record<PlanType, number> = {
   free: 0,
 };
 
-const PAID_PLANS: PlanType[] = ["plus", "pro", "business", "enterprise", "team"];
+const PAID_PLANS: readonly PlanType[] = ["plus", "pro", "business", "enterprise", "team"];
 
 function buildFreeBlockedConstraints(
   models: readonly string[],

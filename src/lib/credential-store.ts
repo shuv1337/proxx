@@ -366,6 +366,9 @@ export class CredentialStore {
   private static readonly FLUSH_DEBOUNCE_MS = 500;
 
   private static processHooksInstalled = false;
+  private static flushAllHandler: (() => void) | null = null;
+  private static sigintHandler: (() => void) | null = null;
+  private static sigtermHandler: (() => void) | null = null;
   private static readonly stores = new Set<CredentialStore>();
 
   public constructor(
@@ -374,6 +377,26 @@ export class CredentialStore {
   ) {
     CredentialStore.stores.add(this);
     CredentialStore.installProcessHooks();
+  }
+
+  public dispose(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+
+    CredentialStore.stores.delete(this);
+    if (CredentialStore.stores.size === 0) {
+      CredentialStore.uninstallProcessHooks();
+    }
+  }
+
+  public async close(): Promise<void> {
+    try {
+      await this.flush();
+    } finally {
+      this.dispose();
+    }
   }
 
   private static installProcessHooks(): void {
@@ -393,16 +416,45 @@ export class CredentialStore {
       }
     };
 
+    CredentialStore.flushAllHandler = flushAll;
+    CredentialStore.sigintHandler = (): void => {
+      flushAll();
+      process.exitCode = 130;
+    };
+    CredentialStore.sigtermHandler = (): void => {
+      flushAll();
+      process.exitCode = 143;
+    };
+
     process.once("beforeExit", flushAll);
     process.once("exit", flushAll);
-    process.once("SIGINT", () => {
-      flushAll();
-      process.exit(130);
-    });
-    process.once("SIGTERM", () => {
-      flushAll();
-      process.exit(143);
-    });
+    process.once("SIGINT", CredentialStore.sigintHandler);
+    process.once("SIGTERM", CredentialStore.sigtermHandler);
+  }
+
+  private static uninstallProcessHooks(): void {
+    if (!CredentialStore.processHooksInstalled) {
+      return;
+    }
+
+    const flushAll = CredentialStore.flushAllHandler;
+    if (flushAll) {
+      process.off("beforeExit", flushAll);
+      process.off("exit", flushAll);
+    }
+
+    if (CredentialStore.sigintHandler) {
+      process.off("SIGINT", CredentialStore.sigintHandler);
+    }
+
+    if (CredentialStore.sigtermHandler) {
+      process.off("SIGTERM", CredentialStore.sigtermHandler);
+    }
+
+    CredentialStore.flushAllHandler = null;
+    CredentialStore.sigintHandler = null;
+    CredentialStore.sigtermHandler = null;
+    CredentialStore.processHooksInstalled = false;
   }
 
   public flushOnExit(): void {

@@ -361,8 +361,22 @@ export class AccountHealthStore {
       }
 
       const query = `
+WITH input(provider_id, account_id, success_count, last_success_at, last_status, updated_at) AS (
+  VALUES ${placeholders.join(", ")}
+)
 INSERT INTO account_health (provider_id, account_id, success_count, last_success_at, last_status, updated_at)
-VALUES ${placeholders.join(", ")}
+SELECT
+  input.provider_id,
+  input.account_id,
+  input.success_count,
+  input.last_success_at,
+  input.last_status,
+  input.updated_at
+FROM input
+WHERE EXISTS (
+  SELECT 1 FROM accounts
+  WHERE accounts.id = input.account_id AND accounts.provider_id = input.provider_id
+)
 ON CONFLICT (provider_id, account_id) DO UPDATE SET
   success_count = account_health.success_count + EXCLUDED.success_count,
   last_success_at = EXCLUDED.last_success_at,
@@ -396,8 +410,23 @@ ON CONFLICT (provider_id, account_id) DO UPDATE SET
       }
 
       const query = `
+WITH input(provider_id, account_id, failure_count, last_failure_at, last_error, last_status, updated_at) AS (
+  VALUES ${placeholders.join(", ")}
+)
 INSERT INTO account_health (provider_id, account_id, failure_count, last_failure_at, last_error, last_status, updated_at)
-VALUES ${placeholders.join(", ")}
+SELECT
+  input.provider_id,
+  input.account_id,
+  input.failure_count,
+  input.last_failure_at,
+  input.last_error,
+  input.last_status,
+  input.updated_at
+FROM input
+WHERE EXISTS (
+  SELECT 1 FROM accounts
+  WHERE accounts.id = input.account_id AND accounts.provider_id = input.provider_id
+)
 ON CONFLICT (provider_id, account_id) DO UPDATE SET
   failure_count = account_health.failure_count + EXCLUDED.failure_count,
   last_failure_at = EXCLUDED.last_failure_at,

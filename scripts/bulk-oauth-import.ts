@@ -20,9 +20,9 @@ const DEBUG_DIR = process.env.DEBUG_DIR ?? "/tmp/oauth-debug";
 // Gmail IMAP config -- checks IMAP_USER/IMAP_PASS, then GMAIL_APP_EMAIL/GMAIL_APP_PASSWORD
 const IMAP_HOST = process.env.IMAP_HOST ?? "imap.gmail.com";
 const IMAP_PORT = Number(process.env.IMAP_PORT ?? "993");
-const IMAP_GMAIL_ACCOUNT = process.env.IMAP_USER ?? process.env.GMAIL_APP_EMAIL ?? "originalerror502@gmail.com";
-let IMAP_USER = process.env.IMAP_USER ?? process.env.GMAIL_APP_EMAIL ?? "";
-let IMAP_PASS = process.env.IMAP_PASS ?? process.env.GMAIL_APP_PASSWORD ?? "";
+const IMAP_GMAIL_ACCOUNT = (process.env.IMAP_GMAIL_ACCOUNT ?? process.env.IMAP_USER ?? process.env.GMAIL_APP_EMAIL ?? "").trim();
+let IMAP_USER = (process.env.IMAP_USER ?? process.env.GMAIL_APP_EMAIL ?? "").trim();
+let IMAP_PASS = (process.env.IMAP_PASS ?? process.env.GMAIL_APP_PASSWORD ?? "").trim();
 
 interface CsvRow {
   readonly url: string;
@@ -83,7 +83,11 @@ async function screenshot(page: Page, label: string): Promise<void> {
 // ── Extract Gmail credentials from CSV ──
 
 function extractGmailCredsFromCsv(rows: CsvRow[], gmailAccount: string): { user: string; pass: string } | undefined {
-  const normalized = gmailAccount.toLowerCase();
+  const normalized = gmailAccount.trim().toLowerCase();
+  if (normalized.length === 0) {
+    throw new Error("Missing IMAP account. Set IMAP_USER/GMAIL_APP_EMAIL or IMAP_GMAIL_ACCOUNT to auto-extract IMAP credentials from CSV.");
+  }
+
   const usernameOnly = normalized.replace(/@gmail\.com$/, "");
 
   for (const row of rows) {
@@ -494,8 +498,8 @@ async function automateOpenAiLogin(
 
 async function main(): Promise<void> {
   if (!PROXY_TOKEN) {
-    console.error("Required env vars: PROXY_AUTH_TOKEN, IMAP_USER, IMAP_PASS");
-    console.error("Optional: CSV_PATH, START_INDEX, MAX_ACCOUNTS, DELAY_MS, HEADLESS, DEBUG_DIR");
+    console.error("Required env vars: PROXY_AUTH_TOKEN");
+    console.error("Optional env vars: IMAP_USER, IMAP_PASS, IMAP_GMAIL_ACCOUNT, CSV_PATH, START_INDEX, MAX_ACCOUNTS, DELAY_MS, HEADLESS, DEBUG_DIR");
     process.exit(1);
   }
 
@@ -509,14 +513,19 @@ async function main(): Promise<void> {
 
   const allRows = parseCsv(CSV_PATH);
 
-  // auto-extract Gmail IMAP credentials from the same CSV if not provided via env
+  // Auto-extract Gmail IMAP credentials from the same CSV if not provided via env.
   if (!IMAP_USER || !IMAP_PASS) {
     const gmailCreds = extractGmailCredsFromCsv(allRows, IMAP_GMAIL_ACCOUNT);
-    if (gmailCreds) {
-      IMAP_USER = gmailCreds.user;
-      IMAP_PASS = gmailCreds.pass;
-      console.log(`IMAP credentials extracted from CSV for ${IMAP_USER}`);
+    if (!gmailCreds) {
+      throw new Error(
+        `IMAP_USER/IMAP_PASS not set and could not extract credentials from CSV for ${IMAP_GMAIL_ACCOUNT}. `
+        + "Set IMAP_USER/IMAP_PASS (or GMAIL_APP_EMAIL/GMAIL_APP_PASSWORD), or add a matching google.com entry to the CSV.",
+      );
     }
+
+    IMAP_USER = gmailCreds.user;
+    IMAP_PASS = gmailCreds.pass;
+    console.log(`IMAP credentials extracted from CSV for ${IMAP_USER}`);
   }
 
   const openAiRows = allRows.filter((r) => r.url.includes("openai.com") || r.url.includes("chatgpt.com"));

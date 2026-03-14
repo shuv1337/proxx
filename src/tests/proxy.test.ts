@@ -540,7 +540,10 @@ test("routes chat completions through native Gemini generateContent when GEMINI_
               };
             }
 
-            assert.match(request.url ?? "", /\/models\/gemini-2\.5-pro:generateContent\?key=gem-key-1/);
+            assert.match(request.url ?? "", /\/models\/gemini-2\.5-pro:generateContent$/);
+            assert.equal(request.headers["x-goog-api-key"], "gem-key-1");
+            assert.equal(request.headers.authorization, undefined);
+
             const parsed = JSON.parse(body) as Record<string, unknown>;
             assert.ok(Array.isArray(parsed.contents));
 

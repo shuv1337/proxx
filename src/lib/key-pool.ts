@@ -526,6 +526,12 @@ function accountCooldownKey(credential: ProviderCredential): string {
   return `${credential.providerId}\0${credential.token}`;
 }
 
+function resolveExpiryBufferMs(expiryBufferMs: unknown): number {
+  return Number.isFinite(expiryBufferMs)
+    ? Math.max(expiryBufferMs as number, 0)
+    : 60_000;
+}
+
 export class KeyPool {
   private readonly cooldownByAccountKey = new Map<string, number>();
   private readonly inFlightByAccountKey = new Map<string, number>();
@@ -553,7 +559,7 @@ export class KeyPool {
     const startOffset = providerState.nextOffset % accountCount;
     providerState.nextOffset = (providerState.nextOffset + 1) % accountCount;
 
-    const expiryBuffer = this.config.expiryBufferMs ?? 60_000;
+    const expiryBuffer = resolveExpiryBufferMs(this.config.expiryBufferMs);
     const idle: ProviderCredential[] = [];
     const busy: ProviderCredential[] = [];
     for (let index = 0; index < accountCount; index += 1) {
@@ -624,7 +630,7 @@ export class KeyPool {
     const startOffset = providerState.nextOffset % accountCount;
     providerState.nextOffset = (providerState.nextOffset + 1) % accountCount;
 
-    const expiryBuffer = this.config.expiryBufferMs ?? 60_000;
+    const expiryBuffer = resolveExpiryBufferMs(this.config.expiryBufferMs);
 
     const idle: ProviderCredential[] = [];
     const busy: ProviderCredential[] = [];

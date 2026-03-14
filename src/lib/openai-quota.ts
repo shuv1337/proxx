@@ -265,13 +265,13 @@ function quotaErrorCode(responseText: string): string | undefined {
     }
 
     const detail = isRecord(parsed.detail) ? parsed.detail : undefined;
-    const detailCode = asString(detail?.code)?.trim();
+    const detailCode = asString(detail?.code)?.trim()?.toLowerCase();
     if (detailCode && detailCode.length > 0) {
       return detailCode;
     }
 
     const error = isRecord(parsed.error) ? parsed.error : undefined;
-    const errorCode = asString(error?.code)?.trim() ?? asString(parsed.code)?.trim();
+    const errorCode = (asString(error?.code) ?? asString(parsed.code))?.trim()?.toLowerCase();
     return errorCode && errorCode.length > 0 ? errorCode : undefined;
   } catch {
     return undefined;

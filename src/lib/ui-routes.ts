@@ -326,7 +326,6 @@ async function buildUsageOverview(
   };
 
   for (const [providerId, provider] of providerById.entries()) {
-    const keyPoolStatus = allStatuses[providerId];
     const accountStatusById = new Map((allAccountStatuses[providerId] ?? []).map((entry) => [entry.accountId, entry]));
 
     for (const account of provider.accounts) {
@@ -350,9 +349,10 @@ async function buildUsageOverview(
       };
 
       const accountStatus = accountStatusById.get(account.id);
+      const inKeyPool = accountStatus !== undefined;
       const status = accountStatus && !accountStatus.available
         ? "cooldown"
-        : agg.requestCount > 0 || keyPoolStatus
+        : agg.requestCount > 0 || inKeyPool
           ? "healthy"
           : "idle";
 

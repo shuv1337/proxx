@@ -33,6 +33,7 @@ export class TokenRefreshManager {
   private readonly inFlight = new Map<string, Promise<ProviderCredential | null>>();
   private readonly failures = new Map<string, RefreshFailureRecord>();
   private backgroundTimer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
   private readonly config: TokenRefreshManagerConfig;
 
   public constructor(
@@ -45,6 +46,10 @@ export class TokenRefreshManager {
 
   public async refresh(credential: ProviderCredential): Promise<ProviderCredential | null> {
     const key = this.accountKey(credential);
+
+    if (this.stopped) {
+      return null;
+    }
 
     if (this.isBackedOff(key)) {
       return null;
@@ -104,6 +109,8 @@ export class TokenRefreshManager {
       return;
     }
 
+    this.stopped = false;
+
     this.backgroundTimer = setInterval(async () => {
       try {
         const expiring = getExpiringAccounts();
@@ -126,6 +133,16 @@ export class TokenRefreshManager {
     if (this.backgroundTimer) {
       clearInterval(this.backgroundTimer);
       this.backgroundTimer = null;
+    }
+  }
+
+  public async stopAndWait(): Promise<void> {
+    this.stopped = true;
+    this.stopBackgroundRefresh();
+
+    while (this.inFlight.size > 0) {
+      const pending = [...this.inFlight.values()];
+      await Promise.allSettled(pending);
     }
   }
 

@@ -479,7 +479,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       const allFactoryAccounts = await keyPool.getAllAccounts("factory").catch(() => [] as ProviderCredential[]);
       for (const account of allFactoryAccounts) {
         if (factoryCredentialNeedsRefresh(account)) {
-          await refreshFactoryAccount(account);
+          await tokenRefreshManager.refresh(account);
         }
       }
     }
@@ -998,13 +998,31 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       promptCacheKey: promptCacheKey ? hashPromptCacheKey(promptCacheKey) : undefined,
     }, "responses passthrough: incoming body");
 
-    const model = typeof requestBody.model === "string" ? requestBody.model : "";
-    if (model.length === 0) {
+    const requestedModelInput = typeof requestBody.model === "string" ? requestBody.model : "";
+    if (requestedModelInput.length === 0) {
       sendOpenAiError(reply, 400, "Missing required field: model", "invalid_request_error", "missing_model");
       return;
     }
 
-    const { strategy, context } = buildResponsesPassthroughContext(config, request.headers, requestBody, model);
+    let routingModelInput = requestedModelInput;
+    try {
+      const catalog = await getResolvedModelCatalog();
+      const aliasTarget = catalog.aliasTargets[requestedModelInput];
+      if (typeof aliasTarget === "string" && aliasTarget.length > 0) {
+        routingModelInput = aliasTarget;
+        reply.header("x-open-hax-model-alias", `${requestedModelInput}->${aliasTarget}`);
+      }
+    } catch (error) {
+      request.log.warn({ error: toErrorMessage(error) }, "failed to resolve dynamic model aliases for /v1/responses; using requested model as-is");
+    }
+
+    const { strategy, context } = buildResponsesPassthroughContext(
+      config,
+      request.headers,
+      requestBody,
+      requestedModelInput,
+      routingModelInput,
+    );
     reply.header("x-open-hax-upstream-mode", strategy.mode);
 
     let payload: ReturnType<typeof strategy.buildPayload>;
@@ -1439,13 +1457,14 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   }
 
   app.addHook("onClose", async () => {
-    tokenRefreshManager.stopBackgroundRefresh();
+    await tokenRefreshManager.stopAndWait();
 
     if (accountHealthStore) {
       await accountHealthStore.close();
     }
 
     await requestLogStore.close();
+    await credentialStore.close();
     if (sql) {
       await closeConnection(sql);
     }

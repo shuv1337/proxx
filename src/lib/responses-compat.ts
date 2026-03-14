@@ -941,15 +941,17 @@ export function responsesOutputHasReasoning(responseBody: unknown): boolean {
 
 export function extractTerminalResponseFromEventStream(streamText: string): Record<string, unknown> | undefined {
   const payloads = parseResponsesSsePayloads(streamText);
+  let lastTerminalResponse: Record<string, unknown> | undefined;
+
   for (const payload of payloads) {
     const type = asString(payload["type"]);
     const response = isRecord(payload["response"]) ? payload["response"] : null;
     if ((type === "response.completed" || type === "response.incomplete") && response) {
-      return response;
+      lastTerminalResponse = response;
     }
   }
 
-  return undefined;
+  return lastTerminalResponse;
 }
 
 function chunkTextByWords(text: string, wordsPerChunk: number): string[] {
@@ -1132,7 +1134,6 @@ export async function writeInterleavedResponsesSse(
     }
 
     if (itemType === "function_call") {
-      hasToolCalls = true;
       const functionName = asString(item["name"]);
       if (!functionName) {
         continue;
@@ -1160,6 +1161,7 @@ export async function writeInterleavedResponsesSse(
         isFirstChunk = false;
       }
 
+      hasToolCalls = true;
       emitChunk(delta, null);
       toolCallIndex++;
       const delayMs = nextStreamChunkDelayMs();
