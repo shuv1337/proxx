@@ -58,8 +58,12 @@ export interface CredentialStoreLike {
     refreshToken?: string,
     expiresAt?: number,
     chatgptAccountId?: string,
+    email?: string,
+    subject?: string,
+    planType?: string,
   ): Promise<void>;
-  removeAccount?(providerId: string, accountId: string): Promise<boolean>;
+  flush?(): Promise<void>;
+  removeAccount(providerId: string, accountId: string): Promise<boolean>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -363,6 +367,15 @@ export class CredentialStore {
     private readonly filePath: string,
     private readonly defaultProviderId: string,
   ) {}
+
+  public async flush(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+
+    await this.flushToDisk();
+  }
 
   public async listProviders(revealSecrets: boolean): Promise<CredentialProviderView[]> {
     const credentials = await this.readNormalized();
