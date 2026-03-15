@@ -1029,7 +1029,7 @@ async function updateUsageCountsFromResponse(
     return;
   }
 
-  const isStream = responseIsEventStream(response);
+  const isStream = responseLooksLikeEventStream(response, mode);
   const tps = isStream
     && typeof usageCounts.completionTokens === "number"
     && Number.isFinite(usageCounts.completionTokens)
