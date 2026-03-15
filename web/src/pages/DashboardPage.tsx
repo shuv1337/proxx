@@ -241,14 +241,14 @@ export function DashboardPage(): JSX.Element {
         </article>
       </section>
 
-      <section className="dashboard-detail-grid">
-        <article className="dashboard-panel panel-sheen">
-          <header className="dashboard-panel-header">
-            <div>
-              <h3>Account Token Share</h3>
-              <p>Who is carrying the last 24h load.</p>
-            </div>
-          </header>
+      <article className="dashboard-panel panel-sheen dashboard-area-tokens">
+        <header className="dashboard-panel-header">
+          <div>
+            <h3>Account Token Share</h3>
+            <p>Who is carrying the last 24h load.</p>
+          </div>
+        </header>
+        <div className="dashboard-panel-scroll">
           <div className="dashboard-donut-wrap">
             {donutSegments(topAccounts)}
             <div className="dashboard-donut-legend">
@@ -263,46 +263,50 @@ export function DashboardPage(): JSX.Element {
               ))}
             </div>
           </div>
-        </article>
+        </div>
+      </article>
 
-        <article className="dashboard-panel panel-sheen">
-          <header className="dashboard-panel-header">
-            <div>
-              <h3>Service Tier Mix</h3>
-              <p>How the last 24h request volume splits across fast mode, priority, and standard traffic.</p>
-            </div>
-          </header>
+      <article className="dashboard-panel panel-sheen dashboard-area-tier">
+        <header className="dashboard-panel-header">
+          <div>
+            <h3>Service Tier Mix</h3>
+            <p>How the last 24h request volume splits across fast mode, priority, and standard traffic.</p>
+          </div>
+        </header>
+        <div className="dashboard-panel-scroll">
           {overview ? serviceTierShareBars(overview.summary) : <div className="dashboard-account-empty">Loading tier mix…</div>}
-        </article>
-      </section>
+        </div>
+      </article>
 
-      <section className="dashboard-panel panel-sheen">
+      <article className="dashboard-panel panel-sheen dashboard-area-trend">
         <header className="dashboard-panel-header">
           <div>
             <h3>Traffic Trend</h3>
             <p>Hourly request and token movement.</p>
           </div>
         </header>
-        <div className="dashboard-trend-grid">
-          <div>
-            <span className="dashboard-chart-label">Requests</span>
-            {overview ? miniBars(overview.trends.requests) : <div className="dashboard-sparkbars dashboard-sparkbars-placeholder" />}
-          </div>
-          <div>
-            <span className="dashboard-chart-label">Tokens</span>
-            {overview ? miniBars(overview.trends.tokens) : <div className="dashboard-sparkbars dashboard-sparkbars-placeholder" />}
+        <div className="dashboard-panel-scroll">
+          <div className="dashboard-trend-grid">
+            <div>
+              <span className="dashboard-chart-label">Requests</span>
+              {overview ? miniBars(overview.trends.requests) : <div className="dashboard-sparkbars dashboard-sparkbars-placeholder" />}
+            </div>
+            <div>
+              <span className="dashboard-chart-label">Tokens</span>
+              {overview ? miniBars(overview.trends.tokens) : <div className="dashboard-sparkbars dashboard-sparkbars-placeholder" />}
+            </div>
           </div>
         </div>
-      </section>
+      </article>
 
-      <section className="dashboard-detail-grid dashboard-detail-grid-wide">
-        <article className="dashboard-panel panel-sheen">
-          <header className="dashboard-panel-header">
-            <div>
-              <h3>Provider Pool Status</h3>
-              <p>Availability, cooldown pressure, and account counts per upstream provider.</p>
-            </div>
-          </header>
+      <article className="dashboard-panel panel-sheen dashboard-area-pool">
+        <header className="dashboard-panel-header">
+          <div>
+            <h3>Provider Pool Status</h3>
+            <p>Availability, cooldown pressure, and account counts per upstream provider.</p>
+          </div>
+        </header>
+        <div className="dashboard-panel-scroll">
           <div className="dashboard-provider-grid">
             {providerStatuses.length === 0 ? (
               <div className="dashboard-account-empty">No provider status available yet.</div>
@@ -323,15 +327,17 @@ export function DashboardPage(): JSX.Element {
               </article>
             ))}
           </div>
-        </article>
+        </div>
+      </article>
 
-        <article className="dashboard-panel panel-sheen">
-          <header className="dashboard-panel-header">
-            <div>
-              <h3>Recent Request Log</h3>
-              <p>The last few upstream attempts, useful for spotting fallback churn and model failures.</p>
-            </div>
-          </header>
+      <article className="dashboard-panel panel-sheen dashboard-area-logs">
+        <header className="dashboard-panel-header">
+          <div>
+            <h3>Recent Request Log</h3>
+            <p>The last few upstream attempts, useful for spotting fallback churn and model failures.</p>
+          </div>
+        </header>
+        <div className="dashboard-panel-scroll">
           <div className="dashboard-log-table">
             <div className="dashboard-log-header">
               <span>When</span>
@@ -356,10 +362,10 @@ export function DashboardPage(): JSX.Element {
               </div>
             ))}
           </div>
-        </article>
-      </section>
+        </div>
+      </article>
 
-      <section className="dashboard-panel panel-sheen">
+      <article className="dashboard-panel panel-sheen dashboard-area-health">
         <header className="dashboard-panel-header">
           <div>
             <h3>Account Health</h3>
@@ -378,45 +384,47 @@ export function DashboardPage(): JSX.Element {
             </label>
           </div>
         </header>
-        <div className="dashboard-account-table">
-          <div className="dashboard-account-table-header">
-            <span>Account</span>
-            <span>Status</span>
-            <span>Health</span>
-            <span>TTFT</span>
-            <span>TPS</span>
-            <span>Cache</span>
-            <span>Requests</span>
-            <span>Tokens</span>
-            <span>Last Seen</span>
-          </div>
-          {recentAccounts.length === 0 ? (
-            <div className="dashboard-account-empty">No request log activity yet.</div>
-          ) : (
-            recentAccounts.map((account) => (
-              <div key={`${account.providerId}-${account.accountId}`} className="dashboard-account-row">
-                <div>
-                  <strong>{account.displayName}</strong>
-                  <small>{formatAuthType(account.authType)}</small>
+        <div className="dashboard-panel-scroll">
+          <div className="dashboard-account-table">
+            <div className="dashboard-account-table-header">
+              <span>Account</span>
+              <span>Status</span>
+              <span>Health</span>
+              <span>TTFT</span>
+              <span>TPS</span>
+              <span>Cache</span>
+              <span>Requests</span>
+              <span>Tokens</span>
+              <span>Last Seen</span>
+            </div>
+            {recentAccounts.length === 0 ? (
+              <div className="dashboard-account-empty">No request log activity yet.</div>
+            ) : (
+              recentAccounts.map((account) => (
+                <div key={`${account.providerId}-${account.accountId}`} className="dashboard-account-row">
+                  <div>
+                    <strong>{account.displayName}</strong>
+                    <small>{formatAuthType(account.authType)}</small>
+                  </div>
+                  <span className={`dashboard-status-pill dashboard-status-${account.status}`}>{account.status}</span>
+                  <span>{formatMaybeScore(account.healthScore)}</span>
+                  <span>{formatMaybeMs(account.avgTtftMs)}</span>
+                  <span>{formatMaybeTps(account.avgTps)}</span>
+                  <span>
+                    {account.cacheKeyUseCount > 0
+                      ? `${formatPercent((account.cacheHitCount / account.cacheKeyUseCount) * 100)} (${account.cacheHitCount}/${account.cacheKeyUseCount})`
+                      : "-"}
+                    {account.cachedPromptTokens > 0 ? ` · ${formatCompactNumber(account.cachedPromptTokens)} cached` : ""}
+                  </span>
+                  <span>{formatCompactNumber(account.requestCount)}</span>
+                  <span>{formatCompactNumber(account.totalTokens)}</span>
+                  <span>{formatDate(account.lastUsedAt)}</span>
                 </div>
-                <span className={`dashboard-status-pill dashboard-status-${account.status}`}>{account.status}</span>
-                <span>{formatMaybeScore(account.healthScore)}</span>
-                <span>{formatMaybeMs(account.avgTtftMs)}</span>
-                <span>{formatMaybeTps(account.avgTps)}</span>
-                <span>
-                  {account.cacheKeyUseCount > 0
-                    ? `${formatPercent((account.cacheHitCount / account.cacheKeyUseCount) * 100)} (${account.cacheHitCount}/${account.cacheKeyUseCount})`
-                    : "-"}
-                  {account.cachedPromptTokens > 0 ? ` · ${formatCompactNumber(account.cachedPromptTokens)} cached` : ""}
-                </span>
-                <span>{formatCompactNumber(account.requestCount)}</span>
-                <span>{formatCompactNumber(account.totalTokens)}</span>
-                <span>{formatDate(account.lastUsedAt)}</span>
-              </div>
-            ))
-          )}
+              ))
+            )}
+          </div>
         </div>
-      </section>
+      </article>
     </div>
   );
 }

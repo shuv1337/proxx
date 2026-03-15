@@ -56,6 +56,9 @@ textarea {
 
 .shell-root-dashboard {
   max-width: 1920px;
+  height: 100vh;
+  grid-template-rows: auto auto 1fr;
+  overflow: hidden;
 }
 
 .shell-header {
@@ -172,6 +175,11 @@ button:disabled {
   min-height: 70vh;
 }
 
+.shell-root-dashboard .shell-main {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .panel-sheen {
   position: relative;
   overflow: hidden;
@@ -189,8 +197,26 @@ button:disabled {
 
 .dashboard-layout {
   display: grid;
-  gap: 14px;
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-rows: auto auto 1fr 1fr;
+  grid-template-areas:
+    "hero    hero    hero"
+    "metrics metrics metrics"
+    "tokens  tier    trend"
+    "pool    logs    health";
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
+
+.dashboard-hero         { grid-area: hero; }
+.dashboard-area-tokens  { grid-area: tokens; }
+.dashboard-area-tier    { grid-area: tier; }
+.dashboard-area-trend   { grid-area: trend; }
+.dashboard-area-pool    { grid-area: pool; }
+.dashboard-area-logs    { grid-area: logs; }
+.dashboard-area-health  { grid-area: health; }
 
 .dashboard-hero,
 .dashboard-panel,
@@ -242,6 +268,7 @@ button:disabled {
 }
 
 .dashboard-metrics-grid {
+  grid-area: metrics;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
@@ -305,21 +332,20 @@ button:disabled {
   opacity: 0.18;
 }
 
-.dashboard-detail-grid {
-  display: grid;
-  grid-template-columns: 1.15fr 1fr;
-  gap: 14px;
-}
-
-.dashboard-detail-grid-wide {
-  grid-template-columns: 1fr 2fr;
-}
+/* detail-grid wrappers removed — panels are now direct grid children */
 
 .dashboard-panel {
   padding: 16px;
   display: grid;
+  grid-template-rows: auto 1fr;
   gap: 14px;
-  align-content: start;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dashboard-panel-scroll {
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .dashboard-panel-header {
@@ -1198,13 +1224,30 @@ a {
     grid-template-columns: 1fr;
   }
 
+   .dashboard-layout {
+     grid-template-columns: 1fr;
+     grid-template-rows: auto auto auto auto auto auto auto auto;
+     grid-template-areas:
+       "hero" "metrics" "tokens" "tier" "trend" "pool" "logs" "health";
+     height: auto;
+     overflow-y: auto;
+   }
+
    .dashboard-hero,
-   .dashboard-detail-grid,
-   .dashboard-detail-grid-wide,
    .dashboard-donut-wrap,
    .dashboard-metrics-grid {
      grid-template-columns: 1fr;
-    }
+   }
+
+   .shell-root-dashboard {
+     height: auto;
+     overflow: auto;
+   }
+
+   .shell-root-dashboard .shell-main {
+     min-height: 70vh;
+     overflow: visible;
+   }
 
    .dashboard-hero-meta {
      justify-items: start;
