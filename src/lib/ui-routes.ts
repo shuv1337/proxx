@@ -991,12 +991,15 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
   });
 
   app.get<{
-    Querystring: { readonly providerId?: string; readonly accountId?: string; readonly limit?: string };
+    Querystring: { readonly providerId?: string; readonly accountId?: string; readonly limit?: string; readonly before?: string };
   }>("/api/ui/request-logs", async (request, reply) => {
     const entries = deps.requestLogStore.list({
       providerId: request.query.providerId,
       accountId: request.query.accountId,
       limit: toSafeLimit(request.query.limit, 200, 2000),
+      before: typeof request.query.before === "string" && request.query.before.length > 0
+        ? request.query.before
+        : undefined,
     });
 
     reply.send({ entries });

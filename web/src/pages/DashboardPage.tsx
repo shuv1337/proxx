@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   getUsageOverview,
@@ -148,6 +148,12 @@ export function DashboardPage(): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [accountSort, setAccountSort] = useState("health");
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const logSentinelRef = useRef<HTMLDivElement | null>(null);
+  const logScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const LOG_PAGE_SIZE = 50;
 
   useEffect(() => {
     let cancelled = false;
@@ -159,12 +165,13 @@ export function DashboardPage(): JSX.Element {
         const [nextOverview, credentials, nextLogs] = await Promise.all([
           getUsageOverview(accountSort),
           listCredentials(false),
-          listRequestLogs({ limit: 12 }),
+          listRequestLogs({ limit: LOG_PAGE_SIZE }),
         ]);
         if (!cancelled) {
           setOverview(nextOverview);
           setKeyPoolStatuses(credentials.keyPoolStatuses);
           setRequestLogs(nextLogs);
+          setHasMore(nextLogs.length >= LOG_PAGE_SIZE);
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -187,6 +194,34 @@ export function DashboardPage(): JSX.Element {
       window.clearInterval(timer);
     };
   }, [accountSort]);
+
+  const loadMoreLogs = useCallback(async () => {
+    if (loadingMore || !hasMore || requestLogs.length === 0) return;
+    const lastId = requestLogs[requestLogs.length - 1]?.id;
+    if (!lastId) return;
+    setLoadingMore(true);
+    try {
+      const older = await listRequestLogs({ limit: LOG_PAGE_SIZE, before: lastId });
+      setRequestLogs((prev) => [...prev, ...older]);
+      setHasMore(older.length >= LOG_PAGE_SIZE);
+    } catch {
+      // silently ignore pagination errors
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, hasMore, requestLogs]);
+
+  useEffect(() => {
+    const sentinel = logSentinelRef.current;
+    const scrollRoot = logScrollRef.current;
+    if (!sentinel || !scrollRoot) return;
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0]?.isIntersecting) void loadMoreLogs(); },
+      { root: scrollRoot, rootMargin: "200px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [loadMoreLogs]);
 
   const topAccounts = useMemo(() =>
     [...(overview?.accounts ?? [])]
@@ -340,7 +375,7 @@ export function DashboardPage(): JSX.Element {
             <p>The last few upstream attempts, useful for spotting fallback churn and model failures.</p>
           </div>
         </header>
-        <div className="dashboard-panel-scroll">
+        <div className="dashboard-panel-scroll" ref={logScrollRef}>
           <div className="dashboard-log-table">
             <div className="dashboard-log-header">
               <span>When</span>
@@ -364,6 +399,9 @@ export function DashboardPage(): JSX.Element {
                 <span>{Math.round(entry.latencyMs)} ms</span>
               </div>
             ))}
+            <div ref={logSentinelRef} className="dashboard-log-sentinel">
+              {loadingMore ? <span className="dashboard-log-loading">Loading more…</span> : null}
+            </div>
           </div>
         </div>
       </article>

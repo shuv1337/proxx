@@ -593,6 +593,18 @@ button:disabled {
   padding-top: 6px;
 }
 
+.dashboard-log-sentinel {
+  min-height: 1px;
+}
+
+.dashboard-log-loading {
+  display: block;
+  text-align: center;
+  padding: 8px 0;
+  font-size: 0.72rem;
+  color: rgba(147, 198, 218, 0.6);
+}
+
 .dashboard-status-pill {
   width: fit-content;
   padding: 2px 7px;

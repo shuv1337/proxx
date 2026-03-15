@@ -32,6 +32,7 @@ export interface RequestLogFilters {
   readonly providerId?: string;
   readonly accountId?: string;
   readonly limit?: number;
+  readonly before?: string;
 }
 
 export interface RequestLogRecordInput {
@@ -482,7 +483,17 @@ export class RequestLogStore {
   public list(filters: RequestLogFilters = {}): RequestLogEntry[] {
     const limit = sanitizeLimit(filters.limit, 200);
 
-    const filtered = this.entries.filter((entry) => {
+    let source = this.entries;
+    if (filters.before) {
+      const cursorIdx = this.entries.findIndex((e) => e.id === filters.before);
+      if (cursorIdx > 0) {
+        source = this.entries.slice(0, cursorIdx);
+      } else if (cursorIdx === 0) {
+        return [];
+      }
+    }
+
+    const filtered = source.filter((entry) => {
       if (filters.providerId && entry.providerId !== filters.providerId) {
         return false;
       }

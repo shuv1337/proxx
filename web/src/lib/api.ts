@@ -579,6 +579,7 @@ export async function listRequestLogs(filters: {
   readonly providerId?: string;
   readonly accountId?: string;
   readonly limit?: number;
+  readonly before?: string;
 }): Promise<RequestLogEntry[]> {
   const query = new URLSearchParams();
   if (filters.providerId) {
@@ -589,6 +590,9 @@ export async function listRequestLogs(filters: {
   }
   if (typeof filters.limit === "number") {
     query.set("limit", String(filters.limit));
+  }
+  if (filters.before) {
+    query.set("before", filters.before);
   }
 
   const suffix = query.toString().length > 0 ? `?${query.toString()}` : "";
