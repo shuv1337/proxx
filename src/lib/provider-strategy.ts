@@ -1566,6 +1566,7 @@ class OpenAiResponsesProviderStrategy extends TransformedJsonProviderStrategy {
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload = chatRequestToResponsesRequest(buildRequestBodyForUpstream(context));
     applyRequestedServiceTier(upstreamPayload, context);
+    delete upstreamPayload["max_output_tokens"];
     if (upstreamPayload["instructions"] == null) {
       upstreamPayload["instructions"] = "";
     }
@@ -1673,6 +1674,7 @@ class OpenAiChatCompletionsProviderStrategy extends TransformedJsonProviderStrat
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload = chatRequestToResponsesRequest(buildRequestBodyForUpstream(context));
     applyRequestedServiceTier(upstreamPayload, context);
+    delete upstreamPayload["max_output_tokens"];
     if (upstreamPayload["instructions"] == null) {
       upstreamPayload["instructions"] = "";
     }
@@ -1896,6 +1898,7 @@ class OpenAiResponsesPassthroughStrategy extends BaseProviderStrategy {
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload: Record<string, unknown> = { ...context.requestBody };
     delete upstreamPayload["open_hax"];
+    delete upstreamPayload["max_output_tokens"];
     upstreamPayload["store"] = false;
     upstreamPayload["stream"] = true;
     if (upstreamPayload["instructions"] == null) {

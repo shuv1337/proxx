@@ -3876,6 +3876,62 @@ test("openai passthrough coerces null instructions to empty string (regression: 
   );
 });
 
+test("openai passthrough strips max_output_tokens for codex path (regression: unsupported parameter)", async () => {
+  let observedBody: Record<string, unknown> | undefined;
+
+  await withProxyApp(
+    {
+      keys: [],
+      keysPayload: {
+        providers: {
+          openai: {
+            auth: "oauth_bearer",
+            accounts: [
+              { id: "openai-a", access_token: "oa-token-a", chatgpt_account_id: "chatgpt-a" },
+            ]
+          }
+        }
+      },
+      configOverrides: {
+        upstreamProviderId: "openai",
+        upstreamFallbackProviderIds: [],
+      },
+      upstreamHandler: async (request, body) => {
+        observedBody = JSON.parse(body);
+
+        const streamText = [
+          `event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_mot", status: "in_progress", model: "gpt-5.2", output: [] } })}\n\n`,
+          `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_mot", status: "completed", model: "gpt-5.2", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "OK" }] }], usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 } } })}\n\n`,
+        ].join("");
+
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+          body: streamText
+        };
+      }
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        headers: { "content-type": "application/json" },
+        payload: {
+          model: "gpt-5.2",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+          instructions: "",
+          max_output_tokens: 32000,
+          stream: true
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.ok(observedBody);
+      assert.equal(observedBody.max_output_tokens, undefined, "max_output_tokens must be stripped for codex path");
+    }
+  );
+});
+
 test("openai chat completions strategy converts to responses format for codex path (regression)", async () => {
   let observedPath = "";
   let observedBody: Record<string, unknown> | undefined;
