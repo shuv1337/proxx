@@ -188,7 +188,11 @@ export function DashboardPage(): JSX.Element {
     };
   }, [accountSort]);
 
-  const topAccounts = useMemo(() => overview?.accounts.slice(0, 6) ?? [], [overview]);
+  const topAccounts = useMemo(() =>
+    [...(overview?.accounts ?? [])]
+      .sort((a, b) => b.totalTokens - a.totalTokens)
+      .slice(0, 6),
+    [overview]);
   const recentAccounts = useMemo(() => (overview?.accounts ?? []).slice(0, 10), [overview]);
   const providerStatuses = useMemo(() => Object.values(keyPoolStatuses).sort((a, b) => a.providerId.localeCompare(b.providerId)), [keyPoolStatuses]);
 
