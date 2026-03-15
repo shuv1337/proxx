@@ -691,11 +691,23 @@ export function responsesToChatCompletion(responseBody: unknown, fallbackModel: 
     const totalTokens = asNumber(usage["total_tokens"]);
 
     if (promptTokens !== undefined && completionTokens !== undefined && totalTokens !== undefined) {
-      completion["usage"] = {
+      const mapped: Record<string, unknown> = {
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
         total_tokens: totalTokens
       };
+
+      const inputDetails = isRecord(usage["input_tokens_details"]) ? usage["input_tokens_details"] : null;
+      if (inputDetails) {
+        mapped["prompt_tokens_details"] = { cached_tokens: asNumber(inputDetails["cached_tokens"]) ?? 0 };
+      }
+
+      const outputDetails = isRecord(usage["output_tokens_details"]) ? usage["output_tokens_details"] : null;
+      if (outputDetails) {
+        mapped["completion_tokens_details"] = { reasoning_tokens: asNumber(outputDetails["reasoning_tokens"]) ?? 0 };
+      }
+
+      completion["usage"] = mapped;
     }
   }
 

@@ -4046,7 +4046,7 @@ test("records token usage from codex SSE responses with missing content-type (re
       upstreamHandler: async () => {
         const streamText = [
           `event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_usage", status: "in_progress", model: "gpt-5.2", output: [] } })}\n\n`,
-          `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_usage", status: "completed", model: "gpt-5.2", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "OK" }] }], usage: { input_tokens: 42, output_tokens: 7, total_tokens: 49 } } })}\n\n`,
+          `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_usage", status: "completed", model: "gpt-5.2", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "OK" }] }], usage: { input_tokens: 42, output_tokens: 7, total_tokens: 49, input_tokens_details: { cached_tokens: 30 } } } })}\n\n`,
         ].join("");
 
         return {
@@ -4084,6 +4084,8 @@ test("records token usage from codex SSE responses with missing content-type (re
       assert.equal(entry.promptTokens, 42, "promptTokens must be extracted from codex SSE usage.input_tokens");
       assert.equal(entry.completionTokens, 7, "completionTokens must be extracted from codex SSE usage.output_tokens");
       assert.equal(entry.totalTokens, 49, "totalTokens must be extracted from codex SSE usage.total_tokens");
+      assert.equal(entry.cachedPromptTokens, 30, "cachedPromptTokens must be extracted from input_tokens_details.cached_tokens");
+      assert.equal(entry.cacheHit, true, "cacheHit must be true when cached_tokens > 0");
     }
   );
 });
