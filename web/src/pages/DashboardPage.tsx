@@ -158,6 +158,15 @@ export function DashboardPage(): JSX.Element {
 
   const LOG_PAGE_SIZE = 50;
 
+  const topAccounts = useMemo(() =>
+    [...(overview?.accounts ?? [])]
+      .sort((a, b) => b.totalTokens - a.totalTokens)
+      .slice(0, 6),
+    [overview]);
+  const allAccounts = useMemo(() => overview?.accounts ?? [], [overview]);
+  const visibleAccounts = useMemo(() => allAccounts.slice(0, healthVisible), [allAccounts, healthVisible]);
+  const providerStatuses = useMemo(() => Object.values(keyPoolStatuses).sort((a, b) => a.providerId.localeCompare(b.providerId)), [keyPoolStatuses]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -243,15 +252,6 @@ export function DashboardPage(): JSX.Element {
   }, [loadMoreHealth]);
 
   useEffect(() => { setHealthVisible(50); }, [overview]);
-
-  const topAccounts = useMemo(() =>
-    [...(overview?.accounts ?? [])]
-      .sort((a, b) => b.totalTokens - a.totalTokens)
-      .slice(0, 6),
-    [overview]);
-  const allAccounts = useMemo(() => overview?.accounts ?? [], [overview]);
-  const visibleAccounts = useMemo(() => allAccounts.slice(0, healthVisible), [allAccounts, healthVisible]);
-  const providerStatuses = useMemo(() => Object.values(keyPoolStatuses).sort((a, b) => a.providerId.localeCompare(b.providerId)), [keyPoolStatuses]);
 
   return (
     <div className="dashboard-layout">
