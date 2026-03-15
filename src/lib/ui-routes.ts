@@ -230,57 +230,20 @@ async function buildUsageOverview(
   const shortWindowMs = 2 * 60 * 1000;
   const shortAgg = new Map<string, { ttftSum: number; ttftCount: number; tpsSum: number; tpsCount: number }>();
 
+  // Use pre-computed accumulators for account-level stats (resilient to entries
+  // that were recorded before the usage extraction fix — accumulators track
+  // deltas from update() correctly even when the original entry had null tokens).
+  for (const acc of requestLogStore.snapshotAccountAccumulators()) {
+    const mapKey = `${acc.providerId}\0${acc.accountId}`;
+    accountAgg.set(mapKey, { ...acc });
+  }
+
   for (const entry of recentLogs) {
     modelTotals.set(entry.model, (modelTotals.get(entry.model) ?? 0) + usageCount(entry.totalTokens));
     providerTotals.set(entry.providerId, (providerTotals.get(entry.providerId) ?? 0) + usageCount(entry.totalTokens));
 
-    const mapKey = `${entry.providerId}\0${entry.accountId}`;
-    const current = accountAgg.get(mapKey) ?? {
-      accountId: entry.accountId,
-      providerId: entry.providerId,
-      authType: entry.authType,
-      requestCount: 0,
-      totalTokens: 0,
-      promptTokens: 0,
-      completionTokens: 0,
-      cachedPromptTokens: 0,
-      cacheHitCount: 0,
-      cacheKeyUseCount: 0,
-      ttftSum: 0,
-      ttftCount: 0,
-      tpsSum: 0,
-      tpsCount: 0,
-      lastUsedAtMs: 0,
-    };
-
-    current.requestCount += 1;
-    current.totalTokens += usageCount(entry.totalTokens);
-    current.promptTokens += usageCount(entry.promptTokens);
-    current.completionTokens += usageCount(entry.completionTokens);
-    current.cachedPromptTokens += usageCount(entry.cachedPromptTokens);
-
-    if (entry.promptCacheKeyUsed) {
-      current.cacheKeyUseCount += 1;
-    }
-
-    if (entry.cacheHit) {
-      current.cacheHitCount += 1;
-    }
-
-    if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) {
-      current.ttftSum += entry.ttftMs;
-      current.ttftCount += 1;
-    }
-
-    if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) {
-      current.tpsSum += entry.tps;
-      current.tpsCount += 1;
-    }
-
-    current.lastUsedAtMs = Math.max(current.lastUsedAtMs, entry.timestamp);
-    accountAgg.set(mapKey, current);
-
     if (entry.timestamp >= now - shortWindowMs) {
+      const mapKey = `${entry.providerId}\0${entry.accountId}`;
       const short = shortAgg.get(mapKey) ?? { ttftSum: 0, ttftCount: 0, tpsSum: 0, tpsCount: 0 };
       if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) {
         short.ttftSum += entry.ttftMs;

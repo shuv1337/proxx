@@ -72,6 +72,24 @@ export interface RequestLogHourlyBucket {
   readonly standardRequestCount: number;
 }
 
+export interface AccountUsageAccumulator {
+  readonly providerId: string;
+  readonly accountId: string;
+  readonly authType: RequestAuthType;
+  readonly requestCount: number;
+  readonly totalTokens: number;
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly cachedPromptTokens: number;
+  readonly cacheHitCount: number;
+  readonly cacheKeyUseCount: number;
+  readonly ttftSum: number;
+  readonly ttftCount: number;
+  readonly tpsSum: number;
+  readonly tpsCount: number;
+  readonly lastUsedAtMs: number;
+}
+
 export interface RequestLogPerfSummary {
   readonly providerId: string;
   readonly accountId: string;
@@ -275,10 +293,33 @@ function sumCount(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+type MutableAccountAccumulator = {
+  providerId: string;
+  accountId: string;
+  authType: RequestAuthType;
+  requestCount: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+  cachedPromptTokens: number;
+  cacheHitCount: number;
+  cacheKeyUseCount: number;
+  ttftSum: number;
+  ttftCount: number;
+  tpsSum: number;
+  tpsCount: number;
+  lastUsedAtMs: number;
+};
+
+function accountAccumulatorKey(providerId: string, accountId: string): string {
+  return `${providerId}\0${accountId}`;
+}
+
 export class RequestLogStore {
   private readonly entries: RequestLogEntry[] = [];
   private readonly hourlyBuckets = new Map<number, HourlyBucket>();
   private readonly perfIndex = new Map<string, PerfIndexEntry>();
+  private readonly accountAccumulators = new Map<string, MutableAccountAccumulator>();
   private warmupPromise: Promise<void> | null = null;
   private persistChain: Promise<void> = Promise.resolve();
   private closed = false;
@@ -334,6 +375,7 @@ export class RequestLogStore {
     }
 
     this.applyEntryToHourlyBuckets(entry);
+    this.applyEntryToAccountAccumulator(entry);
     this.updatePerfIndexFromEntry(entry);
     this.schedulePersist();
 
@@ -383,6 +425,7 @@ export class RequestLogStore {
 
     this.entries.splice(entryIndex, 1, next);
     this.applyEntryDeltaToHourlyBuckets(next, current);
+    this.applyEntryDeltaToAccountAccumulator(next, current);
     this.updatePerfIndexFromEntry(next);
     this.schedulePersist();
     return next;
@@ -501,6 +544,51 @@ export class RequestLogStore {
         this.hourlyBuckets.delete(startMs);
       }
     }
+  }
+
+  private applyEntryToAccountAccumulator(entry: RequestLogEntry): void {
+    const key = accountAccumulatorKey(entry.providerId, entry.accountId);
+    const acc = this.accountAccumulators.get(key) ?? {
+      providerId: entry.providerId,
+      accountId: entry.accountId,
+      authType: entry.authType,
+      requestCount: 0, totalTokens: 0, promptTokens: 0, completionTokens: 0,
+      cachedPromptTokens: 0, cacheHitCount: 0, cacheKeyUseCount: 0,
+      ttftSum: 0, ttftCount: 0, tpsSum: 0, tpsCount: 0, lastUsedAtMs: 0,
+    };
+    acc.requestCount += 1;
+    acc.totalTokens += sanitizeOptionalCount(entry.totalTokens) ?? 0;
+    acc.promptTokens += sanitizeOptionalCount(entry.promptTokens) ?? 0;
+    acc.completionTokens += sanitizeOptionalCount(entry.completionTokens) ?? 0;
+    acc.cachedPromptTokens += sanitizeOptionalCount(entry.cachedPromptTokens) ?? 0;
+    if (entry.cacheHit) acc.cacheHitCount += 1;
+    if (entry.promptCacheKeyUsed) acc.cacheKeyUseCount += 1;
+    if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) { acc.ttftSum += entry.ttftMs; acc.ttftCount += 1; }
+    if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) { acc.tpsSum += entry.tps; acc.tpsCount += 1; }
+    acc.lastUsedAtMs = Math.max(acc.lastUsedAtMs, entry.timestamp);
+    this.accountAccumulators.set(key, acc);
+  }
+
+  private applyEntryDeltaToAccountAccumulator(next: RequestLogEntry, prev: RequestLogEntry): void {
+    const key = accountAccumulatorKey(next.providerId, next.accountId);
+    const acc = this.accountAccumulators.get(key);
+    if (!acc) return;
+    acc.totalTokens += (sanitizeOptionalCount(next.totalTokens) ?? 0) - (sanitizeOptionalCount(prev.totalTokens) ?? 0);
+    acc.promptTokens += (sanitizeOptionalCount(next.promptTokens) ?? 0) - (sanitizeOptionalCount(prev.promptTokens) ?? 0);
+    acc.completionTokens += (sanitizeOptionalCount(next.completionTokens) ?? 0) - (sanitizeOptionalCount(prev.completionTokens) ?? 0);
+    acc.cachedPromptTokens += (sanitizeOptionalCount(next.cachedPromptTokens) ?? 0) - (sanitizeOptionalCount(prev.cachedPromptTokens) ?? 0);
+    if (next.cacheHit && !prev.cacheHit) acc.cacheHitCount += 1;
+    if (next.promptCacheKeyUsed && !prev.promptCacheKeyUsed) acc.cacheKeyUseCount += 1;
+    if (typeof next.ttftMs === "number" && Number.isFinite(next.ttftMs) && (prev.ttftMs === undefined || prev.ttftMs === null)) {
+      acc.ttftSum += next.ttftMs; acc.ttftCount += 1;
+    }
+    if (typeof next.tps === "number" && Number.isFinite(next.tps) && (prev.tps === undefined || prev.tps === null)) {
+      acc.tpsSum += next.tps; acc.tpsCount += 1;
+    }
+  }
+
+  public snapshotAccountAccumulators(): readonly AccountUsageAccumulator[] {
+    return [...this.accountAccumulators.values()];
   }
 
   private applyEntryToHourlyBuckets(entry: RequestLogEntry): void {
