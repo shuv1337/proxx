@@ -83,6 +83,14 @@ interface ChatCompletionRequest {
   readonly [key: string]: unknown;
 }
 
+interface WebSearchToolRequest {
+  readonly query?: unknown;
+  readonly numResults?: unknown;
+  readonly searchContextSize?: unknown;
+  readonly allowedDomains?: unknown;
+  readonly model?: unknown;
+}
+
 const PROXY_AUTH_COOKIE_NAME = "open_hax_proxy_auth_token";
 
 function readCookieToken(cookieHeader: string | undefined, name: string): string | undefined {
@@ -231,6 +239,75 @@ function parseJsonIfPossible(body: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+function extractResponseTextAndUrlCitations(payload: unknown): {
+  readonly text: string;
+  readonly citations: Array<{ readonly url: string; readonly title?: string }>;
+  readonly responseId?: string;
+} {
+  if (!isRecord(payload)) {
+    return { text: "", citations: [] };
+  }
+
+  const responseId = typeof payload.id === "string" ? payload.id : undefined;
+  const output = Array.isArray(payload.output) ? payload.output : [];
+  const texts: string[] = [];
+  const citations = new Map<string, { url: string; title?: string }>();
+
+  for (const item of output) {
+    if (!isRecord(item) || item.type !== "message") {
+      continue;
+    }
+    if (typeof item.role === "string" && item.role !== "assistant") {
+      continue;
+    }
+    const content = Array.isArray(item.content) ? item.content : [];
+    for (const part of content) {
+      if (!isRecord(part) || part.type !== "output_text") {
+        continue;
+      }
+
+      const text = typeof part.text === "string" ? part.text : "";
+      if (text.length > 0) {
+        texts.push(text);
+      }
+
+      const annotations = Array.isArray(part.annotations) ? part.annotations : [];
+      for (const ann of annotations) {
+        if (!isRecord(ann)) {
+          continue;
+        }
+        if (ann.type !== "url_citation") {
+          continue;
+        }
+        const url = typeof ann.url === "string" ? ann.url : "";
+        if (!url) {
+          continue;
+        }
+        if (!citations.has(url)) {
+          const title = typeof ann.title === "string" && ann.title.trim().length > 0 ? ann.title.trim() : undefined;
+          citations.set(url, { url, ...(title ? { title } : {}) });
+        }
+      }
+    }
+  }
+
+  const combined = texts.join("\n\n").trim();
+  return { text: combined, citations: Array.from(citations.values()), responseId };
+}
+
+function extractMarkdownLinks(text: string): Array<{ readonly url: string; readonly title?: string }> {
+  const citations = new Map<string, { url: string; title?: string }>();
+  const regex = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  for (const match of text.matchAll(regex)) {
+    const title = (match[1] ?? "").trim();
+    const url = (match[2] ?? "").trim();
+    if (!url) continue;
+    if (citations.has(url)) continue;
+    citations.set(url, { url, ...(title ? { title } : {}) });
+  }
+  return Array.from(citations.values());
 }
 
 function copyInjectedResponseHeaders(reply: FastifyReply, headers: Record<string, string | string[] | undefined>): void {
@@ -781,6 +858,135 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   app.get("/api/tags", async (_request, reply) => {
     const catalog = await getResolvedModelCatalog();
     reply.send(modelIdsToNativeTags(catalog.modelIds));
+  });
+
+  app.post<{ Body: WebSearchToolRequest }>("/api/tools/websearch", async (request, reply) => {
+    if (!isRecord(request.body)) {
+      reply.code(400).send({ error: "invalid_body" });
+      return;
+    }
+
+    const query = typeof request.body.query === "string" ? request.body.query.trim() : "";
+    if (query.length === 0) {
+      reply.code(400).send({ error: "query_required" });
+      return;
+    }
+
+    const rawNumResults = typeof request.body.numResults === "number" ? request.body.numResults : Number.NaN;
+    const numResults = Number.isFinite(rawNumResults)
+      ? Math.max(1, Math.min(20, Math.trunc(rawNumResults)))
+      : 8;
+
+    const searchContextSize = typeof request.body.searchContextSize === "string"
+      ? request.body.searchContextSize.trim().toLowerCase()
+      : "";
+    const contextSize = (searchContextSize === "low" || searchContextSize === "medium" || searchContextSize === "high")
+      ? searchContextSize
+      : undefined;
+
+    const allowedDomains = Array.isArray(request.body.allowedDomains)
+      ? request.body.allowedDomains
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0)
+        .slice(0, 50)
+      : [];
+
+    const requestedModel = typeof request.body.model === "string" ? request.body.model.trim() : "";
+
+    const fallbackModel = process.env.OPEN_HAX_WEBSEARCH_FALLBACK_MODEL?.trim() || "gpt-5.2";
+    const candidateModels = [requestedModel, fallbackModel]
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    const uniqueModels: string[] = [];
+    for (const entry of candidateModels) {
+      if (!uniqueModels.includes(entry)) {
+        uniqueModels.push(entry);
+      }
+    }
+
+    const authHeaders: Record<string, string> = {
+      "content-type": "application/json",
+      ...(config.proxyAuthToken ? { authorization: `Bearer ${config.proxyAuthToken}` } : {}),
+    };
+
+    const baseTool: Record<string, unknown> = {
+      type: "web_search",
+      external_web_access: true,
+      ...(contextSize ? { search_context_size: contextSize } : {}),
+    };
+
+    const buildUserText = (withDomainsHint: boolean) => {
+      const domainHint = withDomainsHint && allowedDomains.length > 0
+        ? `\n\nRestrict sources to these domains when possible:\n${allowedDomains.map((d) => `- ${d}`).join("\n")}`
+        : "";
+      return [
+        `Query: ${query}`,
+        `Return up to ${numResults} results as a Markdown list. Each bullet must include a Markdown link and a 1-2 sentence snippet.`,
+        `Do not fabricate URLs; every link must be backed by web_search citations.`,
+        domainHint,
+      ].join("\n");
+    };
+
+    const attemptPayload = async (model: string, includeDomainsInTool: boolean) => {
+      const tool = includeDomainsInTool && allowedDomains.length > 0
+        ? { ...baseTool, allowed_domains: allowedDomains }
+        : baseTool;
+
+      return app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        headers: authHeaders,
+        payload: {
+          model,
+          instructions: "You are a web search helper. Use the web_search tool to gather sources and answer with citations.",
+          input: [
+            {
+              role: "user",
+              content: [{ type: "input_text", text: buildUserText(!includeDomainsInTool) }],
+            },
+          ],
+          tools: [tool],
+          tool_choice: "auto",
+          store: false,
+          stream: false,
+        },
+      });
+    };
+
+    let lastErrorPayload: unknown;
+
+    for (const model of uniqueModels) {
+      // Try the most structured tool payload first; fall back to hint-only if upstream rejects unknown fields.
+      for (const includeDomainsInTool of [true, false]) {
+        const injected = await attemptPayload(model, includeDomainsInTool);
+        if (injected.statusCode !== 200) {
+          lastErrorPayload = parseJsonIfPossible(injected.body) ?? injected.body;
+          continue;
+        }
+
+        const json = parseJsonIfPossible(injected.body);
+        const extracted = extractResponseTextAndUrlCitations(json);
+
+        const output = extracted.text;
+        const sources = extracted.citations.length > 0
+          ? extracted.citations
+          : extractMarkdownLinks(output);
+
+        reply.send({
+          output,
+          sources: sources.slice(0, numResults),
+          responseId: extracted.responseId,
+          model,
+        });
+        return;
+      }
+    }
+
+    reply.code(502).send({
+      error: "websearch_failed",
+      details: lastErrorPayload,
+    });
   });
 
   app.post<{ Body: ChatCompletionRequest }>("/v1/chat/completions", async (request, reply) => {

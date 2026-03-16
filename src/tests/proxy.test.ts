@@ -4024,6 +4024,107 @@ test("openai passthrough strips max_output_tokens for codex path (regression: un
   );
 });
 
+test("/api/tools/websearch proxies via Responses web_search and extracts url citations", async () => {
+  let observedPath = "";
+  let observedBody: Record<string, unknown> | undefined;
+
+  await withProxyApp(
+    {
+      keys: [],
+      keysPayload: {
+        providers: {
+          openai: {
+            auth: "oauth_bearer",
+            accounts: [
+              { id: "openai-a", access_token: "oa-token-a", chatgpt_account_id: "chatgpt-a" },
+            ]
+          }
+        }
+      },
+      proxyAuthToken: "proxy-token",
+      configOverrides: {
+        upstreamProviderId: "openai",
+        upstreamFallbackProviderIds: [],
+      },
+      upstreamHandler: async (request, body) => {
+        observedPath = request.url ?? "";
+        observedBody = JSON.parse(body);
+
+        const streamText = [
+          `event: response.created\ndata: ${JSON.stringify({
+            type: "response.created",
+            response: { id: "resp_ws", status: "in_progress", model: "gpt-5.2", output: [] },
+          })}\n\n`,
+          `event: response.completed\ndata: ${JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: "resp_ws",
+              status: "completed",
+              model: "gpt-5.2",
+              output: [
+                { type: "web_search_call", id: "ws_1", status: "completed", action: { type: "search", query: "example query" } },
+                {
+                  type: "message",
+                  role: "assistant",
+                  content: [
+                    {
+                      type: "output_text",
+                      text: "- [Example](https://example.com) — Example snippet.",
+                      annotations: [
+                        { type: "url_citation", url: "https://example.com", title: "Example" },
+                      ],
+                    },
+                  ],
+                },
+              ],
+              usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+            },
+          })}\n\n`,
+        ].join("");
+
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+          body: streamText,
+        };
+      }
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/tools/websearch",
+        headers: {
+          authorization: "Bearer proxy-token",
+          "content-type": "application/json",
+        },
+        payload: {
+          query: "example query",
+          numResults: 5,
+          searchContextSize: "medium",
+          model: "gpt-5.2",
+        },
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(observedPath, "/v1/responses");
+      assert.ok(observedBody);
+      assert.ok(Array.isArray(observedBody.tools));
+      assert.ok((observedBody.tools as any[]).some((tool) => isRecord(tool) && tool.type === "web_search"));
+
+      const payload: unknown = response.json();
+      assert.ok(isRecord(payload));
+      assert.equal(typeof payload.output, "string");
+      assert.ok(Array.isArray(payload.sources));
+      assert.equal(payload.responseId, "resp_ws");
+      assert.equal(payload.model, "gpt-5.2");
+
+      const sources = payload.sources as unknown[];
+      assert.ok(isRecord(sources[0]));
+      assert.equal((sources[0] as any).url, "https://example.com");
+    }
+  );
+});
+
 test("records token usage from codex SSE responses with missing content-type (regression)", async () => {
   await withProxyApp(
     {

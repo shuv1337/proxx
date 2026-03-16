@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 export type RequestAuthType = "api_key" | "oauth_bearer" | "local" | "none";
 export type RequestServiceTierSource = "fast_mode" | "explicit" | "none";
@@ -159,6 +159,14 @@ function emptyDb(): RequestLogDb {
     entries: [],
     hourlyBuckets: [],
   };
+}
+
+function buildTempFilePath(filePath: string): string {
+  return join(dirname(filePath), `.${basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+}
+
+function buildCorruptFilePath(filePath: string): string {
+  return join(dirname(filePath), `${basename(filePath)}.corrupt-${Date.now()}-${process.pid}-${crypto.randomUUID()}`);
 }
 
 function hydrateEntry(raw: unknown): RequestLogEntry | null {
@@ -721,60 +729,49 @@ export class RequestLogStore {
     }
   }
 
-  private async loadFromDisk(): Promise<void> {
+  private resetState(): void {
+    this.entries.splice(0, this.entries.length);
+    this.hourlyBuckets.clear();
+    this.perfIndex.clear();
+    this.accountAccumulators.clear();
+  }
+
+  private snapshotDb(): RequestLogDb {
+    return {
+      entries: this.entries,
+      hourlyBuckets: this.snapshotHourlyBuckets(),
+      accountAccumulators: this.snapshotAccountAccumulators(),
+    };
+  }
+
+  private async quarantineCorruptFile(error: SyntaxError): Promise<void> {
+    const corruptFilePath = buildCorruptFilePath(this.filePath);
+
     try {
-      const contents = await readFile(this.filePath, "utf8");
-      const parsed: unknown = JSON.parse(contents);
-      const db = hydrateDb(parsed, this.maxEntries);
-      this.entries.splice(0, this.entries.length, ...db.entries);
-
-      this.hourlyBuckets.clear();
-      for (const bucket of db.hourlyBuckets ?? []) {
-        this.hourlyBuckets.set(bucket.startMs, {
-          startMs: bucket.startMs,
-          requestCount: bucket.requestCount,
-          errorCount: bucket.errorCount,
-          totalTokens: bucket.totalTokens,
-          promptTokens: bucket.promptTokens,
-          completionTokens: bucket.completionTokens,
-          cachedPromptTokens: bucket.cachedPromptTokens,
-          cacheHitCount: bucket.cacheHitCount,
-          cacheKeyUseCount: bucket.cacheKeyUseCount,
-          fastModeRequestCount: bucket.fastModeRequestCount,
-          priorityRequestCount: bucket.priorityRequestCount,
-          standardRequestCount: bucket.standardRequestCount,
-        });
+      await rename(this.filePath, corruptFilePath);
+      console.warn(
+        `[request-log-store] Failed to parse request logs from ${this.filePath}; moved corrupt file to ${corruptFilePath}: ${error.message}`,
+      );
+    } catch (renameError) {
+      const code = (renameError as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT") {
+        throw renameError;
       }
 
-      this.rebuildPerfIndex();
+      console.warn(
+        `[request-log-store] Failed to parse request logs from ${this.filePath}; file disappeared before quarantine: ${error.message}`,
+      );
+    }
 
-      this.accountAccumulators.clear();
-      if (Array.isArray(db.accountAccumulators) && db.accountAccumulators.length > 0) {
-        for (const acc of db.accountAccumulators) {
-          if (isRecord(acc) && typeof acc.providerId === "string" && typeof acc.accountId === "string") {
-            const key = accountAccumulatorKey(acc.providerId as string, acc.accountId as string);
-            this.accountAccumulators.set(key, {
-              providerId: acc.providerId as string,
-              accountId: acc.accountId as string,
-              authType: (acc.authType as RequestAuthType) ?? "api_key",
-              requestCount: asNumber(acc.requestCount) ?? 0,
-              totalTokens: asNumber(acc.totalTokens) ?? 0,
-              promptTokens: asNumber(acc.promptTokens) ?? 0,
-              completionTokens: asNumber(acc.completionTokens) ?? 0,
-              cachedPromptTokens: asNumber(acc.cachedPromptTokens) ?? 0,
-              cacheHitCount: asNumber(acc.cacheHitCount) ?? 0,
-              cacheKeyUseCount: asNumber(acc.cacheKeyUseCount) ?? 0,
-              ttftSum: asNumber(acc.ttftSum) ?? 0,
-              ttftCount: asNumber(acc.ttftCount) ?? 0,
-              tpsSum: asNumber(acc.tpsSum) ?? 0,
-              tpsCount: asNumber(acc.tpsCount) ?? 0,
-              lastUsedAtMs: asNumber(acc.lastUsedAtMs) ?? 0,
-            });
-          }
-        }
-      } else {
-        this.rebuildAccountAccumulators();
-      }
+    this.resetState();
+    await this.persistNow();
+  }
+
+  private async loadFromDisk(): Promise<void> {
+    let contents: string;
+
+    try {
+      contents = await readFile(this.filePath, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
         throw error;
@@ -782,6 +779,70 @@ export class RequestLogStore {
 
       await mkdir(dirname(this.filePath), { recursive: true });
       await this.persistNow();
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(contents);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) {
+        throw error;
+      }
+
+      await this.quarantineCorruptFile(error);
+      return;
+    }
+
+    const db = hydrateDb(parsed, this.maxEntries);
+    this.entries.splice(0, this.entries.length, ...db.entries);
+
+    this.hourlyBuckets.clear();
+    for (const bucket of db.hourlyBuckets ?? []) {
+      this.hourlyBuckets.set(bucket.startMs, {
+        startMs: bucket.startMs,
+        requestCount: bucket.requestCount,
+        errorCount: bucket.errorCount,
+        totalTokens: bucket.totalTokens,
+        promptTokens: bucket.promptTokens,
+        completionTokens: bucket.completionTokens,
+        cachedPromptTokens: bucket.cachedPromptTokens,
+        cacheHitCount: bucket.cacheHitCount,
+        cacheKeyUseCount: bucket.cacheKeyUseCount,
+        fastModeRequestCount: bucket.fastModeRequestCount,
+        priorityRequestCount: bucket.priorityRequestCount,
+        standardRequestCount: bucket.standardRequestCount,
+      });
+    }
+
+    this.rebuildPerfIndex();
+
+    this.accountAccumulators.clear();
+    if (Array.isArray(db.accountAccumulators) && db.accountAccumulators.length > 0) {
+      for (const acc of db.accountAccumulators) {
+        if (isRecord(acc) && typeof acc.providerId === "string" && typeof acc.accountId === "string") {
+          const key = accountAccumulatorKey(acc.providerId as string, acc.accountId as string);
+          this.accountAccumulators.set(key, {
+            providerId: acc.providerId as string,
+            accountId: acc.accountId as string,
+            authType: (acc.authType as RequestAuthType) ?? "api_key",
+            requestCount: asNumber(acc.requestCount) ?? 0,
+            totalTokens: asNumber(acc.totalTokens) ?? 0,
+            promptTokens: asNumber(acc.promptTokens) ?? 0,
+            completionTokens: asNumber(acc.completionTokens) ?? 0,
+            cachedPromptTokens: asNumber(acc.cachedPromptTokens) ?? 0,
+            cacheHitCount: asNumber(acc.cacheHitCount) ?? 0,
+            cacheKeyUseCount: asNumber(acc.cacheKeyUseCount) ?? 0,
+            ttftSum: asNumber(acc.ttftSum) ?? 0,
+            ttftCount: asNumber(acc.ttftCount) ?? 0,
+            tpsSum: asNumber(acc.tpsSum) ?? 0,
+            tpsCount: asNumber(acc.tpsCount) ?? 0,
+            lastUsedAtMs: asNumber(acc.lastUsedAtMs) ?? 0,
+          });
+        }
+      }
+    } else {
+      this.rebuildAccountAccumulators();
     }
   }
 
@@ -799,10 +860,14 @@ export class RequestLogStore {
 
   private async persistNow(): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, JSON.stringify({
-      entries: this.entries,
-      hourlyBuckets: this.snapshotHourlyBuckets(),
-      accountAccumulators: this.snapshotAccountAccumulators(),
-    }, null, 2), "utf8");
+    const tempFilePath = buildTempFilePath(this.filePath);
+
+    try {
+      await writeFile(tempFilePath, JSON.stringify(this.snapshotDb(), null, 2), "utf8");
+      await rename(tempFilePath, this.filePath);
+    } catch (error) {
+      await rm(tempFilePath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 }
