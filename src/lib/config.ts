@@ -10,6 +10,25 @@ export interface ProxyConfig {
   readonly upstreamBaseUrl: string;
   readonly openaiProviderId: string;
   readonly openaiBaseUrl: string;
+  /** OpenAI Platform API base URL (e.g. https://api.openai.com). */
+  readonly openaiApiBaseUrl: string;
+
+  /**
+   * Determines where OpenAI image generation requests are sent when routing to the OpenAI provider.
+   *
+   * - `platform`: Use the OpenAI Platform Images API (`OPENAI_API_BASE_URL`, default https://api.openai.com).
+   *   - Works with API keys.
+   *   - For OAuth bearer tokens, requires Platform API scopes (e.g. model/images scopes).
+   *
+   * - `chatgpt`: Use the ChatGPT/Codex backend Responses API (`OPENAI_BASE_URL` + `OPENAI_RESPONSES_PATH`).
+   *   - Sends a Responses request that forces the built-in `image_generation` tool.
+   *   - Translates `image_generation_call` items back into an Images API-compatible JSON response.
+   *   - Intended for ChatGPT-subscription-backed OAuth tokens.
+   *   - Endpoint paths are not guaranteed stable.
+   *
+   * - `auto`: Try `platform` first, then fall back to `chatgpt` on 401/403.
+   */
+  readonly openaiImagesUpstreamMode: "platform" | "chatgpt" | "auto";
   readonly ollamaBaseUrl: string;
   readonly localOllamaEnabled: boolean;
   readonly localOllamaModelPatterns: readonly string[];
@@ -26,6 +45,11 @@ export interface ProxyConfig {
    * The proxy's OpenAI OAuth accounts commonly target ChatGPT's backend API
    * (`OPENAI_BASE_URL=https://chatgpt.com/backend-api`), which does not
    * necessarily expose the same Images endpoint paths as api.openai.com.
+   *
+   * NOTE: as of 2026-03, OpenAI image generation routing primarily targets the
+   * Platform Images API, or uses Codex Responses image generation under
+   * `OPENAI_IMAGES_UPSTREAM_MODE=chatgpt|auto`. These paths are kept for
+   * backwards compatibility.
    */
   readonly openaiImagesGenerationsPaths: readonly string[];
   readonly imagesGenerationsPath: string;
@@ -55,6 +79,18 @@ export interface ProxyConfig {
   readonly githubOAuthCallbackPath: string;
   readonly githubAllowedUsers: readonly string[];
   readonly sessionSecret: string;
+
+  /** OAuth scopes requested during OpenAI browser authorization. */
+  readonly openaiOauthScopes: string;
+
+  /** OAuth client id used for OpenAI browser/device auth flows. */
+  readonly openaiOauthClientId: string;
+
+  /** OAuth issuer base URL used for OpenAI browser/device auth flows. */
+  readonly openaiOauthIssuer: string;
+
+  /** OAuth client secret used for OpenAI token exchange/refresh (optional). */
+  readonly openaiOauthClientSecret?: string;
 }
 
 export const DEFAULT_MODELS: readonly string[] = [
@@ -178,6 +214,14 @@ function csvFromEnv(name: string, fallback: readonly string[]): string[] {
   return items;
 }
 
+function openaiImagesUpstreamModeFromEnv(raw: string | undefined): "platform" | "chatgpt" | "auto" {
+  const normalized = (raw ?? "auto").trim().toLowerCase();
+  if (normalized === "auto") return "auto";
+  if (normalized === "platform" || normalized === "api" || normalized === "api.openai.com") return "platform";
+  if (normalized === "chatgpt" || normalized === "backend-api" || normalized === "backend") return "chatgpt";
+  throw new Error(`Invalid OPENAI_IMAGES_UPSTREAM_MODE: ${raw ?? ""} (expected: platform|chatgpt|auto)`);
+}
+
 function normalizeProviderList(values: readonly string[]): string[] {
   return [...new Set(
     values
@@ -263,6 +307,8 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
   upstreamProviderBaseUrls[upstreamProviderId] = upstreamBaseUrl;
   const openaiProviderId = (process.env.OPENAI_PROVIDER_ID ?? "openai").trim();
   const openaiBaseUrl = (process.env.OPENAI_BASE_URL ?? "https://chatgpt.com/backend-api").replace(/\/+$/, "");
+  const openaiApiBaseUrl = (process.env.OPENAI_API_BASE_URL ?? "https://api.openai.com").replace(/\/+$/, "");
+  const openaiImagesUpstreamMode = openaiImagesUpstreamModeFromEnv(process.env.OPENAI_IMAGES_UPSTREAM_MODE);
   const ollamaBaseUrl = (process.env.OLLAMA_BASE_URL ?? "http://ollama:11434").replace(/\/+$/, "");
   const rawMessagesInterleavedThinkingBeta = process.env.UPSTREAM_MESSAGES_INTERLEAVED_THINKING_BETA;
   const messagesInterleavedThinkingBeta = rawMessagesInterleavedThinkingBeta === undefined
@@ -325,6 +371,26 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     "/codex/images/generations",
   ]);
 
+  const openaiOauthScopesRaw = (process.env.OPENAI_OAUTH_SCOPES ?? "openid profile email offline_access").trim();
+  const openaiOauthScopes = openaiOauthScopesRaw.length > 0
+    ? openaiOauthScopesRaw
+    : "openid profile email offline_access";
+
+  const openaiOauthClientIdRaw = (process.env.OPENAI_OAUTH_CLIENT_ID ?? "app_EMoamEEZ73f0CkXaXp7hrann").trim();
+  const openaiOauthClientId = openaiOauthClientIdRaw.length > 0
+    ? openaiOauthClientIdRaw
+    : "app_EMoamEEZ73f0CkXaXp7hrann";
+
+  const openaiOauthIssuerRaw = (process.env.OPENAI_OAUTH_ISSUER ?? "https://auth.openai.com").trim();
+  const openaiOauthIssuer = (openaiOauthIssuerRaw.length > 0
+    ? openaiOauthIssuerRaw
+    : "https://auth.openai.com").replace(/\/+$/, "");
+
+  const openaiOauthClientSecretRaw = (process.env.OPENAI_OAUTH_CLIENT_SECRET ?? "").trim();
+  const openaiOauthClientSecret = openaiOauthClientSecretRaw.length > 0
+    ? openaiOauthClientSecretRaw
+    : undefined;
+
   return {
     host: process.env.PROXY_HOST ?? process.env.HOST ?? "127.0.0.1",
     port: numberFromEnvAliases(["PROXY_PORT", "PORT"], 8789),
@@ -335,6 +401,8 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     upstreamBaseUrl,
     openaiProviderId,
     openaiBaseUrl,
+    openaiApiBaseUrl,
+    openaiImagesUpstreamMode,
     ollamaBaseUrl,
     localOllamaEnabled,
     localOllamaModelPatterns,
@@ -376,5 +444,10 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     githubOAuthCallbackPath,
     githubAllowedUsers,
     sessionSecret,
+
+    openaiOauthScopes,
+    openaiOauthClientId,
+    openaiOauthIssuer,
+    openaiOauthClientSecret,
   };
 }

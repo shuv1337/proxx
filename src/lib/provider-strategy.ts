@@ -216,6 +216,10 @@ interface ProviderAttemptOutcomeContinue {
   readonly upstreamInvalidRequest?: boolean;
   readonly modelNotFound?: boolean;
   readonly modelNotSupportedForAccount?: boolean;
+  readonly upstreamAuthError?: {
+    readonly status: number;
+    readonly message?: string;
+  };
 }
 
 type ProviderAttemptOutcome = ProviderAttemptOutcomeHandled | ProviderAttemptOutcomeContinue;
@@ -228,6 +232,10 @@ interface FallbackAccumulator {
   sawModelNotFound: boolean;
   sawModelNotSupportedForAccount: boolean;
   attempts: number;
+  lastUpstreamAuthError?: {
+    readonly status: number;
+    readonly message?: string;
+  };
 }
 
 export interface ProviderFallbackExecutionResult {
@@ -1126,6 +1134,24 @@ abstract class BaseProviderStrategy implements ProviderStrategy {
       };
     }
 
+    if (upstreamResponse.status === 401 || upstreamResponse.status === 403) {
+      const authSummary = await summarizeUpstreamError(upstreamResponse);
+      try {
+        await upstreamResponse.arrayBuffer();
+      } catch {
+        // Ignore body read failures while failing over.
+      }
+
+      return {
+        kind: "continue",
+        requestError: true,
+        upstreamAuthError: {
+          status: upstreamResponse.status,
+          message: authSummary.upstreamErrorMessage,
+        },
+      };
+    }
+
     if (upstreamResponse.status === 400 || upstreamResponse.status === 422) {
       try {
         await upstreamResponse.text();
@@ -1835,6 +1861,98 @@ class ChatCompletionsProviderStrategy extends BaseProviderStrategy {
     ensureChatCompletionsUsageInStream(upstreamPayload);
     return buildPayloadResult(upstreamPayload, context);
   }
+}
+
+const CODEX_RESPONSES_IMAGES_MODEL = "gpt-5.2-codex";
+
+function buildCodexResponsesImagesBody(imagesBody: Record<string, unknown>): string {
+  // The Responses API requires a text model that supports the image_generation tool,
+  // not an image-specific model like gpt-image-1.
+  const model = CODEX_RESPONSES_IMAGES_MODEL;
+  const prompt = typeof imagesBody["prompt"] === "string" ? imagesBody["prompt"] : "";
+
+  const tool: Record<string, unknown> = { type: "image_generation" };
+  const size = imagesBody["size"];
+  if (typeof size === "string" && size.length > 0) {
+    tool["size"] = size;
+  }
+  const quality = imagesBody["quality"];
+  if (typeof quality === "string" && quality.length > 0) {
+    tool["quality"] = quality;
+  }
+  const background = imagesBody["background"];
+  if (typeof background === "string" && background.length > 0) {
+    tool["background"] = background;
+  }
+  const outputFormat = imagesBody["output_format"];
+  if (typeof outputFormat === "string" && outputFormat.length > 0) {
+    tool["output_format"] = outputFormat;
+  }
+
+  const responsesPayload: Record<string, unknown> = {
+    model,
+    input: prompt,
+    instructions: "",
+    tools: [tool],
+    // Ensure we always invoke the image_generation tool for Images API compatibility.
+    tool_choice: "required",
+    store: false,
+    stream: true,
+  };
+
+  return JSON.stringify(responsesPayload);
+}
+
+function extractImagesFromCodexResponse(responseBody: string): Record<string, unknown> | undefined {
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(responseBody);
+  } catch {
+    return undefined;
+  }
+
+  if (!isRecord(data)) {
+    return undefined;
+  }
+
+  // Handle SSE wrapper: extract the response object.
+  if (typeof data["type"] === "string" && data["type"] === "response.completed" && isRecord(data["response"])) {
+    data = data["response"] as Record<string, unknown>;
+  }
+
+  return extractImagesFromResponsesOutput(data);
+}
+
+function extractImagesFromCodexEventStream(streamText: string): Record<string, unknown> | undefined {
+  const terminalResponse = extractTerminalResponseFromEventStream(streamText);
+  if (!terminalResponse) {
+    return undefined;
+  }
+  return extractImagesFromResponsesOutput(terminalResponse);
+}
+
+function extractImagesFromResponsesOutput(data: Record<string, unknown>): Record<string, unknown> | undefined {
+  const output = Array.isArray(data["output"]) ? data["output"] : [];
+  const images: Record<string, unknown>[] = [];
+
+  for (const item of output) {
+    if (!isRecord(item)) continue;
+    if (item["type"] !== "image_generation_call") continue;
+    const result = typeof item["result"] === "string" ? item["result"] : "";
+    if (result.length === 0) continue;
+    const revisedPrompt = typeof item["revised_prompt"] === "string" ? item["revised_prompt"] : undefined;
+    images.push({ b64_json: result, ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}) });
+  }
+
+  if (images.length === 0) {
+    return undefined;
+  }
+
+  return {
+    created: Math.floor(Date.now() / 1000),
+    data: images,
+    background: "opaque",
+  };
 }
 
 class ImagesGenerationsPassthroughStrategy extends BaseProviderStrategy {
@@ -2784,27 +2902,79 @@ export async function executeProviderFallback(
       const baseProviderContext: Omit<ProviderAttemptContext, "attempt"> = {
         ...context,
         providerId: candidate.providerId,
+        // This may be overridden per-attempt when `OPENAI_IMAGES_UPSTREAM_MODE=platform|auto`.
         baseUrl: candidate.baseUrl,
         account: candidate.account,
         hasMoreCandidates,
       };
 
       const primaryUpstreamPath = candidateStrategy.getUpstreamPath(baseProviderContext);
-      const upstreamPaths = (candidate.providerId === context.config.openaiProviderId && candidateStrategy.mode === "images")
-        ? dedupePaths([primaryUpstreamPath, ...context.config.openaiImagesGenerationsPaths])
-        : [primaryUpstreamPath];
+      const isOpenAiImages = candidate.providerId === context.config.openaiProviderId && candidateStrategy.mode === "images";
+
+      type UpstreamStepKind = "default" | "openai_platform" | "openai_chatgpt" | "openai_codex_responses_images";
+      type UpstreamStep = {
+        readonly baseUrl: string;
+        readonly upstreamPath: string;
+        readonly kind: UpstreamStepKind;
+        /** HTTP statuses that should fall through to the *next base URL* step (used for platform → ChatGPT). */
+        readonly fallbackToNextBaseOnStatuses?: readonly number[];
+      };
+
+      const upstreamSteps: readonly UpstreamStep[] = (() => {
+        if (!isOpenAiImages) {
+          return [{ baseUrl: candidate.baseUrl, upstreamPath: primaryUpstreamPath, kind: "default" as const }];
+        }
+        const mode = context.config.openaiImagesUpstreamMode;
+
+        // API keys should always use the Platform endpoint.
+        if (candidate.account.authType === "api_key") {
+          return [{ baseUrl: context.config.openaiApiBaseUrl, upstreamPath: primaryUpstreamPath, kind: "openai_platform" as const }];
+        }
+
+        // ChatGPT mode uses the Codex backend Responses stream + the built-in `image_generation`
+        // tool, then translates the result back into an Images API-compatible response.
+        if (mode === "chatgpt") {
+          return [{
+            baseUrl: context.config.openaiBaseUrl,
+            upstreamPath: context.config.openaiResponsesPath,
+            kind: "openai_codex_responses_images" as const,
+          }];
+        }
+
+        if (mode === "platform") {
+          return [{ baseUrl: context.config.openaiApiBaseUrl, upstreamPath: primaryUpstreamPath, kind: "openai_platform" as const }];
+        }
+
+        // auto: try Platform Images API first, then fall back to Codex Responses image generation
+        // on auth/scope failures.
+        return [
+          {
+            baseUrl: context.config.openaiApiBaseUrl,
+            upstreamPath: primaryUpstreamPath,
+            kind: "openai_platform" as const,
+            fallbackToNextBaseOnStatuses: [401, 403],
+          },
+          {
+            baseUrl: context.config.openaiBaseUrl,
+            upstreamPath: context.config.openaiResponsesPath,
+            kind: "openai_codex_responses_images" as const,
+          },
+        ];
+      })();
 
       const hasRetryRemaining = retryIndex < context.config.upstreamTransientRetryCount;
       let shouldContinueTransientRetry = false;
 
-      for (const [pathIndex, upstreamPath] of upstreamPaths.entries()) {
+      for (const [stepIndex, step] of upstreamSteps.entries()) {
+        const upstreamPath = step.upstreamPath;
         accumulator.attempts += 1;
         const providerContext: ProviderAttemptContext = {
           ...baseProviderContext,
+          baseUrl: step.baseUrl,
           attempt: accumulator.attempts,
         };
 
-        const upstreamUrl = joinUrl(candidate.baseUrl, upstreamPath);
+        const upstreamUrl = joinUrl(providerContext.baseUrl, upstreamPath);
         const upstreamHeaders = buildUpstreamHeadersForCredential(context.clientHeaders, candidate.account);
         candidateStrategy.applyRequestHeaders(upstreamHeaders, providerContext, candidatePayload.upstreamPayload);
         const attemptStartedAt = Date.now();
@@ -2817,7 +2987,7 @@ export async function executeProviderFallback(
           "proxy.upstream_path": upstreamPath,
           "proxy.model": context.routedModel,
           "proxy.requested_model": context.requestedModelInput,
-          "proxy.base_url": candidate.baseUrl,
+          "proxy.base_url": providerContext.baseUrl,
           "proxy.fallback_attempt": accumulator.attempts,
         });
         upstreamSpan.setAttributes({
@@ -2825,12 +2995,17 @@ export async function executeProviderFallback(
           "proxy.service_tier_source": candidatePayload.serviceTierSource,
         });
 
+        const isCodexResponsesImages = step.kind === "openai_codex_responses_images";
+        const effectiveBody = isCodexResponsesImages
+          ? buildCodexResponsesImagesBody(candidatePayload.upstreamPayload)
+          : candidatePayload.bodyText;
+
         let upstreamResponse: Response;
         try {
           upstreamResponse = await fetchWithResponseTimeout(upstreamUrl, {
             method: "POST",
             headers: upstreamHeaders,
-            body: candidatePayload.bodyText
+            body: effectiveBody
           }, context.upstreamAttemptTimeoutMs);
         } catch (error) {
           const latencyMs = Date.now() - attemptStartedAt;
@@ -2876,22 +3051,31 @@ export async function executeProviderFallback(
           await usagePromise;
         }
 
-        // OpenAI OAuth accounts usually target ChatGPT backend-api; image endpoints may differ.
-        // If we see a 404, try alternate configured paths before failing over to another account.
-        if (
-          upstreamResponse.status === 404
-          && candidate.providerId === context.config.openaiProviderId
-          && candidateStrategy.mode === "images"
-          && pathIndex < upstreamPaths.length - 1
-        ) {
-          try {
-            await upstreamResponse.arrayBuffer();
-          } catch {
-            // ignore
+        // OpenAI image generation can target either Platform Images API (`api.openai.com`) or the
+        // ChatGPT Codex Responses backend (`chatgpt.com/backend-api/codex/responses`).
+        // When `OPENAI_IMAGES_UPSTREAM_MODE=auto`, fall back from Platform → Codex Responses on
+        // scope/auth failures.
+        if (isOpenAiImages) {
+          const nextStep = stepIndex < upstreamSteps.length - 1 ? upstreamSteps[stepIndex + 1] : undefined;
+          const canFallbackToNextBase =
+            step.fallbackToNextBaseOnStatuses?.includes(upstreamResponse.status) === true
+            && nextStep
+            && nextStep.baseUrl !== step.baseUrl;
+
+          if (canFallbackToNextBase) {
+            try {
+              await upstreamResponse.arrayBuffer();
+            } catch {
+              // ignore
+            }
+            upstreamSpan.setStatus("error", "openai_images_fallback_to_next_base");
+            upstreamSpan.end();
+            continue;
           }
-          upstreamSpan.setStatus("error", "openai_images_path_not_found");
-          upstreamSpan.end();
-          continue;
+
+          // NOTE: We intentionally do not attempt alternate paths for Codex Responses image
+          // generation. If the configured Codex Responses path is invalid, treat it as an upstream
+          // rejection.
         }
 
         if (isRateLimitResponse(upstreamResponse)) {
@@ -2963,6 +3147,50 @@ export async function executeProviderFallback(
           break;
         }
 
+        // Codex Responses API → Images API translation: read the streaming Responses output,
+        // extract `image_generation_call` results, and synthesize an Images API JSON response.
+        if (isCodexResponsesImages && upstreamResponse.ok) {
+          const responseText = await upstreamResponse.text();
+          const contentType = upstreamResponse.headers.get("content-type") ?? "";
+          const looksLikeEventStream = contentType.toLowerCase().includes("text/event-stream") || contentType.length === 0;
+
+          // Check for errors in the SSE stream.
+          if (looksLikeEventStream) {
+            const streamError = responsesEventStreamToErrorPayload(responseText);
+            if (streamError) {
+              upstreamSpan.setStatus("error", "codex_responses_stream_error");
+              upstreamSpan.end();
+              accumulator.sawUpstreamInvalidRequest = true;
+              break;
+            }
+          }
+
+          const imagesPayload = looksLikeEventStream
+            ? extractImagesFromCodexEventStream(responseText)
+            : extractImagesFromCodexResponse(responseText);
+
+          if (imagesPayload) {
+            reply.header("x-open-hax-upstream-provider", providerContext.providerId);
+            reply.header("x-open-hax-upstream-mode", "codex_responses_images");
+            reply.code(200);
+            reply.header("content-type", "application/json");
+            reply.send(imagesPayload);
+            upstreamSpan.setStatus("ok");
+            upstreamSpan.end();
+            if (healthStore) {
+              healthStore.recordSuccess(candidate.account, upstreamResponse.status);
+            }
+            releaseInFlight();
+            return { handled: true, candidateCount: candidates.length, summary: accumulator };
+          }
+
+          // Responses completed but contained no image_generation_call outputs.
+          upstreamSpan.setStatus("error", "codex_responses_no_image_output");
+          upstreamSpan.end();
+          accumulator.sawUpstreamInvalidRequest = true;
+          break;
+        }
+
         reply.header("x-open-hax-upstream-mode", candidateStrategy.mode);
         const outcome = await candidateStrategy.handleProviderAttempt(reply, upstreamResponse, providerContext);
         if (outcome.kind === "handled") {
@@ -3006,6 +3234,9 @@ export async function executeProviderFallback(
         accumulator.sawUpstreamInvalidRequest ||= outcome.upstreamInvalidRequest === true;
         accumulator.sawModelNotFound ||= outcome.modelNotFound === true;
         accumulator.sawModelNotSupportedForAccount ||= outcome.modelNotSupportedForAccount === true;
+        if (outcome.upstreamAuthError) {
+          accumulator.lastUpstreamAuthError = outcome.upstreamAuthError;
+        }
 
         if (!upstreamResponse.ok && outcome.requestError === true && upstreamResponse.status === 401 && candidate.account.authType === "oauth_bearer" && candidate.account.refreshToken && refreshExpiredToken) {
           const refreshedCredential = await refreshExpiredToken(candidate.account);
@@ -3020,7 +3251,7 @@ export async function executeProviderFallback(
               refreshedResponse = await fetchWithResponseTimeout(upstreamUrl, {
                 method: "POST",
                 headers: refreshedHeaders,
-                body: candidatePayload.bodyText
+                body: effectiveBody
               }, context.upstreamAttemptTimeoutMs);
             } catch (error) {
               refreshedRelease();
@@ -3057,6 +3288,46 @@ export async function executeProviderFallback(
                 }
                 break;
               }
+              // Handle Codex Responses → Images translation for the refreshed response.
+              if (isCodexResponsesImages && refreshedResponse.ok) {
+                const refreshedText = await refreshedResponse.text();
+                const refreshedContentType = refreshedResponse.headers.get("content-type") ?? "";
+                const refreshedLooksLikeEventStream = refreshedContentType.toLowerCase().includes("text/event-stream") || refreshedContentType.length === 0;
+
+                if (refreshedLooksLikeEventStream) {
+                  const streamError = responsesEventStreamToErrorPayload(refreshedText);
+                  if (streamError) {
+                    upstreamSpan.setStatus("error", "codex_responses_stream_error");
+                    upstreamSpan.end();
+                    accumulator.sawUpstreamInvalidRequest = true;
+                    break;
+                  }
+                }
+
+                const refreshedImagesPayload = refreshedLooksLikeEventStream
+                  ? extractImagesFromCodexEventStream(refreshedText)
+                  : extractImagesFromCodexResponse(refreshedText);
+
+                if (refreshedImagesPayload) {
+                  reply.header("x-open-hax-upstream-provider", providerContext.providerId);
+                  reply.header("x-open-hax-upstream-mode", "codex_responses_images");
+                  reply.code(200);
+                  reply.header("content-type", "application/json");
+                  reply.send(refreshedImagesPayload);
+                  upstreamSpan.setStatus("ok");
+                  upstreamSpan.end();
+                  if (healthStore) {
+                    healthStore.recordSuccess(refreshedCredential, refreshedResponse.status);
+                  }
+                  releaseInFlight();
+                  return { handled: true, candidateCount: candidates.length, summary: accumulator };
+                }
+                upstreamSpan.setStatus("error", "codex_responses_no_image_output");
+                upstreamSpan.end();
+                accumulator.sawUpstreamInvalidRequest = true;
+                break;
+              }
+
               reply.header("x-open-hax-upstream-mode", candidateStrategy.mode);
               const refreshedOutcome = await candidateStrategy.handleProviderAttempt(reply, refreshedResponse, refreshedProviderContext);
               if (refreshedOutcome.kind === "handled") {
@@ -3087,6 +3358,9 @@ export async function executeProviderFallback(
               accumulator.sawUpstreamInvalidRequest ||= refreshedOutcome.upstreamInvalidRequest === true;
               accumulator.sawModelNotFound ||= refreshedOutcome.modelNotFound === true;
               accumulator.sawModelNotSupportedForAccount ||= refreshedOutcome.modelNotSupportedForAccount === true;
+              if (refreshedOutcome.upstreamAuthError) {
+                accumulator.lastUpstreamAuthError = refreshedOutcome.upstreamAuthError;
+              }
               if (!refreshedResponse.ok && refreshedOutcome.requestError === true && (refreshedResponse.status === 401 || refreshedResponse.status === 403)) {
                 if (shouldCooldownCredentialOnAuthFailure(candidate.providerId, refreshedResponse.status)) {
                   keyPool.markRateLimited(refreshedCredential, Math.min(context.config.keyCooldownMs, 10_000));

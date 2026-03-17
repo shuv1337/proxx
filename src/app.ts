@@ -431,7 +431,12 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
 
   const credentialStore = new CredentialStore(config.keysFilePath, config.upstreamProviderId);
   const runtimeCredentialStore = new RuntimeCredentialStore(credentialStore, sqlCredentialStore);
-  const oauthManager = new OpenAiOAuthManager();
+  const oauthManager = new OpenAiOAuthManager({
+    oauthScopes: config.openaiOauthScopes,
+    clientId: config.openaiOauthClientId,
+    issuer: config.openaiOauthIssuer,
+    clientSecret: config.openaiOauthClientSecret,
+  });
 
   const tokenRefreshManager = new TokenRefreshManager(
     async (credential) => {
@@ -1490,6 +1495,17 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         `Model not found across available upstream providers: ${context.routedModel}`,
         "invalid_request_error",
         "model_not_found",
+      );
+      return;
+    }
+
+    if (summary.lastUpstreamAuthError) {
+      sendOpenAiError(
+        reply,
+        summary.lastUpstreamAuthError.status,
+        summary.lastUpstreamAuthError.message ?? "Upstream rejected the request due to authentication/authorization.",
+        "invalid_request_error",
+        "upstream_auth_error",
       );
       return;
     }

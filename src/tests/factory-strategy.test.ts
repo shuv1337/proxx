@@ -107,6 +107,8 @@ async function withProxyApp(
     upstreamBaseUrl: `http://127.0.0.1:${address.port}`,
     openaiProviderId: "openai",
     openaiBaseUrl: `http://127.0.0.1:${address.port}`,
+    openaiApiBaseUrl: `http://127.0.0.1:${address.port}`,
+    openaiImagesUpstreamMode: "auto",
     ollamaBaseUrl: `http://127.0.0.1:${address.port}`,
     localOllamaEnabled: false,
     localOllamaModelPatterns: [],
@@ -143,6 +145,9 @@ async function withProxyApp(
     githubOAuthCallbackPath: "/auth/github/callback",
     githubAllowedUsers: [],
     sessionSecret: "test-session-token", // pragma: allowlist secret
+    openaiOauthScopes: "openid profile email offline_access",
+    openaiOauthClientId: "app_EMoamEEZ73f0CkXaXp7hrann",
+    openaiOauthIssuer: "https://auth.openai.com",
     ...options.configOverrides,
   };
 

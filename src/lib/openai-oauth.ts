@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
-const OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const OPENAI_ISSUER = "https://auth.openai.com";
+const DEFAULT_OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const DEFAULT_OPENAI_ISSUER = "https://auth.openai.com";
 
 function resolveOpenAiBrowserCallbackPort(): string {
   const raw = (process.env.OPENAI_OAUTH_CALLBACK_PORT ?? "").trim();
@@ -119,6 +119,15 @@ interface OpenAiOAuthManagerOptions {
   readonly browserStateTtlMs?: number;
   readonly browserCompletionTtlMs?: number;
   readonly deviceStateTtlMs?: number;
+  /** OAuth scopes used for the browser authorization URL. */
+  readonly oauthScopes?: string;
+  /** OAuth client ID (defaults to the bundled ChatGPT/Codex CLI client id). */
+  readonly clientId?: string;
+  /** OAuth issuer base URL (defaults to https://auth.openai.com). */
+  readonly issuer?: string;
+
+  /** OAuth client secret for token exchange/refresh (optional; PKCE public clients can omit). */
+  readonly clientSecret?: string;
 }
 
 const DEFAULT_BROWSER_STATE_TTL_MS = 5 * 60 * 1000;
@@ -258,12 +267,13 @@ function extractAccountIdentity(tokens: TokenResponse): {
   };
 }
 
-function buildAuthorizationUrl(redirectUri: string, pkce: PkceCodes, state: string): string {
+function buildAuthorizationUrl(redirectUri: string, pkce: PkceCodes, state: string, oauthScopes: string, clientId: string, issuer: string): string {
+  const scope = oauthScopes.trim() || "openid profile email offline_access";
   const params = new URLSearchParams({
     response_type: "code",
-    client_id: OPENAI_CLIENT_ID,
+    client_id: clientId,
     redirect_uri: redirectUri,
-    scope: "openid profile email offline_access",
+    scope,
     code_challenge: pkce.challenge,
     code_challenge_method: "S256",
     id_token_add_organizations: "true",
@@ -272,7 +282,7 @@ function buildAuthorizationUrl(redirectUri: string, pkce: PkceCodes, state: stri
     state,
   });
 
-  return `${OPENAI_ISSUER}/oauth/authorize?${params.toString()}`;
+  return `${issuer}/oauth/authorize?${params.toString()}`;
 }
 
 function normalizeBrowserRedirectBaseUrl(redirectBaseUrl: string): string {
@@ -291,9 +301,12 @@ async function exchangeAuthorizationCode(
   code: string,
   redirectUri: string,
   codeVerifier: string,
+  issuer: string,
+  clientId: string,
+  clientSecret: string | undefined,
   fetchFn: typeof fetch,
 ): Promise<TokenResponse> {
-  const response = await fetchFn(`${OPENAI_ISSUER}/oauth/token`, {
+  const response = await fetchFn(`${issuer}/oauth/token`, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
@@ -302,7 +315,8 @@ async function exchangeAuthorizationCode(
       grant_type: "authorization_code",
       code,
       redirect_uri: redirectUri,
-      client_id: OPENAI_CLIENT_ID,
+      client_id: clientId,
+      ...(clientSecret ? { client_secret: clientSecret } : {}),
       code_verifier: codeVerifier,
     }).toString(),
   });
@@ -344,6 +358,10 @@ export class OpenAiOAuthManager {
   private readonly browserStateTtlMs: number;
   private readonly browserCompletionTtlMs: number;
   private readonly deviceStateTtlMs: number;
+  private readonly oauthScopes: string;
+  private readonly clientId: string;
+  private readonly issuer: string;
+  private readonly clientSecret?: string;
 
   public constructor(options: OpenAiOAuthManagerOptions = {}) {
     this.fetchFn = options.fetchFn ?? fetch;
@@ -351,6 +369,10 @@ export class OpenAiOAuthManager {
     this.browserStateTtlMs = options.browserStateTtlMs ?? DEFAULT_BROWSER_STATE_TTL_MS;
     this.browserCompletionTtlMs = options.browserCompletionTtlMs ?? DEFAULT_BROWSER_COMPLETION_TTL_MS;
     this.deviceStateTtlMs = options.deviceStateTtlMs ?? DEFAULT_DEVICE_STATE_TTL_MS;
+    this.oauthScopes = (options.oauthScopes ?? "openid profile email offline_access").trim() || "openid profile email offline_access";
+    this.clientId = (options.clientId ?? DEFAULT_OPENAI_CLIENT_ID).trim() || DEFAULT_OPENAI_CLIENT_ID;
+    this.issuer = (options.issuer ?? DEFAULT_OPENAI_ISSUER).trim() || DEFAULT_OPENAI_ISSUER;
+    this.clientSecret = options.clientSecret?.trim() || undefined;
   }
 
   public async startBrowserFlow(redirectBaseUrl: string): Promise<BrowserAuthStartResponse> {
@@ -370,7 +392,7 @@ export class OpenAiOAuthManager {
     return {
       state,
       redirectUri,
-      authorizeUrl: buildAuthorizationUrl(redirectUri, pkce, state),
+      authorizeUrl: buildAuthorizationUrl(redirectUri, pkce, state, this.oauthScopes, this.clientId, this.issuer),
     };
   }
 
@@ -393,7 +415,7 @@ export class OpenAiOAuthManager {
     }
 
     this.browserPending.delete(state);
-    const completion = exchangeAuthorizationCode(code, pending.redirectUri, pending.pkce.verifier, this.fetchFn)
+    const completion = exchangeAuthorizationCode(code, pending.redirectUri, pending.pkce.verifier, this.issuer, this.clientId, this.clientSecret, this.fetchFn)
       .then((tokens) => {
         const oauthTokens = toOAuthTokens(tokens);
         this.browserCompletions.set(state, {
@@ -413,13 +435,13 @@ export class OpenAiOAuthManager {
   public async startDeviceFlow(): Promise<DeviceAuthStartResponse> {
     this.pruneState();
 
-    const response = await this.fetchFn(`${OPENAI_ISSUER}/api/accounts/deviceauth/usercode`, {
+    const response = await this.fetchFn(`${this.issuer}/api/accounts/deviceauth/usercode`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        client_id: OPENAI_CLIENT_ID,
+        client_id: this.clientId,
       }),
     });
 
@@ -441,7 +463,7 @@ export class OpenAiOAuthManager {
     });
 
     return {
-      verificationUrl: `${OPENAI_ISSUER}/codex/device`,
+      verificationUrl: `${this.issuer}/codex/device`,
       userCode: payload.user_code,
       deviceAuthId: payload.device_auth_id,
       intervalMs,
@@ -489,7 +511,7 @@ export class OpenAiOAuthManager {
     userCode: string,
     deviceFlow: DeviceFlowState,
   ): Promise<DevicePollResult> {
-    const response = await this.fetchFn(`${OPENAI_ISSUER}/api/accounts/deviceauth/token`, {
+    const response = await this.fetchFn(`${this.issuer}/api/accounts/deviceauth/token`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -504,8 +526,11 @@ export class OpenAiOAuthManager {
       const payload = (await response.json()) as DeviceTokenPollSuccess;
       const tokens = await exchangeAuthorizationCode(
         payload.authorization_code,
-        `${OPENAI_ISSUER}/deviceauth/callback`,
+        `${this.issuer}/deviceauth/callback`,
         payload.code_verifier,
+        this.issuer,
+        this.clientId,
+        this.clientSecret,
         this.fetchFn,
       );
       const result: DevicePollResult = {
@@ -529,7 +554,7 @@ export class OpenAiOAuthManager {
   }
 
   public async refreshToken(refreshToken: string): Promise<OAuthTokens> {
-    const response = await this.fetchFn(`${OPENAI_ISSUER}/oauth/token`, {
+    const response = await this.fetchFn(`${this.issuer}/oauth/token`, {
       method: "POST",
       headers: {
         "content-type": "application/x-www-form-urlencoded",
@@ -537,7 +562,8 @@ export class OpenAiOAuthManager {
       body: new URLSearchParams({
         grant_type: "refresh_token",
         refresh_token: refreshToken,
-        client_id: OPENAI_CLIENT_ID,
+        client_id: this.clientId,
+        ...(this.clientSecret ? { client_secret: this.clientSecret } : {}),
       }).toString(),
     });
 

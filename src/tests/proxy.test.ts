@@ -98,6 +98,8 @@ async function withProxyApp(
     upstreamBaseUrl: `http://127.0.0.1:${address.port}`,
     openaiProviderId: "openai",
     openaiBaseUrl: `http://127.0.0.1:${address.port}`,
+    openaiApiBaseUrl: `http://127.0.0.1:${address.port}`,
+    openaiImagesUpstreamMode: "auto",
     ollamaBaseUrl: `http://127.0.0.1:${address.port}`,
     localOllamaEnabled: true,
     localOllamaModelPatterns: [":2b", ":3b", ":4b", ":7b", ":8b", "mini", "small"],
@@ -135,6 +137,9 @@ async function withProxyApp(
     githubOAuthCallbackPath: "/auth/github/callback",
     githubAllowedUsers: [],
     sessionSecret: "test-session-token", // pragma: allowlist secret
+    openaiOauthScopes: "openid profile email offline_access",
+    openaiOauthClientId: "app_EMoamEEZ73f0CkXaXp7hrann",
+    openaiOauthIssuer: "https://auth.openai.com",
     ...options.configOverrides,
   };
 
@@ -510,6 +515,212 @@ test("routes /v1/images/generations through requesty", { concurrency: false }, a
       );
     },
   );
+});
+
+test("OpenAI images auto mode routes OAuth tokens to Platform API only", { concurrency: false }, async () => {
+  const seenUrls: string[] = [];
+  const openaiApiBaseUrl = "https://api.openai.com";
+  const openaiBaseUrl = "https://chatgpt.com/backend-api";
+
+  await withPatchedFetch(
+    async (input) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.includes("images")) {
+        return undefined;
+      }
+
+      seenUrls.push(url);
+
+      if (url === `${openaiApiBaseUrl}/v1/images/generations`) {
+        return new Response(JSON.stringify({ created: 1, data: [{ b64_json: "AAAA" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return new Response(JSON.stringify({ error: { message: `Unexpected URL: ${url}` } }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: {
+            providers: {
+              openai: {
+                auth: "oauth_bearer",
+                accounts: [
+                  {
+                    access_token: makeJwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acc-1" } }),
+                    chatgpt_account_id: "acc-1",
+                  },
+                ],
+              },
+            },
+          },
+          configOverrides: {
+            upstreamProviderId: "openai",
+            upstreamFallbackProviderIds: [],
+            openaiProviderId: "openai",
+            openaiImagesUpstreamMode: "auto",
+            openaiApiBaseUrl,
+            openaiBaseUrl,
+          },
+          upstreamHandler: async () => {
+            return { status: 500, body: "unexpected upstream call" };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/images/generations",
+            payload: {
+              model: "gpt-image-1",
+              prompt: "a red square",
+              response_format: "b64_json",
+            },
+            headers: {
+              authorization: "Bearer local-test",
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          const payload = response.json();
+          assert.ok(isRecord(payload));
+          assert.deepEqual(payload.data, [{ b64_json: "AAAA" }]);
+        },
+      );
+    },
+  );
+
+  // auto mode should only hit the Platform API -- the ChatGPT backend doesn't support image gen.
+  assert.deepEqual(seenUrls, [
+    `${openaiApiBaseUrl}/v1/images/generations`,
+  ]);
+});
+
+test("OpenAI images auto mode falls back to Codex Responses image_generation when Platform rejects OAuth scopes", { concurrency: false }, async () => {
+  const seenUrls: string[] = [];
+  const seenBodies: Record<string, unknown>[] = [];
+  const openaiApiBaseUrl = "https://api.openai.com";
+  const openaiBaseUrl = "https://chatgpt.com/backend-api";
+
+  const codexResponsesSse =
+    `data: ${JSON.stringify({
+      type: "response.output_item.done",
+      item: { type: "image_generation_call", id: "ig_1", status: "completed", result: "AAAA" },
+    })}\n\n` +
+    `data: ${JSON.stringify({
+      type: "response.completed",
+      response: {
+        id: "resp_1",
+        output: [{ type: "image_generation_call", id: "ig_1", status: "completed", result: "AAAA" }],
+      },
+    })}\n\n` +
+    "data: [DONE]\n\n";
+
+  await withPatchedFetch(
+    async (input, init) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.includes("openai.com") && !url.includes("chatgpt.com")) {
+        return undefined;
+      }
+
+      if (init?.body && typeof init.body === "string") {
+        try {
+          seenBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+        } catch {
+          // ignore
+        }
+      }
+
+      seenUrls.push(url);
+
+      if (url === `${openaiApiBaseUrl}/v1/images/generations`) {
+        return new Response(
+          JSON.stringify({ error: { message: "Missing scopes: api.model.images.request", type: "invalid_request_error" } }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url === `${openaiBaseUrl}/codex/responses`) {
+        return new Response(codexResponsesSse, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
+
+      return new Response(JSON.stringify({ error: { message: `Unexpected URL: ${url}` } }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: {
+            providers: {
+              openai: {
+                auth: "oauth_bearer",
+                accounts: [
+                  {
+                    access_token: makeJwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acc-1" } }),
+                    chatgpt_account_id: "acc-1",
+                  },
+                ],
+              },
+            },
+          },
+          configOverrides: {
+            upstreamProviderId: "openai",
+            upstreamFallbackProviderIds: [],
+            openaiProviderId: "openai",
+            openaiImagesUpstreamMode: "auto",
+            openaiApiBaseUrl,
+            openaiBaseUrl,
+            openaiResponsesPath: "/codex/responses",
+          },
+          upstreamHandler: async () => {
+            return { status: 500, body: "unexpected upstream call" };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/images/generations",
+            payload: {
+              model: "gpt-image-1",
+              prompt: "a red square",
+              response_format: "b64_json",
+            },
+            headers: {
+              authorization: "Bearer local-test",
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          const payload = response.json();
+          assert.ok(isRecord(payload));
+          assert.deepEqual(payload.data, [{ b64_json: "AAAA" }]);
+        },
+      );
+    },
+  );
+
+  assert.deepEqual(seenUrls, [
+    `${openaiApiBaseUrl}/v1/images/generations`,
+    `${openaiBaseUrl}/codex/responses`,
+  ]);
+
+  // Ensure the fallback request is a Responses API payload forcing image_generation.
+  const fallbackBody = seenBodies.find((body) => body["tools"] !== undefined);
+  assert.ok(fallbackBody && isRecord(fallbackBody));
+  assert.equal(fallbackBody["model"], "gpt-5.2-codex");
+  assert.equal(fallbackBody["tool_choice"], "required");
+  assert.ok(Array.isArray(fallbackBody["tools"]));
+  const tools = fallbackBody["tools"] as unknown[];
+  assert.ok(isRecord(tools[0]));
+  assert.equal((tools[0] as Record<string, unknown>)["type"], "image_generation");
 });
 
 test("routes chat completions through native Gemini generateContent when GEMINI_API_KEY is configured", { concurrency: false }, async () => {
