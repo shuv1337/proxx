@@ -1696,7 +1696,7 @@ test("de-prioritizes vivgrid behind codex oauth accounts for gpt routing", async
   );
 });
 
-test("prefers paid codex oauth accounts for gpt-5.4 over free accounts", async () => {
+test("prefers free codex oauth accounts for gpt-5.4 before paid accounts (falls back when unsupported)", async () => {
   const observedAuth: string[] = [];
 
   await withProxyApp(
@@ -1805,7 +1805,7 @@ test("prefers paid codex oauth accounts for gpt-5.4 over free accounts", async (
       assert.equal(response.statusCode, 200);
       assert.equal(response.headers["x-open-hax-upstream-provider"], "openai");
       assert.equal(response.headers["x-open-hax-upstream-mode"], "openai_responses");
-      assert.deepEqual(observedAuth, ["openai-plus-working"]);
+      assert.deepEqual(observedAuth, ["openai-free-unsupported", "openai-plus-working"]);
 
       const payload: unknown = response.json();
       assert.ok(isRecord(payload));

@@ -18,7 +18,6 @@ export const GPT_OSS_PROVIDER_ORDER: readonly ProviderId[] = [
 ];
 
 export const GPT_FREE_BLOCKED_MODELS: readonly ModelId[] = [
-  "gpt-5.4",
   "gpt-5.3-codex",
   "gpt-5-mini",
 ];
