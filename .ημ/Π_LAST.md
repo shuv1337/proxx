@@ -1,33 +1,36 @@
-# Π Snapshot — 2026-03-18T04:55:50Z
+# Π Snapshot — 2026-03-18T17:58:36Z
 
 - Repo: `open-hax-openai-proxy`
-- Branch: `main`
-- Remote: `origin/main`
-- Base HEAD at capture start: `457a620`
+- Branch: `hotfix/gpt-5.4-free-access`
+- Remote: `origin/hotfix/gpt-5.4-free-access`
+- Base HEAD at capture start: `2e012ff`
 - Working tree at capture start: dirty
 
 ## What changed
-- Refactor provider strategy and policy logic into modular `provider-strategy/*` and `policy/*` packages.
-- Add event-store plumbing, refreshed UI/API routes, and dashboard/provider health improvements.
-- Capture ongoing credentials refresh controls, GPT routing hardening, and request-log persistence updates in specs/drafts and receipts.
+- Add dashboard usage window modes (daily / weekly / monthly) with retained daily buckets in `src/lib/request-log-store.ts` and overview query support in `src/lib/ui-routes.ts`.
+- Persist UI preferences across dashboard, chat, images, tools, and credentials pages via `web/src/lib/local-storage.ts` and `web/src/lib/use-stored-state.ts`.
+- Allow `gpt-5.4` on free OpenAI OAuth accounts by updating GPT policy defaults and related provider-policy/proxy tests.
 
 ## Files to inspect
-- `src/app.ts`
+- `src/lib/request-log-store.ts`
 - `src/lib/ui-routes.ts`
-- `src/lib/provider-strategy.ts`
-- `src/lib/provider-strategy/`
-- `src/lib/policy/`
-- `src/lib/db/event-store.ts`
+- `src/lib/policy/defaults/gpt.ts`
+- `src/tests/provider-policy.test.ts`
+- `src/tests/proxy.test.ts`
+- `web/src/lib/api.ts`
+- `web/src/lib/local-storage.ts`
+- `web/src/lib/use-stored-state.ts`
 - `web/src/pages/DashboardPage.tsx`
-- `specs/drafts/credentials-refresh-and-gpt-concurrency.md`
-- `specs/drafts/dashboard-account-health-provider-filter.md`
-- `specs/drafts/gpt-routing-excludes-ollama-cloud.md`
+- `web/src/pages/CredentialsPage.tsx`
+- `specs/drafts/dashboard-usage-window-modes.md`
+- `specs/drafts/ui-preferences-localstorage.md`
 
 ## Verification
 - pass: `pnpm run build`
 - pass: `pnpm run web:build`
 - pass: `pnpm run typecheck`
-- pass: `pnpm test` (258/258)
+- fail: `pnpm test` (`ERR_MODULE_NOT_FOUND` for `dist/app.js`, `dist/lib/request-log-store.js`, and `dist/lib/provider-strategy.js` while running built tests)
 
 ## Notes
 - Artifacts capture the pre-snapshot base head; the final Π commit/tag are created after artifact assembly.
+- This Π preserves the current branch state despite the existing built-test resolution failure.
