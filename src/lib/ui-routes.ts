@@ -61,7 +61,10 @@ interface TrendPoint {
   readonly v: number;
 }
 
+type UsageWindow = "daily" | "weekly" | "monthly";
+
 interface UsageOverviewResponse {
+  readonly window: UsageWindow;
   readonly generatedAt: string;
   readonly summary: {
     readonly requests24h: number;
@@ -92,6 +95,25 @@ interface UsageOverviewResponse {
     readonly errors: readonly TrendPoint[];
   };
   readonly accounts: readonly UsageAccountSummary[];
+}
+
+function toUsageWindow(value: unknown): UsageWindow {
+  if (value === "weekly" || value === "monthly" || value === "daily") {
+    return value;
+  }
+
+  if (typeof value !== "string") {
+    return "daily";
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "month" || normalized === "monthly" || normalized === "30d") {
+    return "monthly";
+  }
+  if (normalized === "week" || normalized === "7d") {
+    return "weekly";
+  }
+  return "daily";
 }
 
 async function firstExistingPath(paths: readonly string[]): Promise<string | undefined> {
@@ -195,6 +217,7 @@ async function buildUsageOverview(
   keyPool: KeyPool,
   credentialStore: CredentialStoreLike,
   sort?: string,
+  window: UsageWindow = "daily",
 ): Promise<UsageOverviewResponse> {
   const allLogs = requestLogStore.snapshot();
   const allStatuses: Record<string, Awaited<ReturnType<KeyPool["getStatus"]>>> = await keyPool.getAllStatuses().catch(() => ({}));
@@ -203,13 +226,19 @@ async function buildUsageOverview(
   const providerById = new Map(credentialProviders.map((provider) => [provider.id, provider]));
 
   const now = Date.now();
-  const dayAgo = now - 24 * 60 * 60 * 1000;
-  const recentLogs = allLogs.filter((entry) => entry.timestamp >= dayAgo);
+
+  const bucketMs = window === "daily" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+  const bucketCount = window === "monthly" ? 30 : window === "weekly" ? 7 : 24;
+  const bucketWindowStart = bucketStart(now - (bucketCount - 1) * bucketMs, bucketMs);
+
+  const recentLogs = allLogs.filter((entry) => entry.timestamp >= bucketWindowStart);
 
   const modelTotals = new Map<string, number>();
   const providerTotals = new Map<string, number>();
 
-  const recentBuckets = requestLogStore.snapshotHourlyBuckets(dayAgo);
+  const recentBuckets = window === "daily"
+    ? requestLogStore.snapshotHourlyBuckets(bucketWindowStart)
+    : requestLogStore.snapshotDailyBuckets(bucketWindowStart);
   const bucketByStart = new Map(recentBuckets.map((bucket) => [bucket.startMs, bucket]));
 
   const totalRequests = recentBuckets.reduce((sum, bucket) => sum + bucket.requestCount, 0);
@@ -381,8 +410,6 @@ async function buildUsageOverview(
     }
   }
 
-  const bucketMs = 60 * 60 * 1000;
-  const bucketCount = 24;
   const bucketSeries = Array.from({ length: bucketCount }, (_, index) => {
     const timestamp = bucketStart(now - (bucketCount - index - 1) * bucketMs, bucketMs);
     const bucket = bucketByStart.get(timestamp);
@@ -401,6 +428,7 @@ async function buildUsageOverview(
   const cacheHitRate24h = cacheKeyUses > 0 ? percentage(cacheHits, cacheKeyUses) : 0;
 
   return {
+    window,
     generatedAt: new Date(now).toISOString(),
     summary: {
       requests24h: totalRequests,
@@ -746,9 +774,10 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
     });
   });
 
-  app.get<{ Querystring: { readonly sort?: string } }>("/api/ui/dashboard/overview", async (request, reply) => {
+  app.get<{ Querystring: { readonly sort?: string; readonly window?: string } }>("/api/ui/dashboard/overview", async (request, reply) => {
     const sort = typeof request.query.sort === "string" ? request.query.sort : undefined;
-    const overview = await buildUsageOverview(deps.requestLogStore, deps.keyPool, credentialStore, sort);
+    const window = toUsageWindow(request.query.window);
+    const overview = await buildUsageOverview(deps.requestLogStore, deps.keyPool, credentialStore, sort, window);
     reply.send(overview);
   });
 

@@ -149,6 +149,7 @@ export interface UsageAccountSummary {
 }
 
 export interface UsageOverview {
+  readonly window?: "daily" | "weekly" | "monthly";
   readonly generatedAt: string;
   readonly summary: {
     readonly requests24h: number;
@@ -453,11 +454,16 @@ export async function listModels(): Promise<string[]> {
     .sort((a, b) => a.localeCompare(b));
 }
 
-export async function getUsageOverview(sort?: string): Promise<UsageOverview> {
-  const query = typeof sort === "string" && sort.trim().length > 0
-    ? `?sort=${encodeURIComponent(sort.trim())}`
-    : "";
-  return requestJson<UsageOverview>(`/api/ui/dashboard/overview${query}`);
+export async function getUsageOverview(sort?: string, window?: "daily" | "weekly" | "monthly"): Promise<UsageOverview> {
+  const query = new URLSearchParams();
+  if (typeof sort === "string" && sort.trim().length > 0) {
+    query.set("sort", sort.trim());
+  }
+  if (typeof window === "string" && window.trim().length > 0) {
+    query.set("window", window.trim());
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return requestJson<UsageOverview>(`/api/ui/dashboard/overview${suffix}`);
 }
 
 export async function getProxyUiSettings(): Promise<ProxyUiSettings> {

@@ -981,6 +981,17 @@ test("persists request logs with usage counts for dashboard surfaces", async () 
       assert.equal(overviewPayload.summary.serviceTierRequests24h.fastMode, 0);
       assert.equal(overviewPayload.summary.serviceTierRequests24h.priority, 0);
       assert.equal(overviewPayload.summary.serviceTierRequests24h.standard, 1);
+
+      const overviewWeeklyResponse = await app.inject({
+        method: "GET",
+        url: "/api/ui/dashboard/overview?window=weekly",
+      });
+      assert.equal(overviewWeeklyResponse.statusCode, 200);
+      const weeklyPayload: unknown = overviewWeeklyResponse.json();
+      assert.ok(isRecord(weeklyPayload));
+      assert.equal((weeklyPayload as any).window, "weekly");
+      assert.ok(isRecord((weeklyPayload as any).summary));
+      assert.equal((weeklyPayload as any).summary.requests24h, 1);
     }
   );
 

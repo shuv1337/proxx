@@ -121,6 +121,26 @@ export interface RequestLogHourlyBucket {
   readonly waterEvaporatedMl: number;
 }
 
+export interface RequestLogDailyBucket {
+  readonly startMs: number;
+  readonly requestCount: number;
+  readonly errorCount: number;
+  readonly totalTokens: number;
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly cachedPromptTokens: number;
+  readonly imageCount: number;
+  readonly imageCostUsd: number;
+  readonly cacheHitCount: number;
+  readonly cacheKeyUseCount: number;
+  readonly fastModeRequestCount: number;
+  readonly priorityRequestCount: number;
+  readonly standardRequestCount: number;
+  readonly costUsd: number;
+  readonly energyJoules: number;
+  readonly waterEvaporatedMl: number;
+}
+
 export interface AccountUsageAccumulator {
   readonly providerId: string;
   readonly accountId: string;
@@ -158,10 +178,31 @@ export interface RequestLogPerfSummary {
 interface RequestLogDb {
   readonly entries: RequestLogEntry[];
   readonly hourlyBuckets?: readonly RequestLogHourlyBucket[];
+  readonly dailyBuckets?: readonly RequestLogDailyBucket[];
   readonly accountAccumulators?: readonly AccountUsageAccumulator[];
 }
 
 type HourlyBucket = {
+  startMs: number;
+  requestCount: number;
+  errorCount: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+  cachedPromptTokens: number;
+  imageCount: number;
+  imageCostUsd: number;
+  cacheHitCount: number;
+  cacheKeyUseCount: number;
+  fastModeRequestCount: number;
+  priorityRequestCount: number;
+  standardRequestCount: number;
+  costUsd: number;
+  energyJoules: number;
+  waterEvaporatedMl: number;
+};
+
+type DailyBucket = {
   startMs: number;
   requestCount: number;
   errorCount: number;
@@ -306,6 +347,7 @@ function emptyDb(): RequestLogDb {
   return {
     entries: [],
     hourlyBuckets: [],
+    dailyBuckets: [],
   };
 }
 
@@ -414,6 +456,37 @@ function hydrateHourlyBucket(raw: unknown): RequestLogHourlyBucket | null {
   };
 }
 
+function hydrateDailyBucket(raw: unknown): RequestLogDailyBucket | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+
+  const startMs = asNumber(raw.startMs);
+  if (startMs === undefined) {
+    return null;
+  }
+
+  return {
+    startMs,
+    requestCount: asNumber(raw.requestCount) ?? 0,
+    errorCount: asNumber(raw.errorCount) ?? 0,
+    totalTokens: asNumber(raw.totalTokens) ?? 0,
+    promptTokens: asNumber(raw.promptTokens) ?? 0,
+    completionTokens: asNumber(raw.completionTokens) ?? 0,
+    cachedPromptTokens: asNumber(raw.cachedPromptTokens) ?? 0,
+    imageCount: asNumber(raw.imageCount) ?? 0,
+    imageCostUsd: asNumber(raw.imageCostUsd) ?? 0,
+    cacheHitCount: asNumber(raw.cacheHitCount) ?? 0,
+    cacheKeyUseCount: asNumber(raw.cacheKeyUseCount) ?? 0,
+    fastModeRequestCount: asNumber(raw.fastModeRequestCount) ?? 0,
+    priorityRequestCount: asNumber(raw.priorityRequestCount) ?? 0,
+    standardRequestCount: asNumber(raw.standardRequestCount) ?? 0,
+    costUsd: asNumber(raw.costUsd) ?? 0,
+    energyJoules: asNumber(raw.energyJoules) ?? 0,
+    waterEvaporatedMl: asNumber(raw.waterEvaporatedMl) ?? 0,
+  };
+}
+
 function hydrateDb(raw: unknown, maxEntries: number): RequestLogDb {
   if (Array.isArray(raw)) {
     return {
@@ -422,6 +495,7 @@ function hydrateDb(raw: unknown, maxEntries: number): RequestLogDb {
         .filter((entry): entry is RequestLogEntry => entry !== null)
         .slice(-maxEntries),
       hourlyBuckets: [],
+      dailyBuckets: [],
     };
   }
 
@@ -435,6 +509,12 @@ function hydrateDb(raw: unknown, maxEntries: number): RequestLogDb {
         .filter((bucket): bucket is RequestLogHourlyBucket => bucket !== null)
     : [];
 
+  const dailyBuckets = Array.isArray(raw.dailyBuckets)
+    ? raw.dailyBuckets
+        .map((bucket) => hydrateDailyBucket(bucket))
+        .filter((bucket): bucket is RequestLogDailyBucket => bucket !== null)
+    : [];
+
   const accountAccumulators = Array.isArray(raw.accountAccumulators)
     ? raw.accountAccumulators as AccountUsageAccumulator[]
     : undefined;
@@ -445,6 +525,7 @@ function hydrateDb(raw: unknown, maxEntries: number): RequestLogDb {
       .filter((entry): entry is RequestLogEntry => entry !== null)
       .slice(-maxEntries),
     hourlyBuckets,
+    dailyBuckets,
     accountAccumulators,
   };
 }
@@ -464,6 +545,10 @@ function sanitizeLimit(limit: number | undefined, fallback: number): number {
 
 function hourBucketStartMs(timestampMs: number): number {
   return Math.floor(timestampMs / (60 * 60 * 1000)) * (60 * 60 * 1000);
+}
+
+function dayBucketStartMs(timestampMs: number): number {
+  return Math.floor(timestampMs / (24 * 60 * 60 * 1000)) * (24 * 60 * 60 * 1000);
 }
 
 function sumCount(value: number | undefined): number {
@@ -500,6 +585,7 @@ function accountAccumulatorKey(providerId: string, accountId: string): string {
 export class RequestLogStore {
   private readonly entries: RequestLogEntry[] = [];
   private readonly hourlyBuckets = new Map<number, HourlyBucket>();
+  private readonly dailyBuckets = new Map<number, DailyBucket>();
   private readonly perfIndex = new Map<string, PerfIndexEntry>();
   private readonly accountAccumulators = new Map<string, MutableAccountAccumulator>();
   private warmupPromise: Promise<void> | null = null;
@@ -566,6 +652,7 @@ export class RequestLogStore {
     }
 
     this.applyEntryToHourlyBuckets(entry);
+    this.applyEntryToDailyBuckets(entry);
     this.applyEntryToAccountAccumulator(entry);
     this.updatePerfIndexFromEntry(entry);
     this.schedulePersist();
@@ -634,6 +721,7 @@ export class RequestLogStore {
 
     this.entries.splice(entryIndex, 1, next);
     this.applyEntryDeltaToHourlyBuckets(next, current);
+    this.applyEntryDeltaToDailyBuckets(next, current);
     this.applyEntryDeltaToAccountAccumulator(next, current);
     this.updatePerfIndexFromEntry(next);
     this.schedulePersist();
@@ -648,6 +736,33 @@ export class RequestLogStore {
     const since = typeof sinceMs === "number" && Number.isFinite(sinceMs) ? sinceMs : 0;
 
     return [...this.hourlyBuckets.values()]
+      .filter((bucket) => bucket.startMs >= since)
+      .sort((a, b) => a.startMs - b.startMs)
+      .map((bucket) => ({
+        startMs: bucket.startMs,
+        requestCount: bucket.requestCount,
+        errorCount: bucket.errorCount,
+        totalTokens: bucket.totalTokens,
+        promptTokens: bucket.promptTokens,
+        completionTokens: bucket.completionTokens,
+        cachedPromptTokens: bucket.cachedPromptTokens,
+        imageCount: bucket.imageCount,
+        imageCostUsd: bucket.imageCostUsd,
+        cacheHitCount: bucket.cacheHitCount,
+        cacheKeyUseCount: bucket.cacheKeyUseCount,
+        fastModeRequestCount: bucket.fastModeRequestCount,
+        priorityRequestCount: bucket.priorityRequestCount,
+        standardRequestCount: bucket.standardRequestCount,
+        costUsd: bucket.costUsd,
+        energyJoules: bucket.energyJoules,
+        waterEvaporatedMl: bucket.waterEvaporatedMl,
+      }));
+  }
+
+  public snapshotDailyBuckets(sinceMs?: number): RequestLogDailyBucket[] {
+    const since = typeof sinceMs === "number" && Number.isFinite(sinceMs) ? sinceMs : 0;
+
+    return [...this.dailyBuckets.values()]
       .filter((bucket) => bucket.startMs >= since)
       .sort((a, b) => a.startMs - b.startMs)
       .map((bucket) => ({
@@ -765,12 +880,52 @@ export class RequestLogStore {
     return created;
   }
 
+  private getOrCreateDailyBucket(startMs: number): DailyBucket {
+    const existing = this.dailyBuckets.get(startMs);
+    if (existing) {
+      return existing;
+    }
+
+    const created: DailyBucket = {
+      startMs,
+      requestCount: 0,
+      errorCount: 0,
+      totalTokens: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedPromptTokens: 0,
+      imageCount: 0,
+      imageCostUsd: 0,
+      cacheHitCount: 0,
+      cacheKeyUseCount: 0,
+      fastModeRequestCount: 0,
+      priorityRequestCount: 0,
+      standardRequestCount: 0,
+      costUsd: 0,
+      energyJoules: 0,
+      waterEvaporatedMl: 0,
+    };
+
+    this.dailyBuckets.set(startMs, created);
+    return created;
+  }
+
   private pruneHourlyBuckets(now: number = Date.now()): void {
     // Keep ~8 days of buckets (safety margin).
     const cutoff = hourBucketStartMs(now - 8 * 24 * 60 * 60 * 1000);
     for (const startMs of this.hourlyBuckets.keys()) {
       if (startMs < cutoff) {
         this.hourlyBuckets.delete(startMs);
+      }
+    }
+  }
+
+  private pruneDailyBuckets(now: number = Date.now()): void {
+    // Keep ~45 days of buckets (safety margin for monthly + some).
+    const cutoff = dayBucketStartMs(now - 45 * 24 * 60 * 60 * 1000);
+    for (const startMs of this.dailyBuckets.keys()) {
+      if (startMs < cutoff) {
+        this.dailyBuckets.delete(startMs);
       }
     }
   }
@@ -871,6 +1026,46 @@ export class RequestLogStore {
     this.pruneHourlyBuckets(entry.timestamp);
   }
 
+  private applyEntryToDailyBuckets(entry: RequestLogEntry): void {
+    const bucketStart = dayBucketStartMs(entry.timestamp);
+    const bucket = this.getOrCreateDailyBucket(bucketStart);
+
+    bucket.requestCount += 1;
+
+    const isError = entry.status >= 400 || typeof entry.error === "string";
+    if (isError) {
+      bucket.errorCount += 1;
+    }
+
+    if (entry.serviceTierSource === "fast_mode") {
+      bucket.fastModeRequestCount += 1;
+    } else if (entry.serviceTier === "priority") {
+      bucket.priorityRequestCount += 1;
+    } else {
+      bucket.standardRequestCount += 1;
+    }
+
+    bucket.totalTokens += sumCount(entry.totalTokens);
+    bucket.promptTokens += sumCount(entry.promptTokens);
+    bucket.completionTokens += sumCount(entry.completionTokens);
+    bucket.cachedPromptTokens += sumCount(entry.cachedPromptTokens);
+    bucket.imageCount += sumCount(entry.imageCount);
+    bucket.imageCostUsd += sumCount(entry.imageCostUsd);
+    bucket.costUsd += sumCount(entry.costUsd);
+    bucket.energyJoules += sumCount(entry.energyJoules);
+    bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl);
+
+    if (entry.promptCacheKeyUsed) {
+      bucket.cacheKeyUseCount += 1;
+    }
+
+    if (entry.cacheHit) {
+      bucket.cacheHitCount += 1;
+    }
+
+    this.pruneDailyBuckets(entry.timestamp);
+  }
+
   private applyEntryDeltaToHourlyBuckets(entry: RequestLogEntry, previous: RequestLogEntry): void {
     const bucketStart = hourBucketStartMs(entry.timestamp);
     const bucket = this.getOrCreateHourlyBucket(bucketStart);
@@ -895,6 +1090,32 @@ export class RequestLogStore {
     }
 
     this.pruneHourlyBuckets(entry.timestamp);
+  }
+
+  private applyEntryDeltaToDailyBuckets(entry: RequestLogEntry, previous: RequestLogEntry): void {
+    const bucketStart = dayBucketStartMs(entry.timestamp);
+    const bucket = this.getOrCreateDailyBucket(bucketStart);
+
+    bucket.totalTokens += sumCount(entry.totalTokens) - sumCount(previous.totalTokens);
+    bucket.promptTokens += sumCount(entry.promptTokens) - sumCount(previous.promptTokens);
+    bucket.completionTokens += sumCount(entry.completionTokens) - sumCount(previous.completionTokens);
+    bucket.cachedPromptTokens += sumCount(entry.cachedPromptTokens) - sumCount(previous.cachedPromptTokens);
+    bucket.imageCount += sumCount(entry.imageCount) - sumCount(previous.imageCount);
+    bucket.imageCostUsd += sumCount(entry.imageCostUsd) - sumCount(previous.imageCostUsd);
+    bucket.costUsd += sumCount(entry.costUsd) - sumCount(previous.costUsd);
+    bucket.energyJoules += sumCount(entry.energyJoules) - sumCount(previous.energyJoules);
+    bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl) - sumCount(previous.waterEvaporatedMl);
+
+    // promptCacheKeyUsed / cacheHit are only ever expected to flip false->true.
+    if (entry.promptCacheKeyUsed && !previous.promptCacheKeyUsed) {
+      bucket.cacheKeyUseCount += 1;
+    }
+
+    if (entry.cacheHit && !previous.cacheHit) {
+      bucket.cacheHitCount += 1;
+    }
+
+    this.pruneDailyBuckets(entry.timestamp);
   }
 
   private updatePerfIndexFromEntry(entry: RequestLogEntry): void {
@@ -957,6 +1178,7 @@ export class RequestLogStore {
   private resetState(): void {
     this.entries.splice(0, this.entries.length);
     this.hourlyBuckets.clear();
+    this.dailyBuckets.clear();
     this.perfIndex.clear();
     this.accountAccumulators.clear();
   }
@@ -965,8 +1187,49 @@ export class RequestLogStore {
     return {
       entries: this.entries,
       hourlyBuckets: this.snapshotHourlyBuckets(),
+      dailyBuckets: this.snapshotDailyBuckets(),
       accountAccumulators: this.snapshotAccountAccumulators(),
     };
+  }
+
+  private rebuildHourlyBucketsFromEntries(): void {
+    this.hourlyBuckets.clear();
+    for (const entry of this.entries) {
+      this.applyEntryToHourlyBuckets(entry);
+    }
+  }
+
+  private rebuildDailyBucketsFromEntries(): void {
+    this.dailyBuckets.clear();
+    for (const entry of this.entries) {
+      this.applyEntryToDailyBuckets(entry);
+    }
+  }
+
+  private rebuildDailyBucketsFromHourlyBuckets(): void {
+    this.dailyBuckets.clear();
+    for (const bucket of this.hourlyBuckets.values()) {
+      const dayStart = dayBucketStartMs(bucket.startMs);
+      const daily = this.getOrCreateDailyBucket(dayStart);
+      daily.requestCount += bucket.requestCount;
+      daily.errorCount += bucket.errorCount;
+      daily.totalTokens += bucket.totalTokens;
+      daily.promptTokens += bucket.promptTokens;
+      daily.completionTokens += bucket.completionTokens;
+      daily.cachedPromptTokens += bucket.cachedPromptTokens;
+      daily.imageCount += bucket.imageCount;
+      daily.imageCostUsd += bucket.imageCostUsd;
+      daily.cacheHitCount += bucket.cacheHitCount;
+      daily.cacheKeyUseCount += bucket.cacheKeyUseCount;
+      daily.fastModeRequestCount += bucket.fastModeRequestCount;
+      daily.priorityRequestCount += bucket.priorityRequestCount;
+      daily.standardRequestCount += bucket.standardRequestCount;
+      daily.costUsd += bucket.costUsd;
+      daily.energyJoules += bucket.energyJoules;
+      daily.waterEvaporatedMl += bucket.waterEvaporatedMl;
+    }
+
+    this.pruneDailyBuckets();
   }
 
   private async quarantineCorruptFile(error: SyntaxError): Promise<void> {
@@ -1043,6 +1306,41 @@ export class RequestLogStore {
         energyJoules: bucket.energyJoules,
         waterEvaporatedMl: bucket.waterEvaporatedMl,
       });
+    }
+
+    if ((db.hourlyBuckets?.length ?? 0) === 0 && this.entries.length > 0) {
+      this.rebuildHourlyBucketsFromEntries();
+    }
+
+    this.dailyBuckets.clear();
+    for (const bucket of db.dailyBuckets ?? []) {
+      this.dailyBuckets.set(bucket.startMs, {
+        startMs: bucket.startMs,
+        requestCount: bucket.requestCount,
+        errorCount: bucket.errorCount,
+        totalTokens: bucket.totalTokens,
+        promptTokens: bucket.promptTokens,
+        completionTokens: bucket.completionTokens,
+        cachedPromptTokens: bucket.cachedPromptTokens,
+        imageCount: bucket.imageCount,
+        imageCostUsd: bucket.imageCostUsd,
+        cacheHitCount: bucket.cacheHitCount,
+        cacheKeyUseCount: bucket.cacheKeyUseCount,
+        fastModeRequestCount: bucket.fastModeRequestCount,
+        priorityRequestCount: bucket.priorityRequestCount,
+        standardRequestCount: bucket.standardRequestCount,
+        costUsd: bucket.costUsd,
+        energyJoules: bucket.energyJoules,
+        waterEvaporatedMl: bucket.waterEvaporatedMl,
+      });
+    }
+
+    if ((db.dailyBuckets?.length ?? 0) === 0) {
+      if (this.hourlyBuckets.size > 0) {
+        this.rebuildDailyBucketsFromHourlyBuckets();
+      } else if (this.entries.length > 0) {
+        this.rebuildDailyBucketsFromEntries();
+      }
     }
 
     this.rebuildPerfIndex();

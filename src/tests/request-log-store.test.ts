@@ -50,6 +50,7 @@ test("warmup quarantines a corrupted request log file and starts empty", async (
     assert.ok(isRecord(rewrittenDb));
     assert.deepEqual(rewrittenDb.entries, []);
     assert.deepEqual(rewrittenDb.hourlyBuckets, []);
+    assert.deepEqual(rewrittenDb.dailyBuckets, []);
     assert.deepEqual(rewrittenDb.accountAccumulators, []);
 
     const files = await readdir(tempDir);
