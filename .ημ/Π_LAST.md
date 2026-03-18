@@ -1,20 +1,13 @@
 # Π handoff
 
-- time: 2026-03-18T21:07:09Z
+- time: 2026-03-18T21:08:59Z
 - branch: hotfix/gpt-5.4-free-access
-- pre-Π HEAD: 917f8b5
+- pre-Π HEAD: ab0193c
 - Π HEAD: pending at capture time; resolved by the final git commit created after artifact assembly
 
 ## Summary
-- Add Phase 1 multitenancy draft, tenant schema v4 tables, and default-tenant bootstrap in SQL credential-store startup.
-- Add tenant API key utilities plus request auth resolution that distinguishes legacy admin, tenant API key, and unauthenticated modes.
-- Fix proxy test fixture typing so `proxyTokenPepper` remains required after `configOverrides` spreads, keeping typecheck/test/build green.
+- Capture the latest auth-resolution verification receipt so the proxy submodule returns to a clean, pushed state.
 
 ## Verification
-- pass: `pnpm run typecheck`
-- pass: `pnpm test` (273/273)
-- pass: `pnpm run build`
+- pass: latest receipts already record `pnpm run typecheck`, `pnpm test` (273/273), and `pnpm run build`
 - skipped: `pnpm run web:build` (no web assets changed)
-
-## Notes
-- Artifacts capture pre-commit state; the final Π commit/tag resolve the pending HEAD after git commit.
