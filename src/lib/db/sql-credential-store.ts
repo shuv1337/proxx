@@ -6,6 +6,7 @@ import { normalizeEpochMilliseconds } from "../epoch.js";
 import { DEFAULT_TENANT_ID, buildTenantApiKeyPrefix, generateTenantApiKey, hashTenantApiKey, normalizeTenantId } from "../tenant-api-key.js";
 import type { CredentialAccountView, CredentialProviderView } from "../credential-store.js";
 import {
+  ADD_ACCOUNTS_EMAIL_COLUMN,
   CREATE_TENANTS_TABLE,
   CREATE_USERS_TABLE,
   CREATE_TENANT_MEMBERSHIPS_TABLE,
@@ -71,6 +72,7 @@ interface AccountRow {
   expires_at: number | null;
   chatgpt_account_id: string | null;
   plan_type: string | null;
+  email: string | null;
 }
 
 interface CooldownRow {
@@ -95,6 +97,7 @@ function toProviderCredential(row: AccountRow, authType: ProviderAuthType): Prov
     expiresAt: normalizeEpochMilliseconds(row.expires_at ?? undefined),
     chatgptAccountId: row.chatgpt_account_id ?? undefined,
     planType: row.plan_type ?? undefined,
+    email: row.email ?? undefined,
   };
 }
 
@@ -196,6 +199,9 @@ export class SqlCredentialStore {
     await this.sql.unsafe(CREATE_MODELS_TABLE);
     await this.sql.unsafe(CREATE_CONFIG_TABLE);
     await this.sql.unsafe(CREATE_VERSION_TABLE);
+
+    // v5: add email column to accounts (idempotent via IF NOT EXISTS)
+    await this.sql.unsafe(ADD_ACCOUNTS_EMAIL_COLUMN);
 
     const versionExists = await this.sql.unsafe<Array<{ "?column?": number }>>(
       CHECK_VERSION_EXISTS,
@@ -322,13 +328,14 @@ export class SqlCredentialStore {
       accounts.push({
         id: row.id,
         authType,
-        displayName: row.chatgpt_account_id ?? row.id,
+        displayName: row.email ?? row.chatgpt_account_id ?? row.id,
         secretPreview: maskSecret(row.token),
         secret: revealSecrets ? row.token : undefined,
         refreshTokenPreview: row.refresh_token ? maskSecret(row.refresh_token) : undefined,
         refreshToken: revealSecrets ? row.refresh_token ?? undefined : undefined,
         expiresAt: normalizeEpochMilliseconds(row.expires_at ?? undefined),
         chatgptAccountId: row.chatgpt_account_id ?? undefined,
+        email: row.email ?? undefined,
         planType: row.plan_type ?? undefined,
       });
       accountsByProvider.set(row.provider_id, accounts);
@@ -396,6 +403,7 @@ export class SqlCredentialStore {
       account.expiresAt ?? null,
       account.chatgptAccountId ?? null,
       account.planType ?? null,
+      account.email ?? null,
     ]);
   }
 
@@ -415,7 +423,7 @@ export class SqlCredentialStore {
     refreshToken?: string,
     expiresAt?: number,
     chatgptAccountId?: string,
-    _email?: string,
+    email?: string,
     _subject?: string,
     planType?: string,
   ): Promise<void> {
@@ -428,6 +436,7 @@ export class SqlCredentialStore {
       expiresAt,
       chatgptAccountId,
       planType,
+      email,
     });
   }
 

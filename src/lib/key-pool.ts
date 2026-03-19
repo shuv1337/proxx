@@ -26,6 +26,7 @@ export interface ProviderCredential {
   readonly planType?: string;
   readonly refreshToken?: string;
   readonly expiresAt?: number;
+  readonly email?: string;
 }
 
 export interface KeyPoolStatus {

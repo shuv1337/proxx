@@ -19,7 +19,11 @@ CREATE INDEX IF NOT EXISTS idx_account_health_score ON account_health(
 );
 `;
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
+
+export const ADD_ACCOUNTS_EMAIL_COLUMN = `
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email TEXT;
+`;
 
 export const CREATE_TENANTS_TABLE = `
 CREATE TABLE IF NOT EXISTS tenants (
@@ -227,6 +231,7 @@ export const ALL_MIGRATIONS = [
   { version: 4, sql: CREATE_TENANT_API_KEYS_TABLE },
   { version: 4, sql: CREATE_TENANT_API_KEYS_TENANT_INDEX },
   { version: 4, sql: CREATE_TENANT_API_KEYS_HASH_INDEX },
+  { version: 5, sql: ADD_ACCOUNTS_EMAIL_COLUMN },
 ];
 
 export const UPSERT_TENANT = `
@@ -278,14 +283,15 @@ ON CONFLICT (id) DO UPDATE SET
 `;
 
 export const INSERT_ACCOUNT = `
-INSERT INTO accounts (id, provider_id, token, refresh_token, expires_at, chatgpt_account_id, plan_type, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+INSERT INTO accounts (id, provider_id, token, refresh_token, expires_at, chatgpt_account_id, plan_type, email, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 ON CONFLICT (id, provider_id) DO UPDATE SET
   token = EXCLUDED.token,
   refresh_token = EXCLUDED.refresh_token,
   expires_at = EXCLUDED.expires_at,
   chatgpt_account_id = EXCLUDED.chatgpt_account_id,
   plan_type = EXCLUDED.plan_type,
+  email = COALESCE(EXCLUDED.email, accounts.email),
   updated_at = NOW();
 `;
 
@@ -294,14 +300,14 @@ SELECT id, auth_type FROM providers ORDER BY id;
 `;
 
 export const SELECT_ACCOUNTS_BY_PROVIDER = `
-SELECT id, provider_id, token, refresh_token, expires_at, chatgpt_account_id, plan_type
+SELECT id, provider_id, token, refresh_token, expires_at, chatgpt_account_id, plan_type, email
 FROM accounts
 WHERE provider_id = $1
 ORDER BY id;
 `;
 
 export const SELECT_ALL_ACCOUNTS = `
-SELECT id, provider_id, token, refresh_token, expires_at, chatgpt_account_id, plan_type
+SELECT id, provider_id, token, refresh_token, expires_at, chatgpt_account_id, plan_type, email
 FROM accounts
 ORDER BY provider_id, id;
 `;
