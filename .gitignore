@@ -1,10 +1,14 @@
 node_modules/
 dist/
+out/
+tmp/
 logs/
 /data/
 coverage/
 .factory/
+.pi/
 
 .env
+*.bak
 keys.json
 models.json
