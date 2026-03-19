@@ -528,7 +528,7 @@ export function DashboardPage(): JSX.Element {
                 <span className={`dashboard-status-pill dashboard-tier-pill dashboard-tier-${entry.serviceTierSource}`}>
                   {formatServiceTier(entry)}
                 </span>
-                <span className={`dashboard-status-pill dashboard-status-${entry.status >= 400 ? "cooldown" : "healthy"}`}>{entry.status}</span>
+                <span className={`dashboard-status-pill dashboard-status-${entry.status === 0 || entry.status >= 400 ? "cooldown" : "healthy"}`}>{entry.status === 0 ? "ERR" : entry.status}</span>
                 <span>{Math.round(entry.latencyMs)} ms</span>
               </div>
             ))}
