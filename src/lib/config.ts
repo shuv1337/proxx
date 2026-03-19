@@ -66,6 +66,7 @@ export interface ProxyConfig {
   readonly keysFilePath: string;
   readonly modelsFilePath: string;
   readonly requestLogsFilePath: string;
+  readonly requestLogsMaxEntries: number;
   readonly promptAffinityFilePath: string;
   readonly settingsFilePath: string;
   readonly keyReloadMs: number;
@@ -75,6 +76,7 @@ export interface ProxyConfig {
   readonly upstreamTransientRetryCount: number;
   readonly upstreamTransientRetryBackoffMs: number;
   readonly proxyAuthToken?: string;
+  readonly proxyTokenPepper: string;
   readonly allowUnauthenticated: boolean;
   readonly policyConfigPath?: string;
   readonly databaseUrl?: string;
@@ -408,6 +410,11 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     ? sessionSecretRaw
     : proxyAuthToken ?? "default-session-secret-change-in-production";
 
+  const proxyTokenPepperRaw = process.env.PROXY_TOKEN_PEPPER?.trim();
+  const proxyTokenPepper = proxyTokenPepperRaw && proxyTokenPepperRaw.length > 0
+    ? proxyTokenPepperRaw
+    : sessionSecret;
+
   const imagesGenerationsPath = process.env.UPSTREAM_IMAGES_GENERATIONS_PATH ?? "/v1/images/generations";
   const openaiImagesGenerationsPaths = csvFromEnv("OPENAI_IMAGES_GENERATIONS_PATHS", [
     imagesGenerationsPath,
@@ -479,6 +486,7 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
       ?? filePathFromEnvAliases(["PROXY_KEYS_FILE", "VIVGRID_KEYS_FILE"], "./keys.json", cwd),
     modelsFilePath: filePathFromEnvAliases(["PROXY_MODELS_FILE", "VIVGRID_MODELS_FILE"], "./models.json", cwd),
     requestLogsFilePath: filePathFromEnvAliases(["PROXY_REQUEST_LOGS_FILE"], "./data/request-logs.json", cwd),
+    requestLogsMaxEntries: numberFromEnvAliases(["PROXY_REQUEST_LOGS_MAX_ENTRIES"], 100000),
     promptAffinityFilePath: filePathFromEnvAliases(["PROXY_PROMPT_AFFINITY_FILE"], "./data/prompt-affinity.json", cwd),
     settingsFilePath: filePathFromEnvAliases(["PROXY_SETTINGS_FILE"], "./data/proxy-settings.json", cwd),
     keyReloadMs: numberFromEnvAliases(["PROXY_KEY_RELOAD_MS", "VIVGRID_KEY_RELOAD_MS"], 5000),
@@ -488,6 +496,7 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     upstreamTransientRetryCount: nonNegativeNumberFromEnvAliases(["UPSTREAM_TRANSIENT_RETRY_COUNT"], 2),
     upstreamTransientRetryBackoffMs: numberFromEnvAliases(["UPSTREAM_TRANSIENT_RETRY_BACKOFF_MS"], 350),
     proxyAuthToken,
+    proxyTokenPepper,
     allowUnauthenticated,
     policyConfigPath: process.env.PROXY_POLICY_CONFIG_FILE ?? undefined,
     databaseUrl,

@@ -40,7 +40,6 @@ import {
 import { orderProviderRoutesByPolicy } from "./lib/provider-policy.js";
 import {
   fetchWithResponseTimeout,
-  hasBearerToken,
   isRecord,
   sendOpenAiError,
   toErrorMessage,
@@ -77,6 +76,8 @@ import { seedFromJsonFile, seedFromJsonValue, seedFactoryAuthFromFiles, seedMode
 import { registerOAuthRoutes } from "./lib/oauth-routes.js";
 import { RuntimeCredentialStore } from "./lib/runtime-credential-store.js";
 import { TokenRefreshManager } from "./lib/token-refresh-manager.js";
+import { DEFAULT_TENANT_ID } from "./lib/tenant-api-key.js";
+import { resolveRequestAuth } from "./lib/request-auth.js";
 
 interface ChatCompletionRequest {
   readonly model?: string;
@@ -357,7 +358,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       sql = createSqlConnection({ connectionString: config.databaseUrl });
       app.log.info("connecting to database");
 
-      sqlCredentialStore = new SqlCredentialStore(sql);
+      sqlCredentialStore = new SqlCredentialStore(sql, { defaultTenantId: DEFAULT_TENANT_ID });
       await sqlCredentialStore.init();
       app.log.info("credential store initialized");
 
@@ -446,7 +447,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   } catch (error) {
     app.log.warn({ error: toErrorMessage(error) }, "failed to warm up provider accounts; non-keyed routes may still work");
   }
-  const requestLogStore = new RequestLogStore(config.requestLogsFilePath, 5000);
+  const requestLogStore = new RequestLogStore(config.requestLogsFilePath, config.requestLogsMaxEntries);
   await requestLogStore.warmup();
   const promptAffinityStore = new PromptAffinityStore(config.promptAffinityFilePath);
   await promptAffinityStore.warmup();
@@ -768,6 +769,8 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     app.log.warn("proxy auth disabled via PROXY_ALLOW_UNAUTHENTICATED=true");
   }
 
+  app.decorateRequest("openHaxAuth", null);
+
   app.addHook("onRequest", async (request, reply) => {
     const origin = request.headers.origin;
     reply.header("Access-Control-Allow-Origin", origin ?? "*");
@@ -775,26 +778,34 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     reply.header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Requested-With, Cookie");
     reply.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
 
-    if (config.proxyAuthToken) {
-      if (request.method === "OPTIONS") {
-        return;
-      }
-
-      const rawPath = (request.raw.url ?? request.url).split("?", 1)[0] ?? request.url;
-      const allowUnauthenticatedRoute = rawPath === "/health" || rawPath === "/api/ui/credentials/openai/oauth/browser/callback"
-        || rawPath === "/auth/callback" || rawPath === "/auth/factory/callback";
-
-      if (allowUnauthenticatedRoute) {
-        return;
-      }
-
-      const authorization = request.headers.authorization;
-      const cookieToken = readCookieToken(request.headers.cookie, PROXY_AUTH_COOKIE_NAME);
-      const ok = hasBearerToken(authorization, config.proxyAuthToken) || cookieToken === config.proxyAuthToken;
-      if (!ok) {
-        sendOpenAiError(reply, 401, "Unauthorized", "invalid_request_error", "unauthorized");
-      }
+    if (request.method === "OPTIONS") {
+      return;
     }
+
+    const rawPath = (request.raw.url ?? request.url).split("?", 1)[0] ?? request.url;
+    const allowUnauthenticatedRoute = rawPath === "/health" || rawPath === "/api/ui/credentials/openai/oauth/browser/callback"
+      || rawPath === "/auth/callback" || rawPath === "/auth/factory/callback";
+
+    if (allowUnauthenticatedRoute) {
+      return;
+    }
+
+    const resolvedAuth = await resolveRequestAuth({
+      allowUnauthenticated: config.allowUnauthenticated,
+      proxyAuthToken: config.proxyAuthToken,
+      authorization: request.headers.authorization,
+      cookieToken: readCookieToken(request.headers.cookie, PROXY_AUTH_COOKIE_NAME),
+      resolveTenantApiKey: sqlCredentialStore
+        ? async (token) => sqlCredentialStore!.resolveTenantApiKey(token, config.proxyTokenPepper)
+        : undefined,
+    });
+
+    if (!resolvedAuth) {
+      sendOpenAiError(reply, 401, "Unauthorized", "invalid_request_error", "unauthorized");
+      return;
+    }
+
+    (request as any).openHaxAuth = resolvedAuth;
   });
 
   // Attach a telemetry span to each request
@@ -1740,6 +1751,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     keyPool,
     requestLogStore,
     credentialStore: runtimeCredentialStore,
+    sqlCredentialStore,
     proxySettingsStore,
     eventStore,
     refreshOpenAiOauthAccounts,
