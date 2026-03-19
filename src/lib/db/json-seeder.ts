@@ -172,10 +172,20 @@ export async function seedFromJsonValue(
   let accountCount = 0;
   for (const [providerId, { authType, accounts }] of providers) {
     if (skipExistingProviders) {
+      // When skipExistingProviders is true, only seed providers (and their
+      // accounts) that don't already exist in the DB.  Once a provider has
+      // been bootstrapped, the DB is the source of truth — re-seeding
+      // accounts from the JSON file would resurrect rows the user deleted.
+      const existing = await sql<Array<{ id: string }>>`
+        SELECT id FROM providers WHERE id = ${providerId} LIMIT 1
+      `;
+      if (existing.length > 0) {
+        continue;
+      }
+
       await sql`
         INSERT INTO providers (id, auth_type)
         VALUES (${providerId}, ${authType})
-        ON CONFLICT (id) DO NOTHING
       `;
     } else {
       await sql`
