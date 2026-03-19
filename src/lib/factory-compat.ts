@@ -82,6 +82,7 @@ export function buildFactoryCommonHeaders(model: string): Record<string, string>
   const headers: Record<string, string> = {
     "x-api-provider": getFactoryApiProvider(model),
     "x-factory-client": "cli",
+    "x-client-version": "0.74.0",
     "x-session-id": randomUUID(),
     "x-assistant-message-id": randomUUID(),
     "user-agent": "factory-cli/0.74.0",
@@ -104,7 +105,6 @@ export function buildFactoryAnthropicHeaders(
     ...buildFactoryCommonHeaders(model),
     "anthropic-version": "2023-06-01",
     "x-api-key": "placeholder",
-    "x-client-version": "0.74.0",
     "x-stainless-timeout": "600",
   };
 
