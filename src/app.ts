@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { DEFAULT_MODELS, type ProxyConfig } from "./lib/config.js";
 import { KeyPool, type ProviderCredential } from "./lib/key-pool.js";
 import { CredentialStore } from "./lib/credential-store.js";
-import { OpenAiOAuthManager } from "./lib/openai-oauth.js";
+import { OpenAiOAuthManager, isTerminalOpenAiRefreshError, type OAuthTokens } from "./lib/openai-oauth.js";
 import {
   factoryCredentialNeedsRefresh,
   parseJwtExpiry,
@@ -427,6 +427,11 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         }
       }
 
+      const removedLegacyOpenAiAccounts = await sqlCredentialStore.cleanupLegacyOpenAiDuplicates();
+      if (removedLegacyOpenAiAccounts > 0) {
+        app.log.warn({ count: removedLegacyOpenAiAccounts }, "removed legacy duplicate OpenAI account rows after seeding");
+      }
+
       app.log.info("database connection established");
     } catch (error) {
       app.log.error({ error: toErrorMessage(error) }, "failed to initialize database connection");
@@ -447,9 +452,16 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   } catch (error) {
     app.log.warn({ error: toErrorMessage(error) }, "failed to warm up provider accounts; non-keyed routes may still work");
   }
-  const requestLogStore = new RequestLogStore(config.requestLogsFilePath, config.requestLogsMaxEntries);
+  const requestLogStore = new RequestLogStore(
+    config.requestLogsFilePath,
+    config.requestLogsMaxEntries,
+    config.requestLogsFlushMs,
+  );
   await requestLogStore.warmup();
-  const promptAffinityStore = new PromptAffinityStore(config.promptAffinityFilePath);
+  const promptAffinityStore = new PromptAffinityStore(
+    config.promptAffinityFilePath,
+    config.promptAffinityFlushMs,
+  );
   await promptAffinityStore.warmup();
   const proxySettingsStore = new ProxySettingsStore(config.settingsFilePath, sql);
   await proxySettingsStore.warmup();
@@ -485,7 +497,43 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
 
       app.log.info({ accountId: credential.accountId, providerId: credential.providerId }, "refreshing expired OAuth token");
 
-      const newTokens = await oauthManager.refreshToken(credential.refreshToken);
+      let newTokens: OAuthTokens;
+      try {
+        newTokens = await oauthManager.refreshToken(credential.refreshToken);
+      } catch (error) {
+        if (isTerminalOpenAiRefreshError(error)) {
+          const disabledCredential: ProviderCredential = {
+            ...credential,
+            refreshToken: undefined,
+          };
+
+          keyPool.updateAccountCredential(credential.providerId, credential, disabledCredential);
+          if (typeof credential.expiresAt === "number" && credential.expiresAt <= Date.now()) {
+            keyPool.markRateLimited(disabledCredential, 24 * 60 * 60 * 1000);
+          }
+
+          await runtimeCredentialStore.upsertOAuthAccount(
+            credential.providerId,
+            disabledCredential.accountId,
+            disabledCredential.token,
+            undefined,
+            disabledCredential.expiresAt,
+            disabledCredential.chatgptAccountId,
+            undefined,
+            undefined,
+            disabledCredential.planType,
+          );
+
+          app.log.warn({
+            accountId: credential.accountId,
+            providerId: credential.providerId,
+            code: error.code,
+            status: error.status,
+          }, "disabled terminally invalid OpenAI refresh token; full reauth required");
+        }
+
+        throw error;
+      }
 
       const newCredential: ProviderCredential = {
         providerId: credential.providerId,
@@ -1784,6 +1832,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       await eventStore.close();
     }
 
+    await promptAffinityStore.close();
     await requestLogStore.close();
     await credentialStore.close();
     if (sql) {

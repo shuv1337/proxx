@@ -833,11 +833,14 @@ export class RequestLogStore {
   private readonly accountAccumulators = new Map<string, MutableAccountAccumulator>();
   private warmupPromise: Promise<void> | null = null;
   private persistChain: Promise<void> = Promise.resolve();
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private persistPending = false;
   private closed = false;
 
   public constructor(
     private readonly filePath: string,
     private readonly maxEntries: number = 1000,
+    private readonly persistIntervalMs: number = 1000,
   ) {}
 
   public async warmup(): Promise<void> {
@@ -1082,6 +1085,13 @@ export class RequestLogStore {
 
   public async close(): Promise<void> {
     this.closed = true;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    if (this.persistPending) {
+      await this.queuePersist(true);
+    }
     await this.persistChain.catch(() => undefined);
   }
 
@@ -2005,11 +2015,35 @@ export class RequestLogStore {
       return;
     }
 
+    this.persistPending = true;
+    if (this.persistTimer) {
+      return;
+    }
+
+    if (this.persistIntervalMs === 0) {
+      void this.queuePersist();
+      return;
+    }
+
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.queuePersist();
+    }, this.persistIntervalMs);
+    this.persistTimer.unref?.();
+  }
+
+  private async queuePersist(force = false): Promise<void> {
     this.persistChain = this.persistChain
       .catch(() => undefined)
       .then(async () => {
+        if (!force && !this.persistPending) {
+          return;
+        }
+
+        this.persistPending = false;
         await this.persistNow();
       });
+    await this.persistChain;
   }
 
   private async persistNow(): Promise<void> {

@@ -101,6 +101,42 @@ test("request log persistence reloads cleanly without leaving temp files behind"
   });
 });
 
+test("request log close flushes batched writes", async () => {
+  await withTempDir(async (tempDir) => {
+    const filePath = path.join(tempDir, "request-logs.json");
+    const store = new RequestLogStore(filePath, 100, 60_000);
+    await store.warmup();
+
+    store.record({
+      providerId: "factory",
+      accountId: "acct-1",
+      authType: "oauth_bearer",
+      model: "claude-opus-4-6",
+      upstreamMode: "messages",
+      upstreamPath: "/api/llm/a/v1/messages",
+      status: 200,
+      latencyMs: 220,
+    });
+    store.record({
+      providerId: "openai",
+      accountId: "acct-2",
+      authType: "oauth_bearer",
+      model: "gpt-5.4",
+      upstreamMode: "responses",
+      upstreamPath: "/v1/responses",
+      status: 200,
+      latencyMs: 180,
+    });
+
+    await store.close();
+
+    const persisted = JSON.parse(await readFile(filePath, "utf8")) as { entries: Array<{ providerId: string; model: string }> };
+    assert.equal(persisted.entries.length, 2);
+    assert.equal(persisted.entries[0]?.providerId, "factory");
+    assert.equal(persisted.entries[1]?.model, "gpt-5.4");
+  });
+});
+
 test("request log persistence preserves upstream error summaries and factory diagnostics", async () => {
   await withTempDir(async (tempDir) => {
     const filePath = path.join(tempDir, "request-logs.json");

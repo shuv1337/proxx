@@ -67,7 +67,9 @@ export interface ProxyConfig {
   readonly modelsFilePath: string;
   readonly requestLogsFilePath: string;
   readonly requestLogsMaxEntries: number;
+  readonly requestLogsFlushMs: number;
   readonly promptAffinityFilePath: string;
+  readonly promptAffinityFlushMs: number;
   readonly settingsFilePath: string;
   readonly keyReloadMs: number;
   readonly keyCooldownMs: number;
@@ -488,7 +490,9 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     modelsFilePath: filePathFromEnvAliases(["PROXY_MODELS_FILE", "VIVGRID_MODELS_FILE"], "./models.json", cwd),
     requestLogsFilePath: filePathFromEnvAliases(["PROXY_REQUEST_LOGS_FILE"], "./data/request-logs.json", cwd),
     requestLogsMaxEntries: numberFromEnvAliases(["PROXY_REQUEST_LOGS_MAX_ENTRIES"], 100000),
+    requestLogsFlushMs: nonNegativeNumberFromEnvAliases(["PROXY_REQUEST_LOGS_FLUSH_MS"], 1000),
     promptAffinityFilePath: filePathFromEnvAliases(["PROXY_PROMPT_AFFINITY_FILE"], "./data/prompt-affinity.json", cwd),
+    promptAffinityFlushMs: nonNegativeNumberFromEnvAliases(["PROXY_PROMPT_AFFINITY_FLUSH_MS"], 250),
     settingsFilePath: filePathFromEnvAliases(["PROXY_SETTINGS_FILE"], "./data/proxy-settings.json", cwd),
     keyReloadMs: numberFromEnvAliases(["PROXY_KEY_RELOAD_MS", "VIVGRID_KEY_RELOAD_MS"], 5000),
     keyCooldownMs: numberFromEnvAliases(["PROXY_KEY_COOLDOWN_MS", "VIVGRID_KEY_RELOAD_MS"], 30000),

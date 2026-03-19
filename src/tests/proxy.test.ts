@@ -128,7 +128,9 @@ async function withProxyApp(
     modelsFilePath: modelsPath,
     requestLogsFilePath: requestLogsPath,
     requestLogsMaxEntries: 100000,
+    requestLogsFlushMs: 0,
     promptAffinityFilePath: promptAffinityPath,
+    promptAffinityFlushMs: 0,
     settingsFilePath: settingsPath,
     keyReloadMs: 50,
     keyCooldownMs: 10000,
@@ -2199,6 +2201,111 @@ test("refreshes oauth tokens on 401 unauthorized before marking rate-limited", a
           assert.ok(isRecord(payload.choices[0]));
           assert.ok(isRecord(payload.choices[0].message));
           assert.equal(payload.choices[0].message.content, "refreshed-after-401-ok");
+        },
+      );
+    },
+  );
+});
+
+test("terminal OpenAI refresh failures clear the refresh token and do not retry indefinitely", async () => {
+  let refreshCalls = 0;
+
+  await withPatchedFetch(
+    async (input, init, originalFetch) => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+      if (url === "https://auth.openai.com/oauth/token") {
+        refreshCalls += 1;
+        const body = typeof init?.body === "string" ? init.body : "";
+        assert.match(body, /grant_type=refresh_token/);
+        assert.match(body, /refresh_token=stale-openai-refresh/);
+        return new Response(JSON.stringify({
+          error: {
+            message: "Your refresh token has already been used to generate a new access token. Please try signing in again.",
+            type: "invalid_request_error",
+            code: "refresh_token_reused",
+          },
+        }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return originalFetch(input, init);
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: {
+            providers: {
+              openai: {
+                auth: "oauth_bearer",
+                accounts: [
+                  {
+                    id: "oa-terminal-refresh",
+                    access_token: makeJwt({
+                      chatgpt_account_id: "cgpt-terminal-refresh",
+                      chatgpt_plan_type: "free",
+                      exp: Math.floor((Date.now() - 60_000) / 1000),
+                    }),
+                    refresh_token: "stale-openai-refresh",
+                    expires_at: Date.now() - 60_000,
+                    chatgpt_account_id: "cgpt-terminal-refresh",
+                    plan_type: "free",
+                  },
+                ],
+              },
+            },
+          },
+          configOverrides: {
+            upstreamProviderId: "openai",
+            upstreamFallbackProviderIds: [],
+          },
+          upstreamHandler: async () => ({
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ object: "response", output: [] }),
+          }),
+        },
+        async ({ app, tempDir }) => {
+          const firstResponse = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            payload: {
+              model: "gpt-5.4",
+              messages: [{ role: "user", content: "hello" }],
+              stream: false,
+            },
+          });
+
+          assert.equal(firstResponse.statusCode, 429);
+          assert.equal(refreshCalls, 1);
+
+          const secondResponse = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            payload: {
+              model: "gpt-5.4",
+              messages: [{ role: "user", content: "hello again" }],
+              stream: false,
+            },
+          });
+
+          assert.equal(secondResponse.statusCode, 429);
+          assert.equal(refreshCalls, 1);
+
+          const persisted = JSON.parse(await readFile(path.join(tempDir, "keys.json"), "utf8")) as Record<string, unknown>;
+          assert.ok(isRecord(persisted.providers));
+          const openAi = persisted.providers.openai;
+          assert.ok(isRecord(openAi));
+          assert.ok(Array.isArray(openAi.accounts));
+          assert.ok(isRecord(openAi.accounts[0]));
+          assert.equal(openAi.accounts[0].refresh_token, undefined);
         },
       );
     },

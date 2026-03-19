@@ -73,6 +73,12 @@ interface AccountRow {
   plan_type: string | null;
 }
 
+export interface SqlOpenAiAccountIdentityRow {
+  readonly id: string;
+  readonly provider_id: string;
+  readonly chatgpt_account_id: string | null;
+}
+
 interface CooldownRow {
   cooldown_until: string;
 }
@@ -96,6 +102,46 @@ function toProviderCredential(row: AccountRow, authType: ProviderAuthType): Prov
     chatgptAccountId: row.chatgpt_account_id ?? undefined,
     planType: row.plan_type ?? undefined,
   };
+}
+
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isLegacyOpenAiAccountId(accountId: string, chatgptAccountId: string): boolean {
+  return new RegExp(`^${escapeRegexLiteral(chatgptAccountId)}_[0-9a-f]{8}$`).test(accountId);
+}
+
+function isCurrentOpenAiAccountId(accountId: string, chatgptAccountId: string): boolean {
+  return new RegExp(`^${escapeRegexLiteral(chatgptAccountId)}-[0-9a-f]{12}$`).test(accountId);
+}
+
+export function selectLegacyOpenAiDuplicateIds(rows: readonly SqlOpenAiAccountIdentityRow[]): string[] {
+  const grouped = new Map<string, SqlOpenAiAccountIdentityRow[]>();
+
+  for (const row of rows) {
+    if (row.provider_id !== "openai" || !row.chatgpt_account_id) {
+      continue;
+    }
+    const accounts = grouped.get(row.chatgpt_account_id) ?? [];
+    accounts.push(row);
+    grouped.set(row.chatgpt_account_id, accounts);
+  }
+
+  const idsToDelete: string[] = [];
+  for (const [chatgptAccountId, accounts] of grouped.entries()) {
+    const hasCurrentSibling = accounts.some((account) => isCurrentOpenAiAccountId(account.id, chatgptAccountId));
+    if (!hasCurrentSibling) {
+      continue;
+    }
+    for (const account of accounts) {
+      if (isLegacyOpenAiAccountId(account.id, chatgptAccountId)) {
+        idsToDelete.push(account.id);
+      }
+    }
+  }
+
+  return idsToDelete;
 }
 
 function maskSecret(secret: string): string {
@@ -382,6 +428,37 @@ export class SqlCredentialStore {
     return result;
   }
 
+  public async cleanupLegacyOpenAiDuplicates(chatgptAccountId?: string): Promise<number> {
+    const rows = chatgptAccountId
+      ? await this.sql.unsafe<AccountRow[]>(
+        `${SELECT_ACCOUNTS_BY_PROVIDER.replace("ORDER BY id;", "AND chatgpt_account_id = $2 ORDER BY id;")}`,
+        ["openai", chatgptAccountId],
+      )
+      : await this.sql.unsafe<AccountRow[]>(SELECT_ACCOUNTS_BY_PROVIDER, ["openai"]);
+    const idsToDelete = selectLegacyOpenAiDuplicateIds(rows);
+
+    if (idsToDelete.length === 0) {
+      return 0;
+    }
+
+    await this.sql.begin(async (tx) => {
+      await tx.unsafe(
+        "DELETE FROM account_cooldown WHERE provider_id = 'openai' AND account_id = ANY($1::text[])",
+        [idsToDelete],
+      );
+      await tx.unsafe(
+        "DELETE FROM account_health WHERE provider_id = 'openai' AND account_id = ANY($1::text[])",
+        [idsToDelete],
+      );
+      await tx.unsafe(
+        "DELETE FROM accounts WHERE provider_id = 'openai' AND id = ANY($1::text[])",
+        [idsToDelete],
+      );
+    });
+
+    return idsToDelete.length;
+  }
+
   public async upsertProvider(providerId: string, authType: ProviderAuthType): Promise<void> {
     await this.sql.unsafe(UPSERT_PROVIDER, [providerId, authType]);
   }
@@ -429,6 +506,10 @@ export class SqlCredentialStore {
       chatgptAccountId,
       planType,
     });
+
+    if (providerId === "openai" && chatgptAccountId) {
+      await this.cleanupLegacyOpenAiDuplicates(chatgptAccountId);
+    }
   }
 
   public async upsertAccounts(accounts: readonly ProviderCredential[]): Promise<void> {
