@@ -1,0 +1,92 @@
+name: deploy-production
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxx-production
+  cancel-in-progress: false
+
+jobs:
+  production-preflight:
+    name: production-preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: chmod +x scripts/*.sh
+      - run: ./scripts/ci-lint.sh
+      - uses: rhysd/actionlint@v1
+      - uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: |
+            README.md
+            DEVEL.md
+            specs/**/*.md
+            .github/workflows/*.yml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run build
+      - run: pnpm run web:build
+
+  deploy-production:
+    name: deploy-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs:
+      - production-preflight
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+      - run: mkdir -p ~/.ssh && ssh-keyscan -H "${PRODUCTION_HOST}" >> ~/.ssh/known_hosts
+        env:
+          PRODUCTION_HOST: ${{ vars.PRODUCTION_SSH_HOST || 'ussy.promethean.rest' }}
+      - run: chmod +x scripts/*.sh
+      - run: ./scripts/deploy-remote.sh
+        env:
+          DEPLOY_HOST: ${{ vars.PRODUCTION_SSH_HOST || 'ussy.promethean.rest' }}
+          DEPLOY_USER: ${{ vars.PRODUCTION_SSH_USER || 'error' }}
+          DEPLOY_PATH: ${{ vars.PRODUCTION_DEPLOY_PATH || '~/devel/services/proxx' }}
+          DEPLOY_ENABLE_TLS: 'false'
+          DEPLOY_ENV_FILE: ${{ secrets.PRODUCTION_ENV_FILE }}
+          DEPLOY_KEYS_JSON: ${{ secrets.PRODUCTION_KEYS_JSON }}
+          DEPLOY_MODELS_JSON: ${{ secrets.PRODUCTION_MODELS_JSON }}
+
+  verify-production:
+    name: verify-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - deploy-production
+    steps:
+      - run: |
+          for i in $(seq 1 30); do
+            if curl -fsS -H "Authorization: Bearer ${PRODUCTION_AUTH_TOKEN}" "${PRODUCTION_BASE_URL}/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          exit 1
+        env:
+          PRODUCTION_BASE_URL: ${{ vars.PRODUCTION_BASE_URL || 'https://ussy.promethean.rest' }}
+          PRODUCTION_AUTH_TOKEN: ${{ secrets.PRODUCTION_PROXY_AUTH_TOKEN }}
+      - run: curl -fsS "${PRODUCTION_BASE_URL}" >/dev/null
+        env:
+          PRODUCTION_BASE_URL: ${{ vars.PRODUCTION_BASE_URL || 'https://ussy.promethean.rest' }}

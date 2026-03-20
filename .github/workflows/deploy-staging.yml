@@ -1,0 +1,105 @@
+name: deploy-staging
+
+on:
+  push:
+    branches:
+      - staging
+
+concurrency:
+  group: proxx-staging
+  cancel-in-progress: true
+
+jobs:
+  staging-preflight:
+    name: staging-preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: chmod +x scripts/*.sh
+      - run: ./scripts/ci-lint.sh
+      - uses: rhysd/actionlint@v1
+      - uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: |
+            README.md
+            DEVEL.md
+            specs/**/*.md
+            .github/workflows/*.yml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run build
+      - run: pnpm run web:build
+
+  deploy-staging:
+    name: deploy-staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs:
+      - staging-preflight
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+      - run: mkdir -p ~/.ssh && ssh-keyscan -H "${STAGING_HOST}" >> ~/.ssh/known_hosts
+        env:
+          STAGING_HOST: ${{ vars.STAGING_SSH_HOST || 'ussy2.promethean.rest' }}
+      - run: chmod +x scripts/*.sh
+      - run: ./scripts/deploy-remote.sh
+        env:
+          DEPLOY_HOST: ${{ vars.STAGING_SSH_HOST || 'ussy2.promethean.rest' }}
+          DEPLOY_USER: ${{ vars.STAGING_SSH_USER || 'error' }}
+          DEPLOY_PATH: ${{ vars.STAGING_DEPLOY_PATH || '~/devel/services/proxx-staging' }}
+          DEPLOY_PUBLIC_HOST: ${{ vars.STAGING_PUBLIC_HOST || 'ussy2.promethean.rest' }}
+          DEPLOY_ENABLE_TLS: 'true'
+          DEPLOY_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
+          DEPLOY_KEYS_JSON: ${{ secrets.STAGING_KEYS_JSON }}
+          DEPLOY_MODELS_JSON: ${{ secrets.STAGING_MODELS_JSON }}
+
+  staging-live-e2e:
+    name: staging-live-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs:
+      - deploy-staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: chmod +x scripts/*.sh
+      - run: |
+          for i in $(seq 1 40); do
+            if curl -fsS -H "Authorization: Bearer ${DEV_PROXY_AUTH_TOKEN}" "${DEV_PROXY_URL}/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          exit 1
+        env:
+          DEV_PROXY_URL: ${{ vars.STAGING_BASE_URL || 'https://ussy2.promethean.rest' }}
+          DEV_PROXY_AUTH_TOKEN: ${{ secrets.STAGING_PROXY_AUTH_TOKEN }}
+      - run: pnpm install --frozen-lockfile
+      - run: ./scripts/e2e-test.sh
+        env:
+          DEV_PROXY_URL: ${{ vars.STAGING_BASE_URL || 'https://ussy2.promethean.rest' }}
+          DEV_PROXY_AUTH_TOKEN: ${{ secrets.STAGING_PROXY_AUTH_TOKEN }}
+      - run: ./scripts/e2e-multitenancy-smoke.sh
+        env:
+          DEV_PROXY_URL: ${{ vars.STAGING_BASE_URL || 'https://ussy2.promethean.rest' }}
+          DEV_PROXY_AUTH_TOKEN: ${{ secrets.STAGING_PROXY_AUTH_TOKEN }}
