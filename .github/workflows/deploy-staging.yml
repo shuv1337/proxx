@@ -87,6 +87,7 @@ jobs:
     timeout-minutes: 90
     needs:
       - deploy-staging
+    environment: staging
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
