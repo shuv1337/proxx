@@ -1940,7 +1940,7 @@ export class RequestLogStore {
 
     this.dailyAccountBuckets.clear();
     for (const bucket of db.dailyAccountBuckets ?? []) {
-      const key = dailyAccountBucketKey(bucket.startMs, bucket.providerId, bucket.accountId);
+      const key = dailyAccountBucketKey(bucket.startMs, bucket.providerId, bucket.accountId, bucket.tenantId, bucket.issuer, bucket.keyId);
       this.dailyAccountBuckets.set(key, { ...bucket });
     }
 
@@ -1954,8 +1954,17 @@ export class RequestLogStore {
     if (Array.isArray(db.accountAccumulators) && db.accountAccumulators.length > 0) {
       for (const acc of db.accountAccumulators) {
         if (isRecord(acc) && typeof acc.providerId === "string" && typeof acc.accountId === "string") {
-          const key = accountAccumulatorKey(acc.providerId as string, acc.accountId as string);
+          const key = accountAccumulatorKey(
+            acc.providerId as string,
+            acc.accountId as string,
+            typeof acc.tenantId === "string" ? acc.tenantId : undefined,
+            typeof acc.issuer === "string" ? acc.issuer : undefined,
+            typeof acc.keyId === "string" ? acc.keyId : undefined,
+          );
           this.accountAccumulators.set(key, {
+            tenantId: typeof acc.tenantId === "string" ? acc.tenantId : undefined,
+            issuer: typeof acc.issuer === "string" ? acc.issuer : undefined,
+            keyId: typeof acc.keyId === "string" ? acc.keyId : undefined,
             providerId: acc.providerId as string,
             accountId: acc.accountId as string,
             authType: (acc.authType as RequestAuthType) ?? "api_key",
