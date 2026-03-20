@@ -89,6 +89,22 @@ test("FACTORY_BASE_URL env var overrides factory base URL", async () => {
   );
 });
 
+test("defaultProviderBaseUrl returns z.ai and mistral defaults", async () => {
+  await withEnv(
+    {
+      PROXY_AUTH_TOKEN: "test-token",
+      ZAI_BASE_URL: undefined,
+      ZHIPU_BASE_URL: undefined,
+      MISTRAL_BASE_URL: undefined,
+    },
+    () => {
+      const config = loadConfig("/tmp/provider-config-test");
+      assert.equal(config.upstreamProviderBaseUrls["zai"], "https://api.z.ai/api/paas/v4");
+      assert.equal(config.upstreamProviderBaseUrls["mistral"], "https://api.mistral.ai/v1");
+    },
+  );
+});
+
 // --- VAL-CONFIG-002: FACTORY_API_KEY env var creates a factory provider in KeyPool ---
 
 test("FACTORY_API_KEY env var creates factory provider in KeyPool", { concurrency: false }, async () => {

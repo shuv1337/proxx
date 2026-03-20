@@ -34,7 +34,7 @@ Observed issues:
 ### Phase 1: Durable aggregate model
 - [x] Add persisted daily aggregates keyed by provider+model and provider+account scoped to a day.
 - [x] Add metadata about retained/trustworthy coverage (earliest entry ts, earliest bucket ts, earliest env-estimate ts).
-- [x] Keep backward compatibility for existing `request-logs.json` files.
+- [x] Keep backward compatibility for existing `request-logs.json` files during JSONL migration.
 
 ### Phase 2: Backfill + rebuild
 - [x] During warmup, rebuild or repair aggregates from entries.

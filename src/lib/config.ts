@@ -317,6 +317,10 @@ function defaultProviderBaseUrl(providerId: string): string {
       return (process.env.REQUESTY_BASE_URL ?? "https://router.requesty.ai/v1").replace(/\/+$/, "");
     case "gemini":
       return (process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta").replace(/\/+$/, "");
+    case "zai":
+      return (process.env.ZAI_BASE_URL ?? process.env.ZHIPU_BASE_URL ?? "https://api.z.ai/api/paas/v4").replace(/\/+$/, "");
+    case "mistral":
+      return (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/+$/, "");
     case "ollama-cloud":
       return "https://ollama.com";
     case "vivgrid":
@@ -351,6 +355,8 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     openrouter: defaultProviderBaseUrl("openrouter"),
     requesty: defaultProviderBaseUrl("requesty"),
     gemini: defaultProviderBaseUrl("gemini"),
+    zai: defaultProviderBaseUrl("zai"),
+    mistral: defaultProviderBaseUrl("mistral"),
     factory: defaultProviderBaseUrl("factory"),
   });
   upstreamProviderBaseUrls[upstreamProviderId] = upstreamBaseUrl;
@@ -488,7 +494,7 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     keysFilePath: optionalFilePathFromEnvAliases(["PROXY_KEYS_FILE", "VIVGRID_KEYS_FILE"], cwd)
       ?? filePathFromEnvAliases(["PROXY_KEYS_FILE", "VIVGRID_KEYS_FILE"], "./keys.json", cwd),
     modelsFilePath: filePathFromEnvAliases(["PROXY_MODELS_FILE", "VIVGRID_MODELS_FILE"], "./models.json", cwd),
-    requestLogsFilePath: filePathFromEnvAliases(["PROXY_REQUEST_LOGS_FILE"], "./data/request-logs.json", cwd),
+    requestLogsFilePath: filePathFromEnvAliases(["PROXY_REQUEST_LOGS_FILE"], "./data/request-logs.jsonl", cwd),
     requestLogsMaxEntries: numberFromEnvAliases(["PROXY_REQUEST_LOGS_MAX_ENTRIES"], 100000),
     requestLogsFlushMs: nonNegativeNumberFromEnvAliases(["PROXY_REQUEST_LOGS_FLUSH_MS"], 1000),
     promptAffinityFilePath: filePathFromEnvAliases(["PROXY_PROMPT_AFFINITY_FILE"], "./data/prompt-affinity.json", cwd),

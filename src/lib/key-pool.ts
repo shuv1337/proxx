@@ -362,6 +362,22 @@ function readProvidersFromEnv(): Map<string, ProviderState> {
     );
   }
 
+  const zaiKey = (process.env.ZAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? "").trim();
+  if (zaiKey) {
+    providers.set(
+      normalizeProviderId(process.env.ZAI_PROVIDER_ID ?? process.env.ZHIPU_PROVIDER_ID ?? "zai"),
+      createEnvProviderState(process.env.ZAI_PROVIDER_ID ?? process.env.ZHIPU_PROVIDER_ID ?? "zai", zaiKey),
+    );
+  }
+
+  const mistralKey = (process.env.MISTRAL_API_KEY ?? "").trim();
+  if (mistralKey) {
+    providers.set(
+      normalizeProviderId(process.env.MISTRAL_PROVIDER_ID ?? "mistral"),
+      createEnvProviderState(process.env.MISTRAL_PROVIDER_ID ?? "mistral", mistralKey),
+    );
+  }
+
   const openrouterKey = process.env.OPENROUTER_API_KEY?.trim();
   if (openrouterKey) {
     providers.set(

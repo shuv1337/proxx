@@ -60,7 +60,7 @@ async function withProxyApp(
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "factory-strategy-test-"));
   const keysPath = path.join(tempDir, "keys.json");
   const modelsPath = path.join(tempDir, "models.json");
-  const requestLogsPath = path.join(tempDir, "request-logs.json");
+  const requestLogsPath = path.join(tempDir, "request-logs.jsonl");
   const promptAffinityPath = path.join(tempDir, "prompt-affinity.json");
   const settingsPath = path.join(tempDir, "proxy-settings.json");
 
@@ -540,6 +540,58 @@ test("factory/claude-* injects default max_tokens when absent", { concurrency: f
   );
 });
 
+test("factory/claude-* clamps thinking budget below injected default max_tokens", { concurrency: false }, async () => {
+  let capturedBody = "";
+
+  await withEnv(
+    {
+      FACTORY_API_KEY: "fk-test-key", // pragma: allowlist secret
+      FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
+      FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: { providers: {} },
+          upstreamHandler: async (_request, body) => {
+            capturedBody = body;
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: "msg_factory_reasoning_budget",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "ok" }],
+                model: "claude-opus-4-6",
+                usage: { input_tokens: 10, output_tokens: 5 },
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            payload: {
+              model: "factory/claude-opus-4-6",
+              messages: [{ role: "user", content: "hello" }],
+              reasoning_effort: "high",
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          const parsedBody = JSON.parse(capturedBody) as Record<string, unknown>;
+          assert.equal(parsedBody["max_tokens"], 4096);
+          assert.ok(isRecord(parsedBody["thinking"]));
+          assert.equal(parsedBody["thinking"]["budget_tokens"], 4095);
+        },
+      );
+    },
+  );
+});
+
 test("claude-opus-4-6 automatically routes to Factory first", { concurrency: false }, async () => {
   let capturedUrl = "";
   let capturedHeaders: Record<string, string> = {};
@@ -607,6 +659,97 @@ test("claude-opus-4-6 automatically routes to Factory first", { concurrency: fal
           assert.equal(capturedUrl, "/api/llm/a/v1/messages");
           assert.equal(capturedHeaders["x-api-provider"], "anthropic");
           assert.equal(response.headers["x-open-hax-upstream-provider"], "factory");
+        },
+      );
+    },
+  );
+});
+
+test("claude-opus-4-6 auto routing applies safe xhigh thinking budget mapping", { concurrency: false }, async () => {
+  const capturedUrls: string[] = [];
+  let capturedBody = "";
+
+  await withEnv(
+    {
+      FACTORY_API_KEY: "fk-test-key", // pragma: allowlist secret
+      FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
+      FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: {
+            providers: {
+              openai: {
+                auth: "oauth_bearer",
+                accounts: [{ id: "openai-1", access_token: "openai-token" }],
+              },
+              requesty: {
+                auth: "api_key",
+                accounts: [{ id: "requesty-1", api_key: "requesty-token" }],
+              },
+            },
+          },
+          configOverrides: {
+            upstreamProviderId: "openai",
+            upstreamFallbackProviderIds: ["requesty"],
+          },
+          upstreamHandler: async (request, body) => {
+            capturedUrls.push(request.url ?? "");
+            capturedBody = body;
+
+            if (request.url === "/api/llm/a/v1/messages") {
+              return {
+                status: 200,
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  id: "msg_factory_auto_reasoning",
+                  type: "message",
+                  role: "assistant",
+                  content: [
+                    { type: "thinking", thinking: "auto-route-thinking" },
+                    { type: "text", text: "Factory auto route reasoning OK" },
+                  ],
+                  model: "claude-opus-4-6",
+                  usage: { input_tokens: 10, output_tokens: 5 },
+                }),
+              };
+            }
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: "chatcmpl_factory_auto_reasoning_fallback",
+                object: "chat.completion",
+                created: 123,
+                model: "claude-opus-4-6",
+                choices: [{ index: 0, message: { role: "assistant", content: "fallback", reasoning_content: "fallback-thinking" }, finish_reason: "stop" }],
+                usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            payload: {
+              model: "claude-opus-4-6",
+              messages: [{ role: "user", content: "hello" }],
+              reasoning_effort: "xhigh",
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          assert.deepEqual(capturedUrls, ["/api/llm/a/v1/messages"]);
+          assert.equal(response.headers["x-open-hax-upstream-provider"], "factory");
+
+          const parsedBody = JSON.parse(capturedBody) as Record<string, unknown>;
+          assert.equal(parsedBody["max_tokens"], 4096);
+          assert.ok(isRecord(parsedBody["thinking"]));
+          assert.equal(parsedBody["thinking"]["budget_tokens"], 4095);
         },
       );
     },

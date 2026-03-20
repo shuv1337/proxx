@@ -51,7 +51,7 @@ async function withProxyApp(
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "open-hax-proxy-test-"));
   const keysPath = path.join(tempDir, "keys.json");
   const modelsPath = path.join(tempDir, "models.json");
-  const requestLogsPath = path.join(tempDir, "request-logs.json");
+  const requestLogsPath = path.join(tempDir, "request-logs.jsonl");
   const promptAffinityPath = path.join(tempDir, "prompt-affinity.json");
   const settingsPath = path.join(tempDir, "proxy-settings.json");
 
@@ -98,6 +98,8 @@ async function withProxyApp(
       openrouter: `http://127.0.0.1:${address.port}`,
       requesty: `http://127.0.0.1:${address.port}`,
       gemini: `http://127.0.0.1:${address.port}`,
+      zai: `http://127.0.0.1:${address.port}/api/paas/v4`,
+      mistral: `http://127.0.0.1:${address.port}/v1`,
     },
     upstreamBaseUrl: `http://127.0.0.1:${address.port}`,
     openaiProviderId: "openai",
@@ -808,6 +810,289 @@ test("routes chat completions through native Gemini generateContent when GEMINI_
   );
 });
 
+test("maps Gemini 2.5 Flash reasoning effort to thinkingBudget and reasoning_content", { concurrency: false }, async () => {
+  await withEnv(
+    {
+      GEMINI_API_KEY: "gem-key-1", // pragma: allowlist secret
+      GEMINI_PROVIDER_ID: undefined,
+      OPENROUTER_API_KEY: undefined,
+      REQUESTY_API_TOKEN: undefined,
+      REQUESTY_API_KEY: undefined,
+      OPENROUTER_PROVIDER_ID: undefined,
+      REQUESTY_PROVIDER_ID: undefined,
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: { providers: {} },
+          configOverrides: {
+            upstreamProviderId: "gemini",
+            upstreamFallbackProviderIds: [],
+          },
+          upstreamHandler: async (request, body) => {
+            if (request.url === "/api/embed" || request.url === "/api/embeddings") {
+              return {
+                status: 200,
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ embeddings: [[0.1, 0.2, 0.3]] }),
+              };
+            }
+
+            assert.match(request.url ?? "", /\/models\/gemini-2\.5-flash:generateContent$/);
+            const parsed = JSON.parse(body) as Record<string, unknown>;
+            assert.ok(isRecord(parsed.generationConfig));
+            assert.ok(isRecord(parsed.generationConfig.thinkingConfig));
+            assert.equal(parsed.generationConfig.thinkingConfig.thinkingBudget, 24576);
+            assert.equal(parsed.generationConfig.thinkingConfig.includeThoughts, true);
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                candidates: [{
+                  content: {
+                    role: "model",
+                    parts: [
+                      { text: "gemini-thought", thought: true },
+                      { text: "gemini-answer" },
+                    ],
+                  },
+                  finishReason: "STOP",
+                }],
+                usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3 },
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            payload: {
+              model: "gemini-2.5-flash",
+              messages: [{ role: "user", content: "hello" }],
+              reasoning_effort: "xhigh",
+              include: ["reasoning.encrypted_content"],
+              stream: false,
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          const payload = response.json();
+          assert.ok(isRecord(payload));
+          assert.equal((payload.choices as any)[0].message.content, "gemini-answer");
+          assert.equal((payload.choices as any)[0].message.reasoning_content, "gemini-thought");
+        },
+      );
+    },
+  );
+});
+
+test("maps Gemini 3.1 Pro reasoning effort to thinkingLevel", { concurrency: false }, async () => {
+  await withEnv(
+    {
+      GEMINI_API_KEY: "gem-key-1", // pragma: allowlist secret
+      GEMINI_PROVIDER_ID: undefined,
+      OPENROUTER_API_KEY: undefined,
+      REQUESTY_API_TOKEN: undefined,
+      REQUESTY_API_KEY: undefined,
+      OPENROUTER_PROVIDER_ID: undefined,
+      REQUESTY_PROVIDER_ID: undefined,
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: { providers: {} },
+          configOverrides: {
+            upstreamProviderId: "gemini",
+            upstreamFallbackProviderIds: [],
+          },
+          upstreamHandler: async (request, body) => {
+            if (request.url === "/api/embed" || request.url === "/api/embeddings") {
+              return {
+                status: 200,
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ embeddings: [[0.1, 0.2, 0.3]] }),
+              };
+            }
+
+            assert.match(request.url ?? "", /\/models\/gemini-3\.1-pro-preview:generateContent$/);
+            const parsed = JSON.parse(body) as Record<string, unknown>;
+            assert.ok(isRecord(parsed.generationConfig));
+            assert.ok(isRecord(parsed.generationConfig.thinkingConfig));
+            assert.equal(parsed.generationConfig.thinkingConfig.thinkingLevel, "HIGH");
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                candidates: [{ content: { role: "model", parts: [{ text: "hi" }] }, finishReason: "STOP" }],
+                usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3 },
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            payload: {
+              model: "gemini-3.1-pro-preview",
+              messages: [{ role: "user", content: "hello" }],
+              reasoning_effort: "xhigh",
+              stream: false,
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+        },
+      );
+    },
+  );
+});
+
+test("routes glm chat requests through z.ai custom chat-completions path when ZAI_API_KEY is configured", { concurrency: false }, async () => {
+  await withEnv(
+    {
+      ZAI_API_KEY: "zai-key-1", // pragma: allowlist secret
+      ZAI_PROVIDER_ID: undefined,
+      GEMINI_API_KEY: undefined,
+      OPENROUTER_API_KEY: undefined,
+      REQUESTY_API_TOKEN: undefined,
+      REQUESTY_API_KEY: undefined,
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: { providers: {} },
+          configOverrides: {
+            upstreamProviderId: "zai",
+            upstreamFallbackProviderIds: [],
+            localOllamaEnabled: false,
+          },
+          upstreamHandler: async (request, body) => {
+            assert.equal(request.url, "/api/paas/v4/chat/completions");
+            assert.equal(request.headers.authorization, "Bearer zai-key-1");
+
+            const parsed = JSON.parse(body) as Record<string, unknown>;
+            assert.equal(parsed.model, "glm-5");
+            assert.ok(Array.isArray(parsed.messages));
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: "chatcmpl_zai",
+                object: "chat.completion",
+                created: 1772516801,
+                model: "glm-5",
+                choices: [{
+                  index: 0,
+                  message: { role: "assistant", content: "zai-glm-ok" },
+                  finish_reason: "stop",
+                }],
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: {
+              "content-type": "application/json"
+            },
+            payload: {
+              model: "glm-5",
+              messages: [{ role: "user", content: "hello" }],
+              stream: false,
+            }
+          });
+
+          assert.equal(response.statusCode, 200);
+          assert.equal(response.headers["x-open-hax-upstream-provider"], "zai");
+          const payload: unknown = response.json();
+          assert.ok(isRecord(payload));
+          assert.equal((payload.choices as any)[0].message.content, "zai-glm-ok");
+        },
+      );
+    },
+  );
+});
+
+test("routes mistral chat requests through env-backed Mistral provider", { concurrency: false }, async () => {
+  await withEnv(
+    {
+      MISTRAL_API_KEY: "mistral-key-1", // pragma: allowlist secret
+      MISTRAL_PROVIDER_ID: undefined,
+      GEMINI_API_KEY: undefined,
+      OPENROUTER_API_KEY: undefined,
+      REQUESTY_API_TOKEN: undefined,
+      REQUESTY_API_KEY: undefined,
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: { providers: {} },
+          configOverrides: {
+            upstreamProviderId: "mistral",
+            upstreamFallbackProviderIds: [],
+            localOllamaEnabled: false,
+          },
+          upstreamHandler: async (request, body) => {
+            assert.equal(request.url, "/v1/chat/completions");
+            assert.equal(request.headers.authorization, "Bearer mistral-key-1");
+
+            const parsed = JSON.parse(body) as Record<string, unknown>;
+            assert.equal(parsed.model, "mistral-small-latest");
+            assert.ok(Array.isArray(parsed.messages));
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: "chatcmpl_mistral",
+                object: "chat.completion",
+                created: 1772516801,
+                model: "mistral-small-latest",
+                choices: [{
+                  index: 0,
+                  message: { role: "assistant", content: "mistral-ok" },
+                  finish_reason: "stop",
+                }],
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: {
+              "content-type": "application/json"
+            },
+            payload: {
+              model: "mistral-small-latest",
+              messages: [{ role: "user", content: "hello" }],
+              stream: false,
+            }
+          });
+
+          assert.equal(response.statusCode, 200);
+          assert.equal(response.headers["x-open-hax-upstream-provider"], "mistral");
+          const payload: unknown = response.json();
+          assert.ok(isRecord(payload));
+          assert.equal((payload.choices as any)[0].message.content, "mistral-ok");
+        },
+      );
+    },
+  );
+});
+
 test("reuses the same upstream account for repeated prompt_cache_key requests", async () => {
   const observedKeys: string[] = [];
 
@@ -964,7 +1249,7 @@ test("persists request logs with usage counts for dashboard surfaces", async () 
 
       for (let attempt = 0; attempt < 20; attempt += 1) {
         try {
-          requestLogsJson = await readFile(path.join(tempDir, "request-logs.json"), "utf8");
+          requestLogsJson = await readFile(path.join(tempDir, "request-logs.jsonl"), "utf8");
           if (requestLogsJson.includes("gpt-5.3-codex")) {
             break;
           }
@@ -1004,17 +1289,29 @@ test("persists request logs with usage counts for dashboard surfaces", async () 
   );
 
   assert.ok(requestLogsJson.length > 0);
-  const parsed: unknown = JSON.parse(requestLogsJson);
-  assert.ok(isRecord(parsed));
-  assert.ok(Array.isArray(parsed.entries));
-  assert.equal(parsed.entries.length, 1);
-  assert.ok(isRecord(parsed.entries[0]));
-  assert.equal(parsed.entries[0].model, "gpt-5.3-codex");
-  assert.equal(parsed.entries[0].serviceTier, undefined);
-  assert.equal(parsed.entries[0].serviceTierSource, "none");
-  assert.equal(parsed.entries[0].promptTokens, 15);
-  assert.equal(parsed.entries[0].completionTokens, 9);
-  assert.equal(parsed.entries[0].totalTokens, 24);
+  const parsed = requestLogsJson
+    .split(/\r?\n/u)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line));
+  const latestEntries = new Map<string, Record<string, unknown>>();
+  for (const entry of parsed) {
+    assert.ok(isRecord(entry));
+    const entryId = entry.id;
+    if (typeof entryId !== "string") {
+      throw new Error("expected request log entry to include an id");
+    }
+    latestEntries.set(entryId, entry);
+  }
+
+  assert.equal(latestEntries.size, 1);
+  const [entry] = [...latestEntries.values()];
+  assert.ok(entry);
+  assert.equal(entry.model, "gpt-5.3-codex");
+  assert.equal(entry.serviceTier, undefined);
+  assert.equal(entry.serviceTierSource, "none");
+  assert.equal(entry.promptTokens, 15);
+  assert.equal(entry.completionTokens, 9);
+  assert.equal(entry.totalTokens, 24);
 });
 
 test("fetches live OpenAI Codex quota windows and persists refreshed OAuth tokens", async () => {
@@ -4120,6 +4417,68 @@ test("routes gpt chat requests to responses endpoint and maps response", async (
   );
 });
 
+test("preserves xhigh reasoning effort for gpt chat requests routed to responses", async () => {
+  let observedBody: Record<string, unknown> = {};
+
+  await withProxyApp(
+    {
+      keys: ["key-a"],
+      upstreamHandler: async (_request, body) => {
+        observedBody = JSON.parse(body) as Record<string, unknown>;
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            id: "resp_reasoning_xhigh",
+            object: "response",
+            created_at: 1772516800,
+            model: "gpt-5.2",
+            output: [
+              {
+                id: "msg_reasoning_xhigh",
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: "xhigh-ok"
+                  }
+                ]
+              }
+            ],
+            usage: {
+              input_tokens: 9,
+              output_tokens: 4,
+              total_tokens: 13
+            }
+          })
+        };
+      }
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "gpt-5.2",
+          messages: [{ role: "user", content: "hello" }],
+          reasoning_effort: "xhigh",
+          stream: false
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.ok(isRecord(observedBody.reasoning));
+      assert.equal(observedBody.reasoning.effort, "xhigh");
+    }
+  );
+});
+
 test("routes glm chat requests to chat-completions upstream", async () => {
   let observedPath = "";
   let observedBody: unknown;
@@ -5184,6 +5543,115 @@ test("routes ollama-prefixed models to /api/chat and forwards num_ctx controls",
   );
 });
 
+test("maps reasoning effort to ollama think true and exposes thinking as reasoning_content", async () => {
+  let observedBody: unknown;
+
+  await withProxyApp(
+    {
+      keys: [],
+      upstreamHandler: async (_request, body) => {
+        observedBody = JSON.parse(body);
+
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            model: "llama3.2:latest",
+            created_at: "2026-03-03T00:00:00.000Z",
+            message: {
+              role: "assistant",
+              content: "ollama-answer",
+              thinking: "ollama-thinking"
+            },
+            done: true,
+            done_reason: "stop",
+            prompt_eval_count: 12,
+            eval_count: 6
+          })
+        };
+      }
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "ollama/llama3.2:latest",
+          messages: [{ role: "user", content: "hello" }],
+          reasoning_effort: "high",
+          include: ["reasoning.encrypted_content"],
+          stream: false
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.ok(isRecord(observedBody));
+      assert.equal(observedBody.think, true);
+
+      const payload: unknown = response.json();
+      assert.ok(isRecord(payload));
+      assert.equal((payload.choices as any)[0].message.content, "ollama-answer");
+      assert.equal((payload.choices as any)[0].message.reasoning_content, "ollama-thinking");
+    }
+  );
+});
+
+test("maps none reasoning effort to ollama think false", async () => {
+  let observedBody: unknown;
+
+  await withProxyApp(
+    {
+      keys: [],
+      upstreamHandler: async (_request, body) => {
+        observedBody = JSON.parse(body);
+
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            model: "llama3.2:latest",
+            created_at: "2026-03-03T00:00:00.000Z",
+            message: {
+              role: "assistant",
+              content: "ollama-no-think"
+            },
+            done: true,
+            done_reason: "stop",
+            prompt_eval_count: 2,
+            eval_count: 1
+          })
+        };
+      }
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "ollama/llama3.2:latest",
+          messages: [{ role: "user", content: "hello" }],
+          reasoning_effort: "none",
+          stream: false
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.ok(isRecord(observedBody));
+      assert.equal(observedBody.think, false);
+    }
+  );
+});
+
 test("returns synthetic chat-completion SSE for ollama stream requests", async () => {
   let observedBody: unknown;
 
@@ -5238,6 +5706,63 @@ test("returns synthetic chat-completion SSE for ollama stream requests", async (
       assert.ok(response.body.includes("chat.completion.chunk"));
       assert.ok(response.body.includes("ollama-stream-ok"));
       assert.ok(response.body.includes("data: [DONE]"));
+    }
+  );
+});
+
+test("records ollama token usage in request logs", async () => {
+  await withProxyApp(
+    {
+      keys: [],
+      upstreamHandler: async () => ({
+        status: 200,
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "llama3.2:latest",
+          created_at: "2026-03-03T00:00:00.000Z",
+          message: {
+            role: "assistant",
+            content: "ollama-log-ok"
+          },
+          done: true,
+          done_reason: "stop",
+          prompt_eval_count: 9,
+          eval_count: 4
+        })
+      })
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "ollama/llama3.2:latest",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+
+      const logsResponse = await app.inject({
+        method: "GET",
+        url: "/api/ui/request-logs?providerId=ollama&limit=1"
+      });
+      assert.equal(logsResponse.statusCode, 200);
+
+      const payload: unknown = logsResponse.json();
+      assert.ok(isRecord(payload));
+      assert.ok(Array.isArray(payload.entries));
+      assert.ok(isRecord(payload.entries[0]));
+      assert.equal(payload.entries[0].providerId, "ollama");
+      assert.equal(payload.entries[0].promptTokens, 9);
+      assert.equal(payload.entries[0].completionTokens, 4);
+      assert.equal(payload.entries[0].totalTokens, 13);
     }
   );
 });
@@ -5327,7 +5852,7 @@ test("bridges native /api/chat requests through the OpenAI-compatible upstream c
           body: JSON.stringify({
             model: "qwen3.5:4b-q8_0",
             created_at: "2026-03-09T00:00:00.000Z",
-            message: { role: "assistant", content: "native-chat-ok" },
+            message: { role: "assistant", content: "native-chat-ok", thinking: "native-thinking-ok" },
             done: true,
             done_reason: "stop",
             prompt_eval_count: 4,
@@ -5343,6 +5868,7 @@ test("bridges native /api/chat requests through the OpenAI-compatible upstream c
         payload: {
           model: "qwen3.5:4b-q8_0",
           messages: [{ role: "user", content: "hello" }],
+          think: false,
           stream: false
         }
       });
@@ -5355,6 +5881,7 @@ test("bridges native /api/chat requests through the OpenAI-compatible upstream c
       assert.ok(isRecord(payload));
       assert.ok(isRecord(payload.message));
       assert.equal(payload.message.content, "native-chat-ok");
+      assert.equal(payload.message.thinking, "native-thinking-ok");
     }
   );
 });

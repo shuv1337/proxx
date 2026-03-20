@@ -16,7 +16,7 @@ Already present:
 - Render-aware notes in `README.md`
 
 Still cloud-fragile:
-- some state remains file-backed (`data/request-logs.json`, session history, prompt affinity, proxy settings fallback)
+- some state remains file-backed (`data/request-logs.jsonl`, session history, prompt affinity, proxy settings fallback)
 - OAuth callback/base URL handling is primarily local/dev oriented
 - no formal deployment blueprint/spec for staging/prod
 - no documented externalization strategy for Chroma/session/search components

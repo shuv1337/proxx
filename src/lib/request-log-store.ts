@@ -1,5 +1,7 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { access, appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 
 import { estimateRequestCost } from "./model-pricing.js";
 
@@ -486,6 +488,30 @@ function buildCorruptFilePath(filePath: string): string {
   return join(dirname(filePath), `${basename(filePath)}.corrupt-${Date.now()}-${process.pid}-${crypto.randomUUID()}`);
 }
 
+function buildMigratedFilePath(filePath: string): string {
+  return join(dirname(filePath), `${basename(filePath)}.migrated-${Date.now()}-${process.pid}-${crypto.randomUUID()}`);
+}
+
+function buildLegacyFilePath(filePath: string): string | null {
+  return filePath.endsWith(".jsonl") ? filePath.slice(0, -1) : null;
+}
+
+function buildMetadataFilePath(filePath: string): string {
+  if (filePath.endsWith(".jsonl")) {
+    return `${filePath.slice(0, -".jsonl".length)}.meta.json`;
+  }
+
+  if (filePath.endsWith(".json")) {
+    return `${filePath.slice(0, -".json".length)}.meta.json`;
+  }
+
+  return `${filePath}.meta.json`;
+}
+
+function serializeEntry(entry: RequestLogEntry): string {
+  return `${JSON.stringify(entry)}\n`;
+}
+
 function hydrateEntry(raw: unknown): RequestLogEntry | null {
   if (!isRecord(raw)) {
     return null;
@@ -831,10 +857,13 @@ export class RequestLogStore {
   private readonly dailyAccountBuckets = new Map<string, DailyAccountBucket>();
   private readonly perfIndex = new Map<string, PerfIndexEntry>();
   private readonly accountAccumulators = new Map<string, MutableAccountAccumulator>();
+  private pendingJournalEntries: RequestLogEntry[] = [];
   private warmupPromise: Promise<void> | null = null;
   private persistChain: Promise<void> = Promise.resolve();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private persistPending = false;
+  private journalLineCount = 0;
+  private needsCompaction = false;
   private closed = false;
 
   public constructor(
@@ -895,6 +924,7 @@ export class RequestLogStore {
     const overflow = this.entries.length - this.maxEntries;
     if (overflow > 0) {
       this.entries.splice(0, overflow);
+      this.needsCompaction = true;
     }
 
     this.applyEntryToHourlyBuckets(entry);
@@ -903,6 +933,7 @@ export class RequestLogStore {
     this.applyEntryToDailyAccountBuckets(entry);
     this.applyEntryToAccountAccumulator(entry);
     this.updatePerfIndexFromEntry(entry);
+    this.pendingJournalEntries.push(entry);
     this.schedulePersist();
 
     return entry;
@@ -974,6 +1005,7 @@ export class RequestLogStore {
     this.applyEntryDeltaToDailyAccountBuckets(next, current);
     this.applyEntryDeltaToAccountAccumulator(next, current);
     this.updatePerfIndexFromEntry(next);
+    this.pendingJournalEntries.push(next);
     this.schedulePersist();
     return next;
   }
@@ -1089,9 +1121,7 @@ export class RequestLogStore {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
-    if (this.persistPending) {
-      await this.queuePersist(true);
-    }
+    await this.queuePersist(true);
     await this.persistChain.catch(() => undefined);
   }
 
@@ -1747,6 +1777,9 @@ export class RequestLogStore {
     this.dailyAccountBuckets.clear();
     this.perfIndex.clear();
     this.accountAccumulators.clear();
+    this.pendingJournalEntries = [];
+    this.journalLineCount = 0;
+    this.needsCompaction = false;
   }
 
   private snapshotDb(): RequestLogDb {
@@ -1760,111 +1793,8 @@ export class RequestLogStore {
     };
   }
 
-  private rebuildHourlyBucketsFromEntries(): void {
-    this.hourlyBuckets.clear();
-    for (const entry of this.entries) {
-      this.applyEntryToHourlyBuckets(entry);
-    }
-  }
-
-  private rebuildDailyBucketsFromEntries(): void {
-    this.dailyBuckets.clear();
-    for (const entry of this.entries) {
-      this.applyEntryToDailyBuckets(entry);
-    }
-  }
-
-  private rebuildDailyModelBucketsFromEntries(): void {
-    this.dailyModelBuckets.clear();
-    for (const entry of this.entries) {
-      this.applyEntryToDailyModelBuckets(entry);
-    }
-  }
-
-  private rebuildDailyAccountBucketsFromEntries(): void {
-    this.dailyAccountBuckets.clear();
-    for (const entry of this.entries) {
-      this.applyEntryToDailyAccountBuckets(entry);
-    }
-  }
-
-  private rebuildDailyBucketsFromHourlyBuckets(): void {
-    this.dailyBuckets.clear();
-    for (const bucket of this.hourlyBuckets.values()) {
-      const dayStart = dayBucketStartMs(bucket.startMs);
-      const daily = this.getOrCreateDailyBucket(dayStart);
-      daily.requestCount += bucket.requestCount;
-      daily.errorCount += bucket.errorCount;
-      daily.totalTokens += bucket.totalTokens;
-      daily.promptTokens += bucket.promptTokens;
-      daily.completionTokens += bucket.completionTokens;
-      daily.cachedPromptTokens += bucket.cachedPromptTokens;
-      daily.imageCount += bucket.imageCount;
-      daily.imageCostUsd += bucket.imageCostUsd;
-      daily.cacheHitCount += bucket.cacheHitCount;
-      daily.cacheKeyUseCount += bucket.cacheKeyUseCount;
-      daily.fastModeRequestCount += bucket.fastModeRequestCount;
-      daily.priorityRequestCount += bucket.priorityRequestCount;
-      daily.standardRequestCount += bucket.standardRequestCount;
-      daily.costUsd += bucket.costUsd;
-      daily.energyJoules += bucket.energyJoules;
-      daily.waterEvaporatedMl += bucket.waterEvaporatedMl;
-    }
-
-    this.pruneDailyBuckets();
-  }
-
-  private async quarantineCorruptFile(error: SyntaxError): Promise<void> {
-    const corruptFilePath = buildCorruptFilePath(this.filePath);
-
-    try {
-      await rename(this.filePath, corruptFilePath);
-      console.warn(
-        `[request-log-store] Failed to parse request logs from ${this.filePath}; moved corrupt file to ${corruptFilePath}: ${error.message}`,
-      );
-    } catch (renameError) {
-      const code = (renameError as NodeJS.ErrnoException | undefined)?.code;
-      if (code !== "ENOENT") {
-        throw renameError;
-      }
-
-      console.warn(
-        `[request-log-store] Failed to parse request logs from ${this.filePath}; file disappeared before quarantine: ${error.message}`,
-      );
-    }
-
+  private applyLoadedDb(db: RequestLogDb): void {
     this.resetState();
-    await this.persistNow();
-  }
-
-  private async loadFromDisk(): Promise<void> {
-    let contents: string;
-
-    try {
-      contents = await readFile(this.filePath, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
-        throw error;
-      }
-
-      await mkdir(dirname(this.filePath), { recursive: true });
-      await this.persistNow();
-      return;
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(contents);
-    } catch (error) {
-      if (!(error instanceof SyntaxError)) {
-        throw error;
-      }
-
-      await this.quarantineCorruptFile(error);
-      return;
-    }
-
-    const db = hydrateDb(parsed, this.maxEntries);
     this.entries.splice(0, this.entries.length, ...db.entries);
     this.repairDerivedEstimates();
 
@@ -1918,12 +1848,8 @@ export class RequestLogStore {
       });
     }
 
-    if ((db.dailyBuckets?.length ?? 0) === 0) {
-      if (this.hourlyBuckets.size > 0) {
-        this.rebuildDailyBucketsFromHourlyBuckets();
-      } else if (this.entries.length > 0) {
-        this.rebuildDailyBucketsFromEntries();
-      }
+    if ((db.dailyBuckets?.length ?? 0) === 0 && this.entries.length > 0) {
+      this.rebuildDailyBucketsFromEntries();
     }
 
     this.dailyModelBuckets.clear();
@@ -1982,6 +1908,351 @@ export class RequestLogStore {
     }
   }
 
+  private rebuildHourlyBucketsFromEntries(): void {
+    this.hourlyBuckets.clear();
+    for (const entry of this.entries) {
+      this.applyEntryToHourlyBuckets(entry);
+    }
+  }
+
+  private rebuildDailyBucketsFromEntries(): void {
+    this.dailyBuckets.clear();
+    for (const entry of this.entries) {
+      this.applyEntryToDailyBuckets(entry);
+    }
+  }
+
+  private rebuildDailyModelBucketsFromEntries(): void {
+    this.dailyModelBuckets.clear();
+    for (const entry of this.entries) {
+      this.applyEntryToDailyModelBuckets(entry);
+    }
+  }
+
+  private rebuildDailyAccountBucketsFromEntries(): void {
+    this.dailyAccountBuckets.clear();
+    for (const entry of this.entries) {
+      this.applyEntryToDailyAccountBuckets(entry);
+    }
+  }
+
+  private async quarantineCorruptFile(sourcePath: string, error: SyntaxError): Promise<void> {
+    const corruptFilePath = buildCorruptFilePath(sourcePath);
+
+    try {
+      await rename(sourcePath, corruptFilePath);
+      console.warn(
+        `[request-log-store] Failed to parse request logs from ${sourcePath}; moved corrupt file to ${corruptFilePath}: ${error.message}`,
+      );
+    } catch (renameError) {
+      const code = (renameError as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT") {
+        throw renameError;
+      }
+
+      console.warn(
+        `[request-log-store] Failed to parse request logs from ${sourcePath}; file disappeared before quarantine: ${error.message}`,
+      );
+    }
+
+    this.resetState();
+    await this.persistNow(true);
+  }
+
+  private async quarantineCorruptLines(sourcePath: string, lines: readonly string[]): Promise<void> {
+    if (lines.length === 0) {
+      return;
+    }
+
+    const corruptFilePath = buildCorruptFilePath(sourcePath);
+    await writeFile(corruptFilePath, `${lines.join("\n")}\n`, "utf8");
+    console.warn(
+      `[request-log-store] Ignored ${lines.length} malformed JSONL request log lines from ${sourcePath}; wrote them to ${corruptFilePath}`,
+    );
+  }
+
+  private async quarantineCorruptMetadataFile(error: SyntaxError): Promise<void> {
+    const metadataFilePath = buildMetadataFilePath(this.filePath);
+    const corruptFilePath = buildCorruptFilePath(metadataFilePath);
+
+    try {
+      await rename(metadataFilePath, corruptFilePath);
+      console.warn(
+        `[request-log-store] Failed to parse request log metadata from ${metadataFilePath}; moved corrupt file to ${corruptFilePath}: ${error.message}`,
+      );
+    } catch (renameError) {
+      const code = (renameError as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT") {
+        throw renameError;
+      }
+
+      console.warn(
+        `[request-log-store] Failed to parse request log metadata from ${metadataFilePath}; file disappeared before quarantine: ${error.message}`,
+      );
+    }
+  }
+
+  private async archiveMigratedLegacyFile(sourcePath: string): Promise<void> {
+    if (sourcePath === this.filePath) {
+      return;
+    }
+
+    const migratedFilePath = buildMigratedFilePath(sourcePath);
+    try {
+      await rename(sourcePath, migratedFilePath);
+      console.info(
+        `[request-log-store] Migrated legacy request logs from ${sourcePath} to ${this.filePath}; archived original file at ${migratedFilePath}`,
+      );
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ENOENT") {
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  private async resolveSourcePath(): Promise<string | null> {
+    try {
+      await access(this.filePath);
+      return this.filePath;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    const legacyFilePath = buildLegacyFilePath(this.filePath);
+    if (!legacyFilePath) {
+      return null;
+    }
+
+    try {
+      await access(legacyFilePath);
+      return legacyFilePath;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    return null;
+  }
+
+  private async loadMetadataFromDisk(): Promise<Omit<RequestLogDb, "entries">> {
+    const metadataFilePath = buildMetadataFilePath(this.filePath);
+    let contents: string;
+
+    try {
+      contents = await readFile(metadataFilePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+        return {
+          hourlyBuckets: [],
+          dailyBuckets: [],
+          dailyModelBuckets: [],
+          dailyAccountBuckets: [],
+          accountAccumulators: [],
+        };
+      }
+
+      throw error;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(contents);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) {
+        throw error;
+      }
+
+      await this.quarantineCorruptMetadataFile(error);
+      return {
+        hourlyBuckets: [],
+        dailyBuckets: [],
+        dailyModelBuckets: [],
+        dailyAccountBuckets: [],
+        accountAccumulators: [],
+      };
+    }
+
+    const db = hydrateDb({ ...(isRecord(parsed) ? parsed : {}), entries: [] }, this.maxEntries);
+    return {
+      hourlyBuckets: db.hourlyBuckets,
+      dailyBuckets: db.dailyBuckets,
+      dailyModelBuckets: db.dailyModelBuckets,
+      dailyAccountBuckets: db.dailyAccountBuckets,
+      accountAccumulators: db.accountAccumulators,
+    };
+  }
+
+  private snapshotMetadata(): Omit<RequestLogDb, "entries"> {
+    const snapshot = this.snapshotDb();
+    return {
+      hourlyBuckets: snapshot.hourlyBuckets,
+      dailyBuckets: snapshot.dailyBuckets,
+      dailyModelBuckets: snapshot.dailyModelBuckets,
+      dailyAccountBuckets: snapshot.dailyAccountBuckets,
+      accountAccumulators: snapshot.accountAccumulators,
+    };
+  }
+
+  private async persistMetadataNow(): Promise<void> {
+    const metadataFilePath = buildMetadataFilePath(this.filePath);
+    const tempFilePath = buildTempFilePath(metadataFilePath);
+
+    try {
+      await writeFile(tempFilePath, JSON.stringify(this.snapshotMetadata(), null, 2), "utf8");
+      await rename(tempFilePath, metadataFilePath);
+    } catch (error) {
+      await rm(tempFilePath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async loadEntriesFromJsonl(sourcePath: string): Promise<{
+    readonly entries: readonly RequestLogEntry[];
+    readonly malformedLines: readonly string[];
+    readonly lineCount: number;
+  }> {
+    const entriesById = new Map<string, RequestLogEntry>();
+    const malformedLines: string[] = [];
+    let lineCount = 0;
+
+    const input = createReadStream(sourcePath, { encoding: "utf8" });
+    const reader = createInterface({ input, crlfDelay: Infinity });
+
+    try {
+      for await (const rawLine of reader) {
+        const line = rawLine.trim();
+        if (line.length === 0) {
+          continue;
+        }
+
+        lineCount += 1;
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          malformedLines.push(rawLine);
+          continue;
+        }
+
+        const entry = hydrateEntry(parsed);
+        if (!entry) {
+          malformedLines.push(rawLine);
+          continue;
+        }
+
+        const hadEntry = entriesById.has(entry.id);
+        entriesById.set(entry.id, entry);
+        if (!hadEntry && entriesById.size > this.maxEntries) {
+          const oldestEntryId = entriesById.keys().next().value;
+          if (typeof oldestEntryId === "string") {
+            entriesById.delete(oldestEntryId);
+          }
+        }
+      }
+    } finally {
+      reader.close();
+      input.close();
+    }
+
+    return {
+      entries: [...entriesById.values()],
+      malformedLines,
+      lineCount,
+    };
+  }
+
+  private async loadLegacyDb(sourcePath: string): Promise<boolean> {
+    const contents = await readFile(sourcePath, "utf8");
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(contents);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) {
+        throw error;
+      }
+
+      await this.quarantineCorruptFile(sourcePath, error);
+      return false;
+    }
+
+    const isLegacyPayload = Array.isArray(parsed) || (isRecord(parsed) && Array.isArray(parsed.entries));
+    if (!isLegacyPayload) {
+      await this.quarantineCorruptFile(sourcePath, new SyntaxError("Request log payload is not a valid legacy JSON request log database"));
+      return false;
+    }
+
+    const db = hydrateDb(parsed, this.maxEntries);
+    this.applyLoadedDb(db);
+    this.journalLineCount = this.entries.length;
+    return true;
+  }
+
+  private shouldCompactJournal(forceCompact: boolean): boolean {
+    if (forceCompact) {
+      return true;
+    }
+
+    const projectedLineCount = this.journalLineCount + this.pendingJournalEntries.length;
+    const staleLineCount = Math.max(0, projectedLineCount - this.entries.length);
+    return this.needsCompaction
+      || projectedLineCount > Math.max(this.maxEntries * 2, this.entries.length + 2000)
+      || staleLineCount > Math.max(1000, Math.floor(this.maxEntries / 2));
+  }
+
+  private async loadFromDisk(): Promise<void> {
+    const sourcePath = await this.resolveSourcePath();
+    if (!sourcePath) {
+      await mkdir(dirname(this.filePath), { recursive: true });
+      await writeFile(this.filePath, "", "utf8");
+      await this.persistMetadataNow();
+      return;
+    }
+
+    const jsonlLoad = await this.loadEntriesFromJsonl(sourcePath);
+    const looksLikeLegacyJson = jsonlLoad.entries.length === 0 && jsonlLoad.malformedLines.length > 0;
+
+    if (looksLikeLegacyJson) {
+      const loadedLegacyDb = await this.loadLegacyDb(sourcePath);
+      if (!loadedLegacyDb) {
+        return;
+      }
+
+      await this.persistNow(true);
+      await this.archiveMigratedLegacyFile(sourcePath);
+      return;
+    }
+
+    const metadata = await this.loadMetadataFromDisk();
+    const db = hydrateDb({
+      entries: jsonlLoad.entries,
+      hourlyBuckets: metadata.hourlyBuckets,
+      dailyBuckets: metadata.dailyBuckets,
+      dailyModelBuckets: metadata.dailyModelBuckets,
+      dailyAccountBuckets: metadata.dailyAccountBuckets,
+      accountAccumulators: metadata.accountAccumulators,
+    }, this.maxEntries);
+    this.applyLoadedDb(db);
+    this.journalLineCount = jsonlLoad.lineCount;
+
+    if (jsonlLoad.malformedLines.length > 0) {
+      await this.quarantineCorruptLines(sourcePath, jsonlLoad.malformedLines);
+      await this.persistNow(true);
+      return;
+    }
+
+    if (sourcePath !== this.filePath) {
+      await this.persistNow(true);
+    }
+  }
+
   private repairDerivedEstimates(): void {
     for (let index = 0; index < this.entries.length; index += 1) {
       const entry = this.entries[index];
@@ -2000,7 +2271,7 @@ export class RequestLogStore {
         continue;
       }
 
-      const repaired = estimateRequestCost(entry.model, promptTokens, completionTokens);
+      const repaired = estimateRequestCost(entry.providerId, entry.model, promptTokens, completionTokens);
       this.entries[index] = {
         ...entry,
         costUsd: repaired.costUsd,
@@ -2041,20 +2312,47 @@ export class RequestLogStore {
         }
 
         this.persistPending = false;
-        await this.persistNow();
+        await this.persistNow(force);
       });
     await this.persistChain;
   }
 
-  private async persistNow(): Promise<void> {
+  private async persistNow(forceCompact = false): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    const tempFilePath = buildTempFilePath(this.filePath);
+    if (this.shouldCompactJournal(forceCompact)) {
+      const tempFilePath = buildTempFilePath(this.filePath);
+      const snapshot = this.snapshot();
+      const pendingBeforeRewrite = this.pendingJournalEntries;
+      this.pendingJournalEntries = [];
+
+      try {
+        await writeFile(tempFilePath, snapshot.map((entry) => serializeEntry(entry)).join(""), "utf8");
+        await rename(tempFilePath, this.filePath);
+        this.journalLineCount = snapshot.length;
+        this.needsCompaction = false;
+        await this.persistMetadataNow();
+        return;
+      } catch (error) {
+        this.pendingJournalEntries = [...pendingBeforeRewrite, ...this.pendingJournalEntries];
+        await rm(tempFilePath, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    }
+
+    if (this.pendingJournalEntries.length === 0) {
+      await this.persistMetadataNow();
+      return;
+    }
+
+    const pendingEntries = this.pendingJournalEntries;
+    this.pendingJournalEntries = [];
 
     try {
-      await writeFile(tempFilePath, JSON.stringify(this.snapshotDb(), null, 2), "utf8");
-      await rename(tempFilePath, this.filePath);
+      await appendFile(this.filePath, pendingEntries.map((entry) => serializeEntry(entry)).join(""), "utf8");
+      this.journalLineCount += pendingEntries.length;
+      await this.persistMetadataNow();
     } catch (error) {
-      await rm(tempFilePath, { force: true }).catch(() => undefined);
+      this.pendingJournalEntries = [...pendingEntries, ...this.pendingJournalEntries];
       throw error;
     }
   }
