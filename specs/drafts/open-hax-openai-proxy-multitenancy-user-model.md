@@ -431,6 +431,7 @@ Change:
   - request logs now persist `{tenant_id, issuer, key_id}`
   - account-usage accumulators and daily account snapshots are keyed by that attribution tuple
   - `/api/ui/request-logs` now enforces tenant visibility and supports tenant/key filtering
+  - tenant-scoped dashboard overview and provider-model analytics now derive rollups from request-log attribution filters
   - quota enforcement is still pending
 
 ### Phase 3 — Tenant-scoped provider credentials (optional)
