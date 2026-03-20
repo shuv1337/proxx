@@ -3854,6 +3854,187 @@ test("request-level service tier overrides global fast mode", async () => {
   );
 });
 
+test("tenant requests per minute quota blocks excess requests", async () => {
+  let upstreamCallCount = 0;
+
+  await withProxyApp(
+    {
+      keys: ["key-a"],
+      proxyAuthToken: "tenant-admin-token",
+      upstreamHandler: async (_request, _body) => {
+        upstreamCallCount += 1;
+
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            id: `resp_quota_${upstreamCallCount}`,
+            object: "response",
+            created_at: 1772516800,
+            model: "gpt-5.3-codex",
+            output: [],
+          }),
+        };
+      },
+    },
+    async ({ app }) => {
+      const settingsResponse = await app.inject({
+        method: "POST",
+        url: "/api/ui/settings",
+        headers: {
+          authorization: "Bearer tenant-admin-token",
+          "content-type": "application/json",
+        },
+        payload: {
+          requestsPerMinute: 1,
+        },
+      });
+
+      assert.equal(settingsResponse.statusCode, 200);
+
+      const firstResponse = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: "Bearer tenant-admin-token",
+          "content-type": "application/json",
+        },
+        payload: {
+          model: "gpt-5.3-codex",
+          messages: [{ role: "user", content: "hello once" }],
+          stream: false,
+        },
+      });
+
+      assert.equal(firstResponse.statusCode, 200);
+
+      const secondResponse = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: "Bearer tenant-admin-token",
+          "content-type": "application/json",
+        },
+        payload: {
+          model: "gpt-5.3-codex",
+          messages: [{ role: "user", content: "hello twice" }],
+          stream: false,
+        },
+      });
+
+      assert.equal(secondResponse.statusCode, 429);
+      assert.equal(secondResponse.headers["x-open-hax-error-code"], "tenant_quota_exceeded");
+      assert.equal(secondResponse.headers["retry-after"], "60");
+      assert.equal(upstreamCallCount, 1);
+    },
+  );
+});
+
+test("tenant allowedProviderIds blocks disallowed upstream providers", async () => {
+  let upstreamCallCount = 0;
+
+  await withProxyApp(
+    {
+      keys: ["key-a"],
+      proxyAuthToken: "tenant-admin-token",
+      upstreamHandler: async (_request, _body) => {
+        upstreamCallCount += 1;
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            id: `resp_provider_policy_${upstreamCallCount}`,
+            object: "response",
+            created_at: 1772516800,
+            model: "gpt-5.3-codex",
+            output: [],
+          }),
+        };
+      },
+    },
+    async ({ app }) => {
+      const settingsResponse = await app.inject({
+        method: "POST",
+        url: "/api/ui/settings",
+        headers: {
+          authorization: "Bearer tenant-admin-token",
+          "content-type": "application/json",
+        },
+        payload: {
+          allowedProviderIds: ["openai"],
+        },
+      });
+
+      assert.equal(settingsResponse.statusCode, 200);
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: "Bearer tenant-admin-token",
+          "content-type": "application/json",
+        },
+        payload: {
+          model: "factory/gpt-5.3-codex",
+          messages: [{ role: "user", content: "blocked" }],
+          stream: false,
+        },
+      });
+
+      assert.equal(response.statusCode, 403);
+      assert.equal(response.headers["x-open-hax-error-code"], "provider_not_allowed");
+      assert.equal(upstreamCallCount, 0);
+    },
+  );
+});
+
+test("tenant disabledProviderIds blocks local ollama usage", async () => {
+  await withProxyApp(
+    {
+      keys: ["key-a"],
+      proxyAuthToken: "tenant-admin-token",
+      upstreamHandler: async () => {
+        throw new Error("upstream should not be called");
+      },
+    },
+    async ({ app }) => {
+      const settingsResponse = await app.inject({
+        method: "POST",
+        url: "/api/ui/settings",
+        headers: {
+          authorization: "Bearer tenant-admin-token",
+          "content-type": "application/json",
+        },
+        payload: {
+          disabledProviderIds: ["ollama"],
+        },
+      });
+
+      assert.equal(settingsResponse.statusCode, 200);
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/embeddings",
+        headers: {
+          authorization: "Bearer tenant-admin-token",
+          "content-type": "application/json",
+        },
+        payload: {
+          model: "ollama/llama3.2",
+          input: "blocked",
+        },
+      });
+
+      assert.equal(response.statusCode, 403);
+      assert.equal(response.headers["x-open-hax-error-code"], "provider_not_allowed");
+    },
+  );
+});
+
 test("weekly dashboard uses persisted daily model/account aggregates and reports incomplete coverage", async () => {
   const requestLogsPayload = {
     entries: [

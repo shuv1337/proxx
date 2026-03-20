@@ -432,7 +432,9 @@ Change:
   - account-usage accumulators and daily account snapshots are keyed by that attribution tuple
   - `/api/ui/request-logs` now enforces tenant visibility and supports tenant/key filtering
   - tenant-scoped dashboard overview and provider-model analytics now derive rollups from request-log attribution filters
-  - quota enforcement is still pending
+  - per-tenant `requestsPerMinute` enforcement now blocks excess `/v1/*` requests using tenant-scoped proxy settings
+  - tenant-scoped provider allow/deny settings now gate upstream provider selection, including factory-prefixed and local Ollama paths
+  - richer quota dimensions (tokens/day, cost ceilings, concurrency) are still pending
 
 ### Phase 3 — Tenant-scoped provider credentials (optional)
 - Either:

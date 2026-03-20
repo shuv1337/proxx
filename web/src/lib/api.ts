@@ -120,6 +120,9 @@ export interface UsageTrendPoint {
 
 export interface ProxyUiSettings {
   readonly fastMode: boolean;
+  readonly requestsPerMinute?: number | null;
+  readonly allowedProviderIds?: readonly string[] | null;
+  readonly disabledProviderIds?: readonly string[] | null;
   readonly tenantId?: string;
 }
 

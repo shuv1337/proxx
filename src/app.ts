@@ -24,6 +24,7 @@ import {
   filterImagesApiRoutes,
   minMsUntilAnyProviderKeyReady,
   resolveProviderRoutesForModel,
+  resolveRequestRoutingState,
   type ProviderRoute,
   type ResolvedModelCatalog,
 } from "./lib/provider-routing.js";
@@ -464,6 +465,36 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   const proxySettingsStore = new ProxySettingsStore(config.settingsFilePath, sql);
   await proxySettingsStore.warmup();
 
+  const tenantProviderAllowed = (settings: { readonly allowedProviderIds: readonly string[] | null; readonly disabledProviderIds: readonly string[] | null }, providerId: string): boolean => {
+    const normalizedProviderId = providerId.trim().toLowerCase();
+    if (settings.allowedProviderIds && !settings.allowedProviderIds.includes(normalizedProviderId)) {
+      return false;
+    }
+
+    if (settings.disabledProviderIds?.includes(normalizedProviderId)) {
+      return false;
+    }
+
+    return true;
+  };
+
+  const filterTenantProviderRoutes = (routes: readonly ProviderRoute[], settings: { readonly allowedProviderIds: readonly string[] | null; readonly disabledProviderIds: readonly string[] | null }): ProviderRoute[] => {
+    return routes.filter((route) => tenantProviderAllowed(settings, route.providerId));
+  };
+
+  const resolveExplicitTenantProviderId = (model: string, settings: { readonly allowedProviderIds: readonly string[] | null; readonly disabledProviderIds: readonly string[] | null }): string | undefined => {
+    const routingState = resolveRequestRoutingState(config, model);
+    const providerId = routingState.factoryPrefixed
+      ? "factory"
+      : routingState.openAiPrefixed
+        ? config.openaiProviderId
+        : routingState.explicitOllama || routingState.localOllama
+          ? "ollama"
+          : undefined;
+
+    return providerId && !tenantProviderAllowed(settings, providerId) ? providerId : undefined;
+  };
+
   let policyEngine: PolicyEngine;
   try {
     policyEngine = await initializePolicyEngine(config.policyConfigPath);
@@ -807,6 +838,44 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     }
 
     (request as any).openHaxAuth = resolvedAuth;
+
+    const enforceTenantQuotaRoute = request.method === "POST" && (
+      rawPath === "/v1/chat/completions"
+      || rawPath === "/v1/responses"
+      || rawPath === "/v1/images/generations"
+      || rawPath === "/v1/embeddings"
+    );
+
+    if (enforceTenantQuotaRoute && resolvedAuth.kind !== "unauthenticated") {
+      const tenantId = resolvedAuth.tenantId ?? DEFAULT_TENANT_ID;
+      const tenantSettings = await proxySettingsStore.getForTenant(tenantId);
+      if (typeof tenantSettings.requestsPerMinute === "number" && tenantSettings.requestsPerMinute > 0) {
+        const now = Date.now();
+        const recentRequestCount = requestLogStore.countRequestsSince(now - 60_000, { tenantId });
+        if (recentRequestCount >= tenantSettings.requestsPerMinute) {
+          reply.header("retry-after", 60);
+          sendOpenAiError(
+            reply,
+            429,
+            `Tenant request quota exceeded for ${tenantId}. Allowed requests per minute: ${tenantSettings.requestsPerMinute}.`,
+            "rate_limit_error",
+            "tenant_quota_exceeded",
+          );
+          return;
+        }
+      }
+    }
+
+    if (
+      resolvedAuth.kind === "tenant_api_key"
+      && sqlCredentialStore
+      && request.method === "POST"
+      && rawPath.startsWith("/v1/")
+      && resolvedAuth.tenantId
+      && resolvedAuth.keyId
+    ) {
+      await sqlCredentialStore.touchTenantApiKeyLastUsed(resolvedAuth.tenantId, resolvedAuth.keyId);
+    }
   });
 
   // Attach a telemetry span to each request
@@ -1109,6 +1178,12 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     }
 
     const requestedModelInput = typeof requestBody.model === "string" ? requestBody.model : "";
+    const explicitlyBlockedProviderId = resolveExplicitTenantProviderId(requestedModelInput, proxySettings);
+    if (explicitlyBlockedProviderId) {
+      sendOpenAiError(reply, 403, `Provider is disabled for this tenant: ${explicitlyBlockedProviderId}`, "invalid_request_error", "provider_not_allowed");
+      return;
+    }
+
     let routingModelInput = requestedModelInput;
     let resolvedModelCatalog: ResolvedModelCatalog | null = null;
     try {
@@ -1155,11 +1230,17 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         providerRoutes = resolveProviderRoutesForModel(providerRoutes, context.routedModel, resolvedModelCatalog);
       }
     }
+    providerRoutes = filterTenantProviderRoutes(providerRoutes, proxySettings);
     providerRoutes = orderProviderRoutesByPolicy(policyEngine, providerRoutes, context.requestedModelInput, context.routedModel, {
       openAiPrefixed: context.openAiPrefixed,
       localOllama: context.localOllama,
       explicitOllama: context.explicitOllama,
     });
+
+    if (providerRoutes.length === 0) {
+      sendOpenAiError(reply, 403, "No upstream providers are allowed for this tenant and request.", "invalid_request_error", "provider_not_allowed");
+      return;
+    }
 
     try {
       const catalogBundle = await providerCatalogStore.getCatalog();
@@ -1203,7 +1284,17 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     }
 
     if (strategy.isLocal) {
+      if (!tenantProviderAllowed(proxySettings, "ollama")) {
+        sendOpenAiError(reply, 403, "Provider is disabled for this tenant: ollama", "invalid_request_error", "provider_not_allowed");
+        return;
+      }
+
       await executeLocalStrategy(strategy, reply, requestLogStore, context, payload);
+      return;
+    }
+
+    if (providerRoutes.length === 0) {
+      sendOpenAiError(reply, 403, "No upstream providers are allowed for this tenant and request.", "invalid_request_error", "provider_not_allowed");
       return;
     }
 
@@ -1323,6 +1414,9 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
+    const tenantSettings = await proxySettingsStore.getForTenant(
+      ((request as { readonly openHaxAuth?: { readonly tenantId?: string } }).openHaxAuth?.tenantId) ?? DEFAULT_TENANT_ID,
+    );
     const requestBody = request.body;
     const promptCacheKey = extractPromptCacheKey(requestBody);
 
@@ -1335,6 +1429,12 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     const requestedModelInput = typeof requestBody.model === "string" ? requestBody.model : "";
     if (requestedModelInput.length === 0) {
       sendOpenAiError(reply, 400, "Missing required field: model", "invalid_request_error", "missing_model");
+      return;
+    }
+
+    const explicitlyBlockedProviderId = resolveExplicitTenantProviderId(requestedModelInput, tenantSettings);
+    if (explicitlyBlockedProviderId) {
+      sendOpenAiError(reply, 403, `Provider is disabled for this tenant: ${explicitlyBlockedProviderId}`, "invalid_request_error", "provider_not_allowed");
       return;
     }
 
@@ -1377,11 +1477,17 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     }
 
     providerRoutes = filterResponsesApiRoutes(providerRoutes, config.openaiProviderId);
+    providerRoutes = filterTenantProviderRoutes(providerRoutes, tenantSettings);
     providerRoutes = orderProviderRoutesByPolicy(policyEngine, providerRoutes, context.requestedModelInput, context.routedModel, {
       openAiPrefixed: context.openAiPrefixed,
       localOllama: false,
       explicitOllama: false,
     });
+
+    if (providerRoutes.length === 0) {
+      sendOpenAiError(reply, 403, "No upstream providers are allowed for this tenant and request.", "invalid_request_error", "provider_not_allowed");
+      return;
+    }
 
     try {
       const catalogBundle = await providerCatalogStore.getCatalog();
@@ -1404,6 +1510,11 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       payload = strategy.buildPayload(context);
     } catch (error) {
       sendOpenAiError(reply, 400, toErrorMessage(error), "invalid_request_error", "invalid_provider_options");
+      return;
+    }
+
+    if (providerRoutes.length === 0) {
+      sendOpenAiError(reply, 403, "No upstream providers are allowed for this tenant and request.", "invalid_request_error", "provider_not_allowed");
       return;
     }
 
@@ -1522,10 +1633,19 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
+    const tenantSettings = await proxySettingsStore.getForTenant(
+      ((request as { readonly openHaxAuth?: { readonly tenantId?: string } }).openHaxAuth?.tenantId) ?? DEFAULT_TENANT_ID,
+    );
     const requestBody = request.body;
     const model = typeof requestBody.model === "string" ? requestBody.model : "";
     if (model.length === 0) {
       sendOpenAiError(reply, 400, "Missing required field: model", "invalid_request_error", "missing_model");
+      return;
+    }
+
+    const explicitlyBlockedProviderId = resolveExplicitTenantProviderId(model, tenantSettings);
+    if (explicitlyBlockedProviderId) {
+      sendOpenAiError(reply, 403, `Provider is disabled for this tenant: ${explicitlyBlockedProviderId}`, "invalid_request_error", "provider_not_allowed");
       return;
     }
 
@@ -1550,11 +1670,17 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       buildProviderRoutes(config, context.openAiPrefixed, true),
       config.openaiProviderId,
     );
+    providerRoutes = filterTenantProviderRoutes(providerRoutes, tenantSettings);
     providerRoutes = orderProviderRoutesByPolicy(policyEngine, providerRoutes, context.requestedModelInput, context.routedModel, {
       openAiPrefixed: context.openAiPrefixed,
       localOllama: false,
       explicitOllama: false,
     });
+
+    if (providerRoutes.length === 0) {
+      sendOpenAiError(reply, 403, "No upstream providers are allowed for this tenant and request.", "invalid_request_error", "provider_not_allowed");
+      return;
+    }
 
     for (const providerId of new Set(providerRoutes.map((route) => route.providerId))) {
       await ensureFreshAccounts(providerId);
@@ -1674,6 +1800,14 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   app.post<{ Body: Record<string, unknown> }>("/v1/embeddings", async (request, reply) => {
     if (!isRecord(request.body)) {
       sendOpenAiError(reply, 400, "Request body must be a JSON object", "invalid_request_error", "invalid_body");
+      return;
+    }
+
+    const tenantSettings = await proxySettingsStore.getForTenant(
+      ((request as { readonly openHaxAuth?: { readonly tenantId?: string } }).openHaxAuth?.tenantId) ?? DEFAULT_TENANT_ID,
+    );
+    if (!tenantProviderAllowed(tenantSettings, "ollama")) {
+      sendOpenAiError(reply, 403, "Provider is disabled for this tenant: ollama", "invalid_request_error", "provider_not_allowed");
       return;
     }
 

@@ -1159,6 +1159,30 @@ export class RequestLogStore {
     await this.persistChain.catch(() => undefined);
   }
 
+  private matchesFilters(entry: RequestLogEntry, filters: RequestLogFilters = {}): boolean {
+    if (filters.providerId && entry.providerId !== filters.providerId) {
+      return false;
+    }
+
+    if (filters.accountId && entry.accountId !== filters.accountId) {
+      return false;
+    }
+
+    if (filters.tenantId && entry.tenantId !== filters.tenantId) {
+      return false;
+    }
+
+    if (filters.issuer && entry.issuer !== filters.issuer) {
+      return false;
+    }
+
+    if (filters.keyId && entry.keyId !== filters.keyId) {
+      return false;
+    }
+
+    return true;
+  }
+
   public list(filters: RequestLogFilters = {}): RequestLogEntry[] {
     const limit = sanitizeLimit(filters.limit, 200);
 
@@ -1172,31 +1196,19 @@ export class RequestLogStore {
       }
     }
 
-    const filtered = source.filter((entry) => {
-      if (filters.providerId && entry.providerId !== filters.providerId) {
-        return false;
-      }
-
-      if (filters.accountId && entry.accountId !== filters.accountId) {
-        return false;
-      }
-
-      if (filters.tenantId && entry.tenantId !== filters.tenantId) {
-        return false;
-      }
-
-      if (filters.issuer && entry.issuer !== filters.issuer) {
-        return false;
-      }
-
-      if (filters.keyId && entry.keyId !== filters.keyId) {
-        return false;
-      }
-
-      return true;
-    });
+    const filtered = source.filter((entry) => this.matchesFilters(entry, filters));
 
     return filtered.slice(-limit).reverse();
+  }
+
+  public countRequestsSince(sinceMs: number, filters: RequestLogFilters = {}): number {
+    return this.entries.reduce((count, entry) => {
+      if (entry.timestamp < sinceMs) {
+        return count;
+      }
+
+      return this.matchesFilters(entry, filters) ? count + 1 : count;
+    }, 0);
   }
 
   public providerSummary(): Record<string, { readonly count: number; readonly lastTimestamp: number }> {

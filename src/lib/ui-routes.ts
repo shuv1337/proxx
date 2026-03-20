@@ -227,6 +227,57 @@ function parseBoolean(value: unknown): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
+function parseOptionalRequestsPerMinute(value: unknown): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 0 ? Math.floor(value) : null;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized.length === 0 || normalized === "null" || normalized === "none" || normalized === "off") {
+      return null;
+    }
+
+    const parsed = Number.parseInt(normalized, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function parseOptionalProviderIds(value: unknown): readonly string[] | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = [...new Set(
+    value
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0)
+  )];
+
+  return normalized.length > 0 ? normalized : null;
+}
+
 function getResolvedAuth(request: { readonly openHaxAuth?: unknown }): ResolvedRequestAuth | undefined {
   const auth = request.openHaxAuth;
   return typeof auth === "object" && auth !== null ? auth as ResolvedRequestAuth : undefined;
@@ -2062,7 +2113,14 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
     reply.send({ ok: true, tenantId: request.params.tenantId, keyId: request.params.keyId });
   });
 
-  app.post<{ Body: { readonly fastMode?: unknown } }>("/api/ui/settings", async (request, reply) => {
+  app.post<{
+    Body: {
+      readonly fastMode?: unknown;
+      readonly requestsPerMinute?: unknown;
+      readonly allowedProviderIds?: unknown;
+      readonly disabledProviderIds?: unknown;
+    };
+  }>("/api/ui/settings", async (request, reply) => {
     const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
     if (!auth) {
       reply.code(401).send({ error: "unauthorized" });
@@ -2079,12 +2137,33 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
       return;
     }
 
+    const requestsPerMinute = parseOptionalRequestsPerMinute(request.body?.requestsPerMinute);
+    if (request.body?.requestsPerMinute !== undefined && requestsPerMinute === undefined) {
+      reply.code(400).send({ error: "invalid_requests_per_minute" });
+      return;
+    }
+
+    const allowedProviderIds = parseOptionalProviderIds(request.body?.allowedProviderIds);
+    if (request.body?.allowedProviderIds !== undefined && allowedProviderIds === undefined) {
+      reply.code(400).send({ error: "invalid_allowed_provider_ids" });
+      return;
+    }
+
+    const disabledProviderIds = parseOptionalProviderIds(request.body?.disabledProviderIds);
+    if (request.body?.disabledProviderIds !== undefined && disabledProviderIds === undefined) {
+      reply.code(400).send({ error: "invalid_disabled_provider_ids" });
+      return;
+    }
+
     const tenantId = auth.tenantId ?? DEFAULT_TENANT_ID;
     const nextSettings = await deps.proxySettingsStore.setForTenant({
-      fastMode: parseBoolean(request.body?.fastMode),
+      fastMode: request.body?.fastMode === undefined ? undefined : parseBoolean(request.body?.fastMode),
+      requestsPerMinute,
+      allowedProviderIds,
+      disabledProviderIds,
     }, tenantId);
 
-    app.log.info({ fastMode: nextSettings.fastMode, tenantId }, "updated proxy UI settings");
+    app.log.info({ fastMode: nextSettings.fastMode, requestsPerMinute: nextSettings.requestsPerMinute, allowedProviderIds: nextSettings.allowedProviderIds, disabledProviderIds: nextSettings.disabledProviderIds, tenantId }, "updated proxy UI settings");
     reply.send(nextSettings);
   });
 

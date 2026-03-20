@@ -6,6 +6,9 @@ import { DEFAULT_TENANT_ID, normalizeTenantId } from "./tenant-api-key.js";
 
 export interface ProxySettings {
   readonly fastMode: boolean;
+  readonly requestsPerMinute: number | null;
+  readonly allowedProviderIds: readonly string[] | null;
+  readonly disabledProviderIds: readonly string[] | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -14,12 +17,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const CONFIG_KEY = "proxy_settings";
 
-function normalizeSettings(value: unknown): ProxySettings {
-  if (isRecord(value) && typeof value.fastMode === "boolean") {
-    return { fastMode: value.fastMode };
+function normalizeProviderIdList(value: unknown): readonly string[] | null {
+  if (value === null) {
+    return null;
   }
 
-  return { fastMode: false };
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const normalized = [...new Set(
+    value
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0)
+  )];
+
+  return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeSettings(value: unknown): ProxySettings {
+  if (!isRecord(value)) {
+    return { fastMode: false, requestsPerMinute: null, allowedProviderIds: null, disabledProviderIds: null };
+  }
+
+  const rawRequestsPerMinute = typeof value.requestsPerMinute === "number" && Number.isFinite(value.requestsPerMinute)
+    ? Math.max(1, Math.floor(value.requestsPerMinute))
+    : value.requestsPerMinute === null
+      ? null
+      : undefined;
+
+  return {
+    fastMode: typeof value.fastMode === "boolean" ? value.fastMode : false,
+    requestsPerMinute: rawRequestsPerMinute ?? null,
+    allowedProviderIds: normalizeProviderIdList(value.allowedProviderIds),
+    disabledProviderIds: normalizeProviderIdList(value.disabledProviderIds),
+  };
 }
 
 function normalizeSettingsTenantId(tenantId?: string): string {
@@ -36,7 +69,7 @@ function configKeyForTenant(tenantId: string): string {
 
 export class ProxySettingsStore {
   private readonly settingsByTenant = new Map<string, ProxySettings>([
-    [DEFAULT_TENANT_ID, { fastMode: false }],
+    [DEFAULT_TENANT_ID, { fastMode: false, requestsPerMinute: null, allowedProviderIds: null, disabledProviderIds: null }],
   ]);
 
   public constructor(
@@ -59,7 +92,7 @@ export class ProxySettingsStore {
           return normalizeSettings(rows[0]!.value);
         }
       } catch {
-        return { fastMode: false };
+        return { fastMode: false, requestsPerMinute: null, allowedProviderIds: null, disabledProviderIds: null };
       }
 
       try {
@@ -79,7 +112,7 @@ export class ProxySettingsStore {
 
         return settings;
       } catch {
-        return { fastMode: false };
+        return { fastMode: false, requestsPerMinute: null, allowedProviderIds: null, disabledProviderIds: null };
       }
     }
 
@@ -87,12 +120,12 @@ export class ProxySettingsStore {
       const raw = await readFile(this.filePath, "utf8");
       return normalizeSettings(JSON.parse(raw) as unknown);
     } catch {
-      return { fastMode: false };
+      return { fastMode: false, requestsPerMinute: null, allowedProviderIds: null, disabledProviderIds: null };
     }
   }
 
   public get(): ProxySettings {
-    return { ...(this.settingsByTenant.get(DEFAULT_TENANT_ID) ?? { fastMode: false }) };
+    return { ...(this.settingsByTenant.get(DEFAULT_TENANT_ID) ?? { fastMode: false, requestsPerMinute: null, allowedProviderIds: null, disabledProviderIds: null }) };
   }
 
   public async getForTenant(tenantId?: string): Promise<ProxySettings> {
@@ -118,7 +151,7 @@ export class ProxySettingsStore {
       }
     }
 
-    const fallback = this.settingsByTenant.get(DEFAULT_TENANT_ID) ?? { fastMode: false };
+    const fallback = this.settingsByTenant.get(DEFAULT_TENANT_ID) ?? { fastMode: false, requestsPerMinute: null, allowedProviderIds: null, disabledProviderIds: null };
     this.settingsByTenant.set(normalizedTenantId, fallback);
     return { ...fallback };
   }

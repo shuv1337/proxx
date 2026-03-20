@@ -36,6 +36,12 @@ curl_json() {
   curl -sf --max-time 30 -H "Content-Type: application/json" "${AUTH_ARGS[@]}" "$@"
 }
 
+curl_json_token() {
+  local token="$1"
+  shift
+  curl -sf --max-time 30 -H "Content-Type: application/json" -H "Authorization: Bearer ${token}" "$@"
+}
+
 curl_status() {
   curl -so /dev/null -w "%{http_code}" --max-time 30 "${AUTH_ARGS[@]}" "$@"
 }
@@ -117,6 +123,15 @@ responses_passthrough_null_instructions() {
   }"
 }
 
+chat_completion_with_token() {
+  local token="$1" model="$2" content="${3:-Say exactly: OK}"
+  curl_json_token "$token" -X POST "${BASE}/v1/chat/completions" -d "{
+    \"model\": \"$model\",
+    \"messages\": [{\"role\": \"user\", \"content\": \"$content\"}],
+    \"stream\": false
+  }"
+}
+
 # ── connectivity ─────────────────────────────────────────────────────
 
 bold "=== E2E Tests against ${BASE} ==="
@@ -137,6 +152,64 @@ if [[ -n "$RESPONSE" ]]; then
   fi
 else
   fail "GET /v1/models" "no response"
+fi
+
+bold ""
+bold "── 1b. Tenant API key lifecycle ──"
+
+if [[ -n "${DEV_PROXY_AUTH_TOKEN:-}" ]]; then
+  TENANT_KEY_PAYLOAD=$(curl_json -X POST "${BASE}/api/ui/tenants/default/api-keys" -d "{
+    \"label\": \"e2e-live-$(date +%s)\",
+    \"scopes\": [\"proxy:use\"]
+  }" 2>/dev/null) || TENANT_KEY_PAYLOAD=""
+
+  if [[ -n "$TENANT_KEY_PAYLOAD" ]]; then
+    TENANT_KEY_ID=$(echo "$TENANT_KEY_PAYLOAD" | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)
+    TENANT_KEY_TOKEN=$(echo "$TENANT_KEY_PAYLOAD" | python3 -c 'import sys, json; print(json.load(sys.stdin)["token"])' 2>/dev/null || true)
+
+    if [[ -n "$TENANT_KEY_ID" && -n "$TENANT_KEY_TOKEN" ]]; then
+      RESPONSE=$(chat_completion_with_token "$TENANT_KEY_TOKEN" "openai/gpt-5.2-codex" "Reply with exactly one word: OK" 2>/dev/null) || RESPONSE=""
+      if [[ -n "$RESPONSE" ]]; then
+        pass "tenant API key can access /v1/chat/completions"
+      else
+        fail "tenant API key chat completion" "no response"
+      fi
+
+      TENANT_KEYS=$(curl_json "${BASE}/api/ui/tenants/default/api-keys" 2>/dev/null) || TENANT_KEYS=""
+      if [[ -n "$TENANT_KEYS" ]]; then
+        TENANT_KEY_LAST_USED=$(echo "$TENANT_KEYS" | python3 -c '
+import sys, json
+payload = json.load(sys.stdin)
+target = sys.argv[1]
+for item in payload.get("keys", []):
+    if item.get("id") == target:
+        print(item.get("lastUsedAt") or "")
+        break
+' "$TENANT_KEY_ID" 2>/dev/null || true)
+
+        if [[ -n "$TENANT_KEY_LAST_USED" ]]; then
+          pass "tenant API key lastUsedAt updated after live request"
+        else
+          fail "tenant API key lastUsedAt" "not updated"
+        fi
+      else
+        fail "tenant API key list after use" "no response"
+      fi
+
+      DELETE_STATUS=$(curl -so /dev/null -w "%{http_code}" --max-time 30 -H "Authorization: Bearer ${DEV_PROXY_AUTH_TOKEN}" -X DELETE "${BASE}/api/ui/tenants/default/api-keys/${TENANT_KEY_ID}") || DELETE_STATUS="000"
+      if [[ "$DELETE_STATUS" == "200" ]]; then
+        pass "tenant API key cleanup"
+      else
+        fail "tenant API key cleanup" "expected 200, got ${DELETE_STATUS}"
+      fi
+    else
+      fail "tenant API key create" "missing id/token"
+    fi
+  else
+    fail "tenant API key create" "no response"
+  fi
+else
+  skip "tenant API key lifecycle" "DEV_PROXY_AUTH_TOKEN not set"
 fi
 
 # ── 2. OpenAI Responses strategy (gpt-* via chat completions → /codex/responses) ──

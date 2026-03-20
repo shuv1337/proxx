@@ -40,6 +40,7 @@ import {
   SELECT_ALL_ACCOUNTS,
   DELETE_ACCOUNT,
   REVOKE_TENANT_API_KEY,
+  TOUCH_TENANT_API_KEY_LAST_USED,
   SET_COOLDOWN,
   GET_COOLDOWN,
   CLEAR_EXPIRED_COOLDOWNS,
@@ -525,6 +526,11 @@ export class SqlCredentialStore {
       [normalizedTenantId, keyId],
     );
     return result.length > 0;
+  }
+
+  public async touchTenantApiKeyLastUsed(tenantId: string, keyId: string): Promise<void> {
+    const normalizedTenantId = normalizeTenantId(tenantId);
+    await this.sql.unsafe(TOUCH_TENANT_API_KEY_LAST_USED, [normalizedTenantId, keyId]);
   }
 
   public async listProviders(revealSecrets: boolean): Promise<CredentialProviderView[]> {

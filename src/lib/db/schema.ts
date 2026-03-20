@@ -308,6 +308,12 @@ ORDER BY created_at DESC, id ASC;
 export const REVOKE_TENANT_API_KEY = `
 UPDATE tenant_api_keys
 SET revoked_at = NOW()
+WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL
+`;
+
+export const TOUCH_TENANT_API_KEY_LAST_USED = `
+UPDATE tenant_api_keys
+SET last_used_at = NOW()
 WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL;
 `;
 
