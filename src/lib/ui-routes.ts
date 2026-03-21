@@ -10,6 +10,8 @@ import type { KeyPool, KeyPoolAccountStatus } from "./key-pool.js";
 import { OpenAiOAuthManager } from "./openai-oauth.js";
 import { FactoryOAuthManager } from "./factory-oauth.js";
 import { fetchOpenAiQuotaSnapshots } from "./openai-quota.js";
+import { AnthropicOAuthManager } from "./anthropic-oauth.js";
+import { fetchAnthropicQuotaSnapshots } from "./anthropic-quota.js";
 import { RequestLogStore } from "./request-log-store.js";
 import { ChromaSessionIndex } from "./chroma-session-index.js";
 import { SessionStore, type ChatRole } from "./session-store.js";
@@ -31,6 +33,7 @@ interface UiRouteDependencies {
     readonly refreshedCount: number;
     readonly failedCount: number;
   }>;
+  readonly anthropicOauthManager?: AnthropicOAuthManager;
 }
 
 interface UsageAccountSummary {
@@ -1468,6 +1471,21 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
     reply.send(overview);
   });
 
+  app.get<{
+    Querystring: { readonly accountId?: string };
+  }>("/api/ui/credentials/anthropic/quota", async (request, reply) => {
+    const overview = await fetchAnthropicQuotaSnapshots(credentialStore, {
+      providerId: "anthropic",
+      accountId: typeof request.query.accountId === "string" && request.query.accountId.trim().length > 0
+        ? request.query.accountId.trim()
+        : undefined,
+      logger: app.log,
+      betaHeader: deps.config.anthropicOauthBetaHeader || undefined,
+    });
+
+    reply.send(overview);
+  });
+
   app.post<{
     Body: { readonly accountId?: string };
   }>("/api/ui/credentials/openai/oauth/refresh", async (request, reply) => {
@@ -1754,6 +1772,69 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
       reply.send(htmlError(oauthError instanceof Error ? oauthError.message : String(oauthError)));
     }
   });
+
+  // ─── Anthropic OAuth Routes ────────────────────────────────────────────
+
+  if (deps.anthropicOauthManager) {
+    const anthropicManager = deps.anthropicOauthManager;
+
+    // Start the code-paste OAuth flow — returns URL + verifier
+    app.post("/api/ui/credentials/anthropic/oauth/code/start", async (_request, reply) => {
+      try {
+        const payload = await anthropicManager.startCodeFlow();
+        reply.send(payload);
+      } catch (error) {
+        reply.code(502).send({
+          error: "anthropic_oauth_start_failed",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+
+    // Exchange user-pasted code + verifier for tokens
+    app.post<{
+      Body: { readonly code?: string; readonly verifier?: string };
+    }>("/api/ui/credentials/anthropic/oauth/code/exchange", async (request, reply) => {
+      const code = typeof request.body?.code === "string" ? request.body.code.trim() : "";
+      const verifier = typeof request.body?.verifier === "string" ? request.body.verifier.trim() : "";
+
+      if (code.length === 0 || verifier.length === 0) {
+        reply.code(400).send({ error: "code_and_verifier_required" });
+        return;
+      }
+
+      try {
+        const tokens = await anthropicManager.exchangeCode(code, verifier);
+        await credentialStore.upsertOAuthAccount(
+          "anthropic",
+          tokens.accountId,
+          tokens.accessToken,
+          tokens.refreshToken,
+          tokens.expiresAt,
+          undefined,
+          tokens.email,
+          tokens.subject,
+          tokens.planType,
+        );
+        await deps.keyPool.warmup().catch(() => undefined);
+        app.log.info({
+          providerId: "anthropic",
+          accountId: tokens.accountId,
+          email: tokens.email,
+        }, "saved Anthropic OAuth account from code exchange");
+
+        reply.send({ state: "authorized", accountId: tokens.accountId, email: tokens.email });
+      } catch (error) {
+        app.log.warn({
+          error: error instanceof Error ? error.message : String(error),
+        }, "Anthropic OAuth code exchange failed");
+        reply.code(502).send({
+          error: "anthropic_oauth_exchange_failed",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+  }
 
   app.get<{
     Querystring: { readonly providerId?: string; readonly accountId?: string; readonly limit?: string; readonly before?: string };

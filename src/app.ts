@@ -6,6 +6,7 @@ import { DEFAULT_MODELS, type ProxyConfig } from "./lib/config.js";
 import { KeyPool, type ProviderCredential } from "./lib/key-pool.js";
 import { CredentialStore } from "./lib/credential-store.js";
 import { OpenAiOAuthManager } from "./lib/openai-oauth.js";
+import { AnthropicOAuthManager } from "./lib/anthropic-oauth.js";
 import {
   factoryCredentialNeedsRefresh,
   parseJwtExpiry,
@@ -471,6 +472,11 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     issuer: config.openaiOauthIssuer,
     clientSecret: config.openaiOauthClientSecret,
   });
+  const anthropicOauthManager = new AnthropicOAuthManager({
+    oauthScopes: config.anthropicOauthScopes,
+    clientId: config.anthropicOauthClientId,
+    issuer: config.anthropicOauthIssuer,
+  });
 
   const tokenRefreshManager = new TokenRefreshManager(
     async (credential) => {
@@ -481,6 +487,53 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       // Factory OAuth credentials use WorkOS refresh, not OpenAI OAuth
       if (credential.providerId === "factory") {
         return refreshFactoryAccount(credential);
+      }
+
+      // Anthropic OAuth credentials use Anthropic refresh
+      if (credential.providerId === "anthropic") {
+        app.log.info({ accountId: credential.accountId, providerId: "anthropic" }, "refreshing Anthropic OAuth token");
+
+        const newTokens = await anthropicOauthManager.refreshToken(credential.refreshToken);
+
+        const newCredential: ProviderCredential = {
+          providerId: "anthropic",
+          accountId: credential.accountId,
+          token: newTokens.accessToken,
+          authType: "oauth_bearer",
+          refreshToken: newTokens.refreshToken ?? credential.refreshToken,
+          expiresAt: newTokens.expiresAt,
+          email: newTokens.email,
+          subject: newTokens.subject,
+          planType: newTokens.planType,
+        };
+
+        keyPool.updateAccountCredential("anthropic", credential, newCredential);
+
+        await runtimeCredentialStore.upsertOAuthAccount(
+          "anthropic",
+          newCredential.accountId,
+          newCredential.token,
+          newCredential.refreshToken,
+          newCredential.expiresAt,
+          undefined,
+          newTokens.email,
+          newTokens.subject,
+          newTokens.planType,
+        );
+
+        app.log.info({
+          accountId: newCredential.accountId,
+          providerId: "anthropic",
+          expiresAt: newCredential.expiresAt,
+        }, "Anthropic OAuth token refreshed successfully");
+
+        return newCredential;
+      }
+
+      // Only use OpenAI refresh for the configured OpenAI provider
+      if (credential.providerId !== config.openaiProviderId) {
+        app.log.warn({ accountId: credential.accountId, providerId: credential.providerId }, "unsupported OAuth provider for token refresh, skipping");
+        return null;
       }
 
       app.log.info({ accountId: credential.accountId, providerId: credential.providerId }, "refreshing expired OAuth token");
@@ -1755,6 +1808,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     proxySettingsStore,
     eventStore,
     refreshOpenAiOauthAccounts,
+    anthropicOauthManager,
   });
 
   if (sql && sqlAuthPersistence && sqlGitHubAllowlist && sqlCredentialStore) {

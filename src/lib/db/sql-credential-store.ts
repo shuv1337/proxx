@@ -7,6 +7,7 @@ import { DEFAULT_TENANT_ID, buildTenantApiKeyPrefix, generateTenantApiKey, hashT
 import type { CredentialAccountView, CredentialProviderView } from "../credential-store.js";
 import {
   ADD_ACCOUNTS_EMAIL_COLUMN,
+  ADD_ACCOUNTS_SUBJECT_COLUMN,
   CREATE_TENANTS_TABLE,
   CREATE_USERS_TABLE,
   CREATE_TENANT_MEMBERSHIPS_TABLE,
@@ -73,6 +74,7 @@ interface AccountRow {
   chatgpt_account_id: string | null;
   plan_type: string | null;
   email: string | null;
+  subject: string | null;
 }
 
 interface CooldownRow {
@@ -98,6 +100,7 @@ function toProviderCredential(row: AccountRow, authType: ProviderAuthType): Prov
     chatgptAccountId: row.chatgpt_account_id ?? undefined,
     planType: row.plan_type ?? undefined,
     email: row.email ?? undefined,
+    subject: row.subject ?? undefined,
   };
 }
 
@@ -202,6 +205,9 @@ export class SqlCredentialStore {
 
     // v5: add email column to accounts (idempotent via IF NOT EXISTS)
     await this.sql.unsafe(ADD_ACCOUNTS_EMAIL_COLUMN);
+
+    // v6: add subject column to accounts (idempotent via IF NOT EXISTS)
+    await this.sql.unsafe(ADD_ACCOUNTS_SUBJECT_COLUMN);
 
     const versionExists = await this.sql.unsafe<Array<{ "?column?": number }>>(
       CHECK_VERSION_EXISTS,
@@ -336,6 +342,7 @@ export class SqlCredentialStore {
         expiresAt: normalizeEpochMilliseconds(row.expires_at ?? undefined),
         chatgptAccountId: row.chatgpt_account_id ?? undefined,
         email: row.email ?? undefined,
+        subject: row.subject ?? undefined,
         planType: row.plan_type ?? undefined,
       });
       accountsByProvider.set(row.provider_id, accounts);
@@ -404,6 +411,7 @@ export class SqlCredentialStore {
       account.chatgptAccountId ?? null,
       account.planType ?? null,
       account.email ?? null,
+      account.subject ?? null,
     ]);
   }
 
@@ -424,20 +432,21 @@ export class SqlCredentialStore {
     expiresAt?: number,
     chatgptAccountId?: string,
     email?: string,
-    _subject?: string,
+    subject?: string,
     planType?: string,
   ): Promise<void> {
-    await this.upsertAccount({
-      providerId,
+    await this.upsertProvider(providerId, "oauth_bearer");
+    await this.sql.unsafe(INSERT_ACCOUNT, [
       accountId,
-      token: accessToken,
-      authType: "oauth_bearer",
-      refreshToken,
-      expiresAt,
-      chatgptAccountId,
-      planType,
-      email,
-    });
+      providerId,
+      accessToken,
+      refreshToken ?? null,
+      expiresAt ?? null,
+      chatgptAccountId ?? null,
+      planType ?? null,
+      email ?? null,
+      subject ?? null,
+    ]);
   }
 
   public async upsertAccounts(accounts: readonly ProviderCredential[]): Promise<void> {

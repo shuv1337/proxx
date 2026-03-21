@@ -197,7 +197,7 @@ export async function seedFromJsonValue(
 
     for (const account of accounts) {
       await sql`
-        INSERT INTO accounts (id, provider_id, token, refresh_token, expires_at, chatgpt_account_id, plan_type)
+        INSERT INTO accounts (id, provider_id, token, refresh_token, expires_at, chatgpt_account_id, plan_type, email, subject)
         VALUES (
           ${account.accountId},
           ${account.providerId},
@@ -205,14 +205,18 @@ export async function seedFromJsonValue(
           ${account.refreshToken ?? null},
           ${account.expiresAt ?? null},
           ${account.chatgptAccountId ?? null},
-          ${account.planType ?? null}
+          ${account.planType ?? null},
+          ${account.email ?? null},
+          ${null}
         )
         ON CONFLICT (id, provider_id) DO UPDATE SET
           token = EXCLUDED.token,
           refresh_token = EXCLUDED.refresh_token,
           expires_at = EXCLUDED.expires_at,
           chatgpt_account_id = EXCLUDED.chatgpt_account_id,
-          plan_type = EXCLUDED.plan_type
+          plan_type = EXCLUDED.plan_type,
+          email = COALESCE(EXCLUDED.email, accounts.email),
+          subject = COALESCE(EXCLUDED.subject, accounts.subject)
       `;
       accountCount += 1;
     }

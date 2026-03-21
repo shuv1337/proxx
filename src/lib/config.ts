@@ -98,6 +98,18 @@ export interface ProxyConfig {
   /** OAuth client secret used for OpenAI token exchange/refresh (optional). */
   readonly openaiOauthClientSecret?: string;
 
+  /** OAuth issuer base URL for Anthropic browser auth flows. */
+  readonly anthropicOauthIssuer: string;
+
+  /** OAuth client id for Anthropic browser auth flows. */
+  readonly anthropicOauthClientId: string;
+
+  /** OAuth scopes requested during Anthropic browser authorization. */
+  readonly anthropicOauthScopes: string;
+
+  /** Anthropic-Beta header value for usage/quota API requests. */
+  readonly anthropicOauthBetaHeader: string;
+
   /** Max concurrent OAuth refreshes allowed during background/manual refresh work. */
   readonly oauthRefreshMaxConcurrency: number;
 
@@ -113,6 +125,8 @@ export const DEFAULT_MODELS: readonly string[] = [
   "gpt-5.2-codex",
   "gpt-5.1-codex",
   "gpt-5.1-codex-max",
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
   "claude-opus-4-5",
   "gpt-5.3-codex",
   "gemini-3-flash-preview",
@@ -448,6 +462,24 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
   const oauthRefreshBackgroundIntervalMs = numberFromEnvAliases(["OAUTH_REFRESH_BACKGROUND_INTERVAL_MS"], 15_000);
   const oauthRefreshProactiveWindowMs = numberFromEnvAliases(["OAUTH_REFRESH_PROACTIVE_WINDOW_MS"], 30 * 60_000);
 
+  const anthropicOauthIssuerRaw = (process.env.ANTHROPIC_OAUTH_ISSUER ?? "https://platform.claude.com").trim();
+  const anthropicOauthIssuer = (anthropicOauthIssuerRaw.length > 0
+    ? anthropicOauthIssuerRaw
+    : "https://platform.claude.com").replace(/\/+$/, "");
+
+  const anthropicOauthClientIdRaw = (process.env.ANTHROPIC_OAUTH_CLIENT_ID ?? "").trim();
+  const anthropicOauthClientId = anthropicOauthClientIdRaw.length > 0
+    ? anthropicOauthClientIdRaw
+    : "";
+
+  const anthropicOauthScopesRaw = (process.env.ANTHROPIC_OAUTH_SCOPES ?? "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload").trim();
+  const anthropicOauthScopes = anthropicOauthScopesRaw.length > 0
+    ? anthropicOauthScopesRaw
+    : "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+
+  const anthropicOauthBetaHeaderRaw = (process.env.ANTHROPIC_OAUTH_BETA_HEADER ?? "").trim();
+  const anthropicOauthBetaHeader = anthropicOauthBetaHeaderRaw;
+
   return {
     host: process.env.PROXY_HOST ?? process.env.HOST ?? "127.0.0.1",
     port: numberFromEnvAliases(["PROXY_PORT", "PORT"], 8789),
@@ -510,6 +542,10 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     openaiOauthClientId,
     openaiOauthIssuer,
     openaiOauthClientSecret,
+    anthropicOauthIssuer,
+    anthropicOauthClientId,
+    anthropicOauthScopes,
+    anthropicOauthBetaHeader,
     oauthRefreshMaxConcurrency,
     oauthRefreshBackgroundIntervalMs,
     oauthRefreshProactiveWindowMs,

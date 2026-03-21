@@ -256,6 +256,34 @@ export interface CredentialQuotaOverview {
   readonly accounts: readonly CredentialQuotaAccountSummary[];
 }
 
+export interface GenericQuotaWindowSummary {
+  readonly key: string;
+  readonly label: string;
+  readonly usedPercent: number | null;
+  readonly remainingPercent: number | null;
+  readonly resetsAt: string | null;
+  readonly resetAfterSeconds: number | null;
+}
+
+export interface GenericQuotaAccountSummary {
+  readonly providerId: string;
+  readonly accountId: string;
+  readonly displayName: string;
+  readonly email?: string;
+  readonly planType?: string;
+  readonly status: "ok" | "error";
+  readonly fetchedAt: string;
+  readonly stale?: boolean;
+  readonly backoffUntil?: string;
+  readonly windows: readonly GenericQuotaWindowSummary[];
+  readonly error?: string;
+}
+
+export interface GenericQuotaOverview {
+  readonly generatedAt: string;
+  readonly accounts: readonly GenericQuotaAccountSummary[];
+}
+
 const AUTH_TOKEN_KEY = "open-hax-proxy.auth-token";
 const AUTH_TOKEN_COOKIE = "open_hax_proxy_auth_token";
 
@@ -652,6 +680,41 @@ export async function pollFactoryDeviceOAuth(deviceAuthId: string): Promise<{
     },
     body: JSON.stringify({ deviceAuthId }),
   });
+}
+
+// ─── Anthropic OAuth API ──────────────────────────────────────────────────
+
+export async function startAnthropicCodeOAuth(): Promise<{
+  readonly authorizeUrl: string;
+  readonly verifier: string;
+}> {
+  return requestJson("/api/ui/credentials/anthropic/oauth/code/start", {
+    method: "POST",
+  });
+}
+
+export async function exchangeAnthropicCode(code: string, verifier: string): Promise<{
+  readonly state: "authorized";
+  readonly accountId: string;
+  readonly email?: string;
+}> {
+  return requestJson("/api/ui/credentials/anthropic/oauth/code/exchange", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ code, verifier }),
+  });
+}
+
+export async function getAnthropicCredentialQuota(accountId?: string): Promise<GenericQuotaOverview> {
+  const query = new URLSearchParams();
+  if (accountId && accountId.trim().length > 0) {
+    query.set("accountId", accountId.trim());
+  }
+
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return requestJson<GenericQuotaOverview>(`/api/ui/credentials/anthropic/quota${suffix}`);
 }
 
 export async function listRequestLogs(filters: {

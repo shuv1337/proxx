@@ -2,6 +2,8 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 
 import {
   addApiKeyCredential,
+  exchangeAnthropicCode,
+  getAnthropicCredentialQuota,
   getApiOrigin,
   getOpenAiCredentialQuota,
   listCredentials,
@@ -13,10 +15,12 @@ import {
   type CredentialQuotaAccountSummary,
   type CredentialQuotaOverview,
   type CredentialQuotaWindow,
+  type GenericQuotaOverview,
   type KeyPoolStatus,
   type ProviderRequestLogSummary,
   type RequestLogEntry,
   removeCredential,
+  startAnthropicCodeOAuth,
   startFactoryBrowserOAuth,
   startFactoryDeviceOAuth,
   startOpenAiBrowserOAuth,
@@ -237,6 +241,14 @@ export function CredentialsPage(): JSX.Element {
   const [quotaOverview, setQuotaOverview] = useState<CredentialQuotaOverview | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [quotaError, setQuotaError] = useState<string | null>(null);
+  const [anthropicQuota, setAnthropicQuota] = useState<GenericQuotaOverview | null>(null);
+  const [anthropicQuotaLoading, setAnthropicQuotaLoading] = useState(false);
+  const [anthropicQuotaError, setAnthropicQuotaError] = useState<string | null>(null);
+  const [anthropicCodeFlow, setAnthropicCodeFlow] = useState<{
+    verifier: string;
+    code: string;
+    submitting: boolean;
+  } | null>(null);
   const [copiedFieldKey, setCopiedFieldKey] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -275,6 +287,19 @@ export function CredentialsPage(): JSX.Element {
     }
   }, []);
 
+  const loadAnthropicQuota = useCallback(async () => {
+    setAnthropicQuotaLoading(true);
+    setAnthropicQuotaError(null);
+    try {
+      const data = await getAnthropicCredentialQuota();
+      setAnthropicQuota(data);
+    } catch (err) {
+      setAnthropicQuotaError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAnthropicQuotaLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void refreshCredentials().catch((nextError) => {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
@@ -294,7 +319,8 @@ export function CredentialsPage(): JSX.Element {
 
     hasLoadedQuotaRef.current = true;
     void refreshQuota();
-  }, [providers.length, refreshQuota]);
+    void loadAnthropicQuota();
+  }, [providers.length, refreshQuota, loadAnthropicQuota]);
 
   useEffect(() => {
     return () => {
@@ -344,8 +370,25 @@ export function CredentialsPage(): JSX.Element {
     for (const account of quotaOverview?.accounts ?? []) {
       entries.set(`${account.providerId}:${account.accountId}`, account);
     }
+    // Merge Anthropic quota into the same map using a shim so account tiles
+    // render the quota card. Real window data is rendered from anthropicQuota
+    // directly (supports N windows, not just 2).
+    for (const account of anthropicQuota?.accounts ?? []) {
+      entries.set(`${account.providerId}:${account.accountId}`, {
+        providerId: account.providerId,
+        accountId: account.accountId,
+        displayName: account.displayName,
+        email: account.email,
+        planType: account.planType,
+        status: account.status,
+        fetchedAt: account.fetchedAt,
+        fiveHour: null,
+        weekly: null,
+        error: account.error,
+      });
+    }
     return entries;
-  }, [quotaOverview]);
+  }, [quotaOverview, anthropicQuota]);
 
   const normalizedAccountSearch = accountSearch.trim().toLowerCase();
 
@@ -615,6 +658,31 @@ export function CredentialsPage(): JSX.Element {
     }
   };
 
+  const startAnthropicCode = useCallback(async () => {
+    try {
+      const result = await startAnthropicCodeOAuth();
+      window.open(result.authorizeUrl, "anthropic-oauth", "width=600,height=700");
+      setAnthropicCodeFlow({ verifier: result.verifier, code: "", submitting: false });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const submitAnthropicCode = useCallback(async () => {
+    if (!anthropicCodeFlow || anthropicCodeFlow.code.trim().length === 0) return;
+    setAnthropicCodeFlow(prev => prev ? { ...prev, submitting: true } : null);
+    try {
+      await exchangeAnthropicCode(anthropicCodeFlow.code.trim(), anthropicCodeFlow.verifier);
+      setAnthropicCodeFlow(null);
+      setStatus("Anthropic account added successfully!");
+      void refreshCredentials();
+      void loadAnthropicQuota();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setAnthropicCodeFlow(prev => prev ? { ...prev, submitting: false } : null);
+    }
+  }, [anthropicCodeFlow, refreshCredentials, loadAnthropicQuota]);
+
   const handleAddFactoryKey = () => {
     setApiKeyProvider("factory");
     setApiKeyAccount("");
@@ -688,7 +756,7 @@ export function CredentialsPage(): JSX.Element {
     const visibleRefresh = revealSecrets ? account.refreshToken : account.refreshTokenPreview;
     const workspaceCopyKey = `${providerId}:${account.id}:workspace`;
     const internalCopyKey = `${providerId}:${account.id}:internal`;
-    const shouldShowQuota = (providerId === "openai" && account.authType === "oauth_bearer") || Boolean(quota);
+    const shouldShowQuota = ((providerId === "openai" || providerId === "anthropic") && account.authType === "oauth_bearer") || Boolean(quota);
     const visibleName = revealSecrets
       ? account.displayName
       : (account.chatgptAccountId ?? account.id);
@@ -721,19 +789,35 @@ export function CredentialsPage(): JSX.Element {
         {shouldShowQuota && (
           <section className="credentials-quota-card">
             <header className="credentials-quota-card-header">
-              <strong>Codex quota</strong>
+              <strong>{providerId === "anthropic" ? "Claude quota" : "Codex quota"}</strong>
               <span>{quota ? `Updated ${formatQuotaTimestamp(quota.fetchedAt)}` : quotaLoading ? "Refreshing…" : "Not loaded"}</span>
             </header>
             {quota?.status === "ok" ? (
               <div className="credentials-quota-list">
-                {renderQuotaRow("Rolling 5h", quota.fiveHour)}
-                {renderQuotaRow("Weekly", quota.weekly)}
+                {providerId === "anthropic" ? (
+                  // Render all Anthropic windows dynamically from the generic quota data
+                  (anthropicQuota?.accounts.find(a => a.accountId === account.id)?.windows ?? []).map(win =>
+                    renderQuotaRow(win.label, {
+                      usedPercent: win.usedPercent,
+                      remainingPercent: win.remainingPercent,
+                      resetsAt: win.resetsAt,
+                      resetAfterSeconds: win.resetAfterSeconds,
+                    })
+                  )
+                ) : (
+                  <>
+                    {renderQuotaRow("Rolling 5h", quota.fiveHour)}
+                    {renderQuotaRow("Weekly", quota.weekly)}
+                  </>
+                )}
               </div>
             ) : quota?.status === "error" ? (
               <p className="credentials-quota-note credentials-quota-note-error">{quota.error ?? "Quota unavailable"}</p>
             ) : (
               <p className="credentials-quota-note">
-                {quotaLoading ? "Loading current Codex quota…" : "Refresh Codex quotas to load live 5h and weekly usage."}
+                {(quotaLoading || anthropicQuotaLoading)
+                  ? `Loading ${providerId === "anthropic" ? "Claude" : "Codex"} quota…`
+                  : `Refresh ${providerId === "anthropic" ? "Claude" : "Codex"} quotas to load live usage.`}
               </p>
             )}
           </section>
@@ -842,8 +926,8 @@ export function CredentialsPage(): JSX.Element {
               <option value="domain">Email domain</option>
             </select>
           </label>
-          <button type="button" onClick={() => void refreshQuota()} disabled={quotaLoading}>
-            {quotaLoading ? "Refreshing Codex quotas..." : "Refresh Codex quotas"}
+          <button type="button" onClick={() => { void refreshQuota(); void loadAnthropicQuota(); }} disabled={quotaLoading || anthropicQuotaLoading}>
+            {(quotaLoading || anthropicQuotaLoading) ? "Refreshing OAuth quotas..." : "Refresh OAuth quotas"}
           </button>
         </div>
 
@@ -852,7 +936,7 @@ export function CredentialsPage(): JSX.Element {
             Showing {filteredAccounts.length} of {flatAccounts.length} account(s)
           </p>
           <p className="credentials-toolbar-meta">
-            {quotaOverview ? `Codex quotas updated ${formatQuotaTimestamp(quotaOverview.generatedAt)}` : "Codex quotas not loaded yet"}
+            {quotaOverview ? `OAuth quotas updated ${formatQuotaTimestamp(quotaOverview.generatedAt)}` : "OAuth quotas not loaded yet"}
           </p>
         </div>
 
@@ -976,6 +1060,48 @@ export function CredentialsPage(): JSX.Element {
               </a>{" "}
               and enter code <strong>{deviceAuth.userCode}</strong>.
             </p>
+          )}
+        </div>
+
+        {/* Anthropic OAuth Section */}
+        <div style={{ marginTop: 24, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+          <h3 style={{ margin: "0 0 8px", fontSize: 15, fontWeight: 600 }}>Anthropic (Claude) OAuth</h3>
+          <p style={{ margin: "0 0 12px", fontSize: 13, opacity: 0.7 }}>
+            Sign in with your Anthropic account to add Claude credentials.
+          </p>
+          {!anthropicCodeFlow ? (
+            <button onClick={() => void startAnthropicCode()}>
+              Sign in with Anthropic
+            </button>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <p style={{ margin: 0, fontSize: 13 }}>
+                A browser window has opened. Complete login, then copy the full URL from the browser address bar and paste it below:
+              </p>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  type="text"
+                  placeholder="Paste URL or authorization code here"
+                  value={anthropicCodeFlow.code}
+                  onChange={(e) => setAnthropicCodeFlow(prev => prev ? { ...prev, code: e.target.value } : null)}
+                  style={{ flex: 1, padding: "6px 10px", fontSize: 13, fontFamily: "monospace" }}
+                  disabled={anthropicCodeFlow.submitting}
+                />
+                <button
+                  onClick={() => void submitAnthropicCode()}
+                  disabled={anthropicCodeFlow.submitting || anthropicCodeFlow.code.trim().length === 0}
+                >
+                  {anthropicCodeFlow.submitting ? "Submitting…" : "Submit"}
+                </button>
+                <button
+                  onClick={() => setAnthropicCodeFlow(null)}
+                  disabled={anthropicCodeFlow.submitting}
+                  style={{ opacity: 0.7 }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
           )}
         </div>
 
