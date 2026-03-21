@@ -111,16 +111,17 @@ Evidence gathered:
 - `PRODUCTION_PROXY_AUTH_TOKEN`
 
 ### Recommended repo/environment vars
-- `STAGING_SSH_HOST` = `ussy3.promethean.rest`
+- `STAGING_SSH_HOST` = `104.130.31.144` for SSH transport to the staging box
 - `STAGING_SSH_USER` = `error`
 - `STAGING_DEPLOY_PATH` = `~/devel/services/proxx-staging`
+- `STAGING_COMPOSE_PROJECT_NAME` = `proxx-staging`
 - `STAGING_PUBLIC_HOST` = `ussy3.promethean.rest`
 - `STAGING_BASE_URL` = `https://ussy3.promethean.rest`
-- `STAGING_SOURCE_SSH_HOST` = `ussy.promethean.rest`
+- `STAGING_SOURCE_SSH_HOST` = `104.130.31.129`
 - `STAGING_SOURCE_SSH_USER` = `error`
 - `STAGING_SOURCE_DEPLOY_PATH` = `~/devel/services/proxx`
 - `STAGING_SOURCE_COMPOSE_PROJECT_NAME` = `open-hax-openai-proxy`
-- `PRODUCTION_SSH_HOST` = `ussy.promethean.rest`
+- `PRODUCTION_SSH_HOST` = `104.130.31.129`
 - `PRODUCTION_SSH_USER` = `error`
 - `PRODUCTION_DEPLOY_PATH` = `~/devel/services/proxx`
 - `PRODUCTION_COMPOSE_PROJECT_NAME` = `open-hax-openai-proxy`

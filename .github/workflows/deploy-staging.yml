@@ -57,6 +57,7 @@ jobs:
           DEPLOY_HOST: ${{ vars.STAGING_SSH_HOST || 'ussy3.promethean.rest' }}
           DEPLOY_USER: ${{ vars.STAGING_SSH_USER || 'error' }}
           DEPLOY_PATH: ${{ vars.STAGING_DEPLOY_PATH || '~/devel/services/proxx-staging' }}
+          DEPLOY_COMPOSE_PROJECT_NAME: ${{ vars.STAGING_COMPOSE_PROJECT_NAME || 'proxx-staging' }}
           DEPLOY_PUBLIC_HOST: ${{ vars.STAGING_PUBLIC_HOST || 'ussy3.promethean.rest' }}
           DEPLOY_ENABLE_TLS: 'true'
           DEPLOY_HEALTH_TIMEOUT_SECONDS: '240'
