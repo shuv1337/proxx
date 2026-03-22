@@ -731,6 +731,37 @@ async function buildUsageOverviewFromEntries(
     };
   };
 
+  // Ensure all configured provider accounts appear in accountAgg, even if idle (zero requests).
+  for (const provider of credentialProviders) {
+    for (const providerAccount of provider.accounts) {
+      const accountKey = `${provider.id}\0${providerAccount.id}`;
+      if (!accountAgg.has(accountKey)) {
+        accountAgg.set(accountKey, {
+          accountId: providerAccount.id,
+          providerId: provider.id,
+          authType: providerAccount.authType,
+          requestCount: 0,
+          totalTokens: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          cachedPromptTokens: 0,
+          imageCount: 0,
+          imageCostUsd: 0,
+          costUsd: 0,
+          energyJoules: 0,
+          waterEvaporatedMl: 0,
+          cacheHitCount: 0,
+          cacheKeyUseCount: 0,
+          ttftSum: 0,
+          ttftCount: 0,
+          tpsSum: 0,
+          tpsCount: 0,
+          lastUsedAtMs: 0,
+        });
+      }
+    }
+  }
+
   const accountStats = [...accountAgg.values()].map((account) => {
     const provider = providerById.get(account.providerId);
     const providerAccount = provider?.accounts.find((candidate) => candidate.id === account.accountId);

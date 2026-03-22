@@ -23,7 +23,7 @@ Add a single proxx-hosted dashboard view that shows container inventory and rout
    - inspect local Docker containers through the Docker socket
    - parse local runtime Caddy routes from a mounted runtime root
    - aggregate remote host snapshots over HTTPS
-2. Add authenticated UI routes for `self` and aggregated host overview.
+2. Add authenticated UI routes for `self` and aggregated host overview (admin-only).
 3. Add a dedicated web console Hosts page.
 4. Make local runtime context (`docker.sock`, runtime repo dir) an explicit opt-in compose overlay.
 5. Document the required env shape for multi-host operation.
@@ -57,11 +57,13 @@ Add a single proxx-hosted dashboard view that shows container inventory and rout
 
 ## Implementation notes
 - Added `src/lib/host-dashboard.ts` for target loading, Docker socket inspection, Caddyfile parsing, and remote host snapshot fetches.
-- Added authenticated `/api/ui/hosts/self` and `/api/ui/hosts/overview` routes in `ui-routes.ts`.
+- Added admin-only `/api/ui/hosts/self` and `/api/ui/hosts/overview` routes in `ui-routes.ts`.
 - Added `web/src/pages/HostsPage.tsx` plus API/types/nav/styles for the new console page.
 - Updated the source/runtime compose setup so Docker/runtime inspection can be enabled explicitly when needed instead of being on by default.
 - Kept the host list config-driven via `HOST_DASHBOARD_TARGETS_JSON` so future blocked hosts can be present as error cards before access is fixed.
 
 ## Verification
-- `cd proxx && pnpm test`
-- `cd proxx && pnpm web:build`
+- `pnpm lint` (workspace-wide lint for TypeScript and markdown files)
+- `pnpm typecheck` (strict TypeScript type checking)
+- `pnpm test`
+- `pnpm web:build`

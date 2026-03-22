@@ -54,14 +54,12 @@ ussy.promethean.rest {
   assert.deepEqual(routes, []);
 });
 
-test("loadHostDashboardTargetsFromEnv falls back to default ussy targets", () => {
+test("loadHostDashboardTargetsFromEnv returns empty array when unconfigured", () => {
   const targets = loadHostDashboardTargetsFromEnv({});
 
-  assert.equal(targets.length, 2);
-  assert.equal(targets[0]?.id, "ussy");
-  assert.equal(targets[1]?.id, "ussy3");
-  assert.equal(targets[0]?.authTokenEnv, "HOST_DASHBOARD_USSY_TOKEN");
-  assert.equal(targets[1]?.authTokenEnv, "HOST_DASHBOARD_USSY3_TOKEN");
+  // Returns empty when unconfigured to avoid implicit outbound traffic to external hosts.
+  // Users must explicitly configure HOST_DASHBOARD_TARGETS_JSON to enable remote fleet probes.
+  assert.equal(targets.length, 0);
 });
 
 test("loadHostDashboardTargetsFromEnv accepts configured JSON targets", () => {
