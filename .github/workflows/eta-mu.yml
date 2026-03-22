@@ -27,9 +27,6 @@ jobs:
     env:
       ETA_MU_APP_ID: ${{ secrets.ETA_MU_APP_ID }}
       ETA_MU_APP_PRIVATE_KEY: ${{ secrets.ETA_MU_APP_PRIVATE_KEY }}
-      # Open Hax proxy configuration for pi model access
-      OPEN_HAX_OPENAI_PROXY_URL: ${{ vars.OPEN_HAX_OPENAI_PROXY_URL }}
-      OPEN_HAX_OPENAI_PROXY_AUTH_TOKEN: ${{ secrets.OPEN_HAX_OPENAI_PROXY_AUTH_TOKEN }}
     steps:
       - name: Checkout target repository
         uses: actions/checkout@v4

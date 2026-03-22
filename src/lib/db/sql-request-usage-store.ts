@@ -263,6 +263,8 @@ export class SqlRequestUsageStore implements RequestLogMirror {
     await this.sql.unsafe("CREATE INDEX IF NOT EXISTS idx_request_usage_entries_ts ON request_usage_entries(timestamp_ms DESC, id DESC);");
     await this.sql.unsafe("CREATE INDEX IF NOT EXISTS idx_request_usage_entries_tenant_ts ON request_usage_entries(tenant_id, timestamp_ms DESC, id DESC);");
     await this.sql.unsafe("CREATE INDEX IF NOT EXISTS idx_request_usage_entries_account_ts ON request_usage_entries(account_id, timestamp_ms DESC, id DESC);");
+    await this.sql.unsafe("CREATE INDEX IF NOT EXISTS idx_request_usage_entries_issuer_ts ON request_usage_entries(issuer, timestamp_ms DESC, id DESC);");
+    await this.sql.unsafe("CREATE INDEX IF NOT EXISTS idx_request_usage_entries_key_ts ON request_usage_entries(key_id, timestamp_ms DESC, id DESC);");
     await this.sql.unsafe("CREATE INDEX IF NOT EXISTS idx_request_usage_entries_provider_ts ON request_usage_entries(provider_id, timestamp_ms DESC, id DESC);");
     await this.sql.unsafe("CREATE INDEX IF NOT EXISTS idx_request_usage_entries_provider_model_ts ON request_usage_entries(provider_id, model, timestamp_ms DESC, id DESC);");
   }
