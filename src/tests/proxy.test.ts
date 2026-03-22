@@ -170,7 +170,6 @@ async function withProxyApp(
     openaiOauthScopes: "openid profile email offline_access",
     openaiOauthClientId: "app_EMoamEEZ73f0CkXaXp7hrann",
     openaiOauthIssuer: "https://auth.openai.com",
-    ...options.configOverrides,
     proxyTokenPepper: options.configOverrides?.proxyTokenPepper ?? "test-proxy-token-pepper",
     oauthRefreshMaxConcurrency: options.configOverrides?.oauthRefreshMaxConcurrency ?? 32,
     oauthRefreshBackgroundIntervalMs: options.configOverrides?.oauthRefreshBackgroundIntervalMs ?? 15_000,

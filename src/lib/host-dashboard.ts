@@ -200,7 +200,9 @@ function sanitizeTarget(candidate: unknown): HostDashboardTarget | undefined {
 export function loadHostDashboardTargetsFromEnv(env: NodeJS.ProcessEnv): readonly HostDashboardTarget[] {
   const raw = env.HOST_DASHBOARD_TARGETS_JSON?.trim();
   if (!raw) {
-    return DEFAULT_HOST_DASHBOARD_TARGETS;
+    // Return empty array when unconfigured to avoid implicit outbound traffic to external hosts.
+    // Users must explicitly configure HOST_DASHBOARD_TARGETS_JSON to enable remote fleet probes.
+    return [];
   }
 
   const parsed = JSON.parse(raw) as unknown;
