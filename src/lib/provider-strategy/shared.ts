@@ -1382,6 +1382,12 @@ function extractUsageFromResponsesSse(streamText: string, routedModel: string): 
     if (imageCount !== undefined) {
       return { ...counts, imageCount };
     }
+    // Ensure cachedPromptTokens is explicitly 0 (not undefined) when usage is present
+    // but no cached tokens were reported. This distinguishes "usage available, no cache"
+    // from "usage unavailable" for accurate dashboard metrics.
+    if (counts.promptTokens !== undefined && counts.cachedPromptTokens === undefined) {
+      return { ...counts, cachedPromptTokens: 0 };
+    }
     return counts;
   } catch {
     return {};
