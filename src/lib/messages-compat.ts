@@ -659,6 +659,21 @@ export function chatRequestToMessagesRequest(body: Record<string, unknown>): Rec
   const thinking = normalizeThinkingRequest(body);
   if (thinking) {
     payload["thinking"] = thinking;
+
+    // Anthropic requires max_tokens >= budget_tokens + 1 when thinking is
+    // enabled.  Upstream callers (e.g. pi) often send a small max_tokens
+    // alongside reasoning_effort; silently bump max_tokens so the request
+    // isn't rejected.
+    const budgetTokens = asNumber(thinking["budget_tokens"]);
+    const currentMaxTokens = asNumber(payload["max_tokens"]);
+    if (
+      budgetTokens
+      && budgetTokens > 0
+      && thinking["type"] === "enabled"
+      && (currentMaxTokens === undefined || currentMaxTokens < budgetTokens + 1)
+    ) {
+      payload["max_tokens"] = budgetTokens + 4096;
+    }
   }
 
   if (body["tools"] !== undefined) {

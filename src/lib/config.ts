@@ -359,6 +359,7 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
   const upstreamProviderBaseUrls = providerBaseUrlsFromEnv("UPSTREAM_PROVIDER_BASE_URLS", {
     vivgrid: "https://api.vivgrid.com",
     "ollama-cloud": "https://ollama.com",
+    anthropic: "https://api.anthropic.com",
     openrouter: defaultProviderBaseUrl("openrouter"),
     requesty: defaultProviderBaseUrl("requesty"),
     gemini: defaultProviderBaseUrl("gemini"),

@@ -51,6 +51,10 @@ export class MessagesProviderStrategy extends TransformedJsonProviderStrategy {
   }
 
   public override applyRequestHeaders(headers: Headers, context: ProviderAttemptContext, payload: Record<string, unknown>): void {
+    // The Messages API is only used for claude-* models (Anthropic).  Set the
+    // required anthropic-version header so direct-to-Anthropic routes work.
+    // Upstream proxies (vivgrid, etc.) accept or ignore the extra header.
+    headers.set("anthropic-version", "2023-06-01");
     if (context.config.messagesInterleavedThinkingBeta && shouldEnableInterleavedThinkingHeader(payload)) {
       appendCsvHeaderValue(headers, "anthropic-beta", context.config.messagesInterleavedThinkingBeta);
     }

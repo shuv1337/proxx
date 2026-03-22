@@ -176,9 +176,11 @@ function readExpiresAt(account: unknown): number | undefined {
   }
 
   const rawExpiresAt = account["expires_at"] ?? account["expiresAt"];
-  return typeof rawExpiresAt === "number" && Number.isFinite(rawExpiresAt)
-    ? normalizeEpochMilliseconds(rawExpiresAt)
-    : undefined;
+  // postgres.js returns BIGINT as string — accept both number and string.
+  if (typeof rawExpiresAt === "number" || typeof rawExpiresAt === "string") {
+    return normalizeEpochMilliseconds(rawExpiresAt);
+  }
+  return undefined;
 }
 
 function readRefreshToken(account: unknown): string | undefined {
