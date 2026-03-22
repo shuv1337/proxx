@@ -1122,13 +1122,14 @@ function usageCountsFromUpstreamJson(upstreamJson: unknown, routedModel: string)
   }
 
   const directCounts = usageCountsFromCompletion(upstreamJson);
+  const imageCount = imageCountFromImagesPayload(upstreamJson) ?? imageCountFromResponsesPayload(upstreamJson);
   if (
     directCounts.promptTokens !== undefined
     || directCounts.completionTokens !== undefined
     || directCounts.totalTokens !== undefined
     || directCounts.cachedPromptTokens !== undefined
   ) {
-    return directCounts;
+    return imageCount !== undefined ? { ...directCounts, imageCount } : directCounts;
   }
 
   let counts: UsageCounts;
@@ -1146,7 +1147,6 @@ function usageCountsFromUpstreamJson(upstreamJson: unknown, routedModel: string)
     }
   }
 
-  const imageCount = imageCountFromImagesPayload(upstreamJson) ?? imageCountFromResponsesPayload(upstreamJson);
   if (imageCount !== undefined) {
     return { ...counts, imageCount };
   }

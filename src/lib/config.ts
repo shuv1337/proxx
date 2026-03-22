@@ -308,7 +308,7 @@ function providerBaseUrlsFromEnv(
 }
 
 function defaultProviderBaseUrl(providerId: string): string {
-  switch (providerId.trim()) {
+  switch (providerId.trim().toLowerCase()) {
     case "ob1":
       return (process.env.OB1_BASE_URL ?? "https://dashboard.openblocklabs.com/api").replace(/\/+$/, "");
     case "factory":
