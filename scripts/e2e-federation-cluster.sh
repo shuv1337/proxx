@@ -9,7 +9,7 @@ COMPOSE_PROJECT="${FEDERATION_E2E_COMPOSE_PROJECT:-proxx-federation-e2e}"
 ADMIN_TOKEN="${FEDERATION_E2E_ADMIN_TOKEN:-federation-e2e-admin-token}"
 SESSION_SECRET="${FEDERATION_E2E_SESSION_SECRET:-federation-e2e-session-secret}"
 OWNER_DID="${FEDERATION_E2E_OWNER_DID:-did:web:cluster.federation.test}"
-SOURCE_DB_URL="${FEDERATION_E2E_GROUP_A_SOURCE_DATABASE_URL:-${DATABASE_URL:-}}"
+SOURCE_DB_URL="${FEDERATION_E2E_GROUP_A_SOURCE_DATABASE_URL:-}"
 GROUP_B_SOURCE_DB_URL="${FEDERATION_E2E_GROUP_B_SOURCE_DATABASE_URL:-}"
 KEEP_ENV="${FEDERATION_E2E_KEEP:-0}"
 NGINX_BASE_URL="http://127.0.0.1:18080"
@@ -52,6 +52,22 @@ cleanup() {
 
 trap cleanup EXIT
 
+ensure_safe_runtime_dir() {
+  if [[ -z "${RUNTIME_DIR}" || "${RUNTIME_DIR}" == "/" || "${RUNTIME_DIR}" == "${ROOT_DIR}" || "${RUNTIME_DIR}" == "/tmp" ]]; then
+    echo "Refusing to operate on unsafe RUNTIME_DIR='${RUNTIME_DIR}'" >&2
+    exit 1
+  fi
+
+  case "${RUNTIME_DIR}" in
+    /tmp/proxx-federation-e2e-*|"${ROOT_DIR}"/.tmp/federation-e2e*)
+      ;;
+    *)
+      echo "Refusing to operate on unexpected RUNTIME_DIR='${RUNTIME_DIR}'" >&2
+      exit 1
+      ;;
+  esac
+}
+
 write_empty_keys() {
   local path="$1"
   python3 - <<'PY' "$path"
@@ -71,6 +87,7 @@ copy_models_file() {
 }
 
 prepare_runtime() {
+  ensure_safe_runtime_dir
   rm -rf "${RUNTIME_DIR}"
   mkdir -p "${RUNTIME_DIR}/db-a-init" "${RUNTIME_DIR}/db-b-init" "${RUNTIME_DIR}/backups"
 

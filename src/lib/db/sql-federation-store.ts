@@ -222,6 +222,22 @@ function normalizeUrl(value: string): string {
   return url.toString().replace(/\/+$/, "");
 }
 
+function isFederationPeerBaseUrlConflict(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const maybeError = error as { readonly code?: unknown; readonly constraint?: unknown; readonly message?: unknown };
+  const code = typeof maybeError.code === "string" ? maybeError.code : "";
+  const constraint = typeof maybeError.constraint === "string" ? maybeError.constraint : "";
+  const message = typeof maybeError.message === "string" ? maybeError.message : "";
+  return code === "23505" && (
+    constraint === "federation_peers_base_url_key"
+    || message.includes("federation_peers_base_url_key")
+    || message.includes("base_url")
+  );
+}
+
 function toPeerRecord(row: FederationPeerRow): FederationPeerRecord {
   return {
     id: row.id,
@@ -339,35 +355,43 @@ export class SqlFederationStore {
     const controlBaseUrl = input.controlBaseUrl ? normalizeUrl(input.controlBaseUrl) : null;
     const status = input.status?.trim() || "active";
     const auth = input.auth ?? { credential: credential.value };
-    const rows = await this.sql.unsafe<FederationPeerRow[]>(
-      `INSERT INTO federation_peers (
-         id, owner_subject, peer_did, label, base_url, control_base_url, auth_mode, auth_json, status, capabilities, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb, NOW())
-       ON CONFLICT (id) DO UPDATE SET
-         owner_subject = EXCLUDED.owner_subject,
-         peer_did = EXCLUDED.peer_did,
-         label = EXCLUDED.label,
-         base_url = EXCLUDED.base_url,
-         control_base_url = EXCLUDED.control_base_url,
-         auth_mode = EXCLUDED.auth_mode,
-         auth_json = EXCLUDED.auth_json,
-         status = EXCLUDED.status,
-         capabilities = EXCLUDED.capabilities,
-         updated_at = NOW()
-       RETURNING *`,
-      [
-        id,
-        credential.ownerSubject,
-        peerDid,
-        label,
-        baseUrl,
-        controlBaseUrl,
-        credential.kind,
-        JSON.stringify(auth),
-        status,
-        JSON.stringify(input.capabilities ?? {}),
-      ],
-    );
+    let rows: FederationPeerRow[];
+    try {
+      rows = await this.sql.unsafe<FederationPeerRow[]>(
+        `INSERT INTO federation_peers (
+           id, owner_subject, peer_did, label, base_url, control_base_url, auth_mode, auth_json, status, capabilities, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           owner_subject = EXCLUDED.owner_subject,
+           peer_did = EXCLUDED.peer_did,
+           label = EXCLUDED.label,
+           base_url = EXCLUDED.base_url,
+           control_base_url = EXCLUDED.control_base_url,
+           auth_mode = EXCLUDED.auth_mode,
+           auth_json = EXCLUDED.auth_json,
+           status = EXCLUDED.status,
+           capabilities = EXCLUDED.capabilities,
+           updated_at = NOW()
+         RETURNING *`,
+        [
+          id,
+          credential.ownerSubject,
+          peerDid,
+          label,
+          baseUrl,
+          controlBaseUrl,
+          credential.kind,
+          JSON.stringify(auth),
+          status,
+          JSON.stringify(input.capabilities ?? {}),
+        ],
+      );
+    } catch (error) {
+      if (isFederationPeerBaseUrlConflict(error)) {
+        throw new Error(`federation peer base_url already in use: ${baseUrl}`);
+      }
+      throw error;
+    }
 
     return toPeerRecord(rows[0]!);
   }

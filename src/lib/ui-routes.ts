@@ -3128,12 +3128,10 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
     const sinceMs = typeof request.query.sinceMs === "string" ? Number.parseInt(request.query.sinceMs, 10) : 0;
     const limit = toSafeLimit(request.query.limit, 500, 5000);
 
+    const safeSinceMs = Number.isFinite(sinceMs) ? sinceMs : 0;
     const entries = deps.sqlRequestUsageStore
-      ? (await deps.sqlRequestUsageStore.listEntriesSince(Number.isFinite(sinceMs) ? sinceMs : 0)).slice(0, limit)
-      : deps.requestLogStore.snapshot()
-          .filter((entry) => entry.timestamp >= (Number.isFinite(sinceMs) ? sinceMs : 0))
-          .sort((left, right) => left.timestamp - right.timestamp)
-          .slice(0, limit);
+      ? await deps.sqlRequestUsageStore.listEntriesSince(safeSinceMs, {}, limit)
+      : deps.requestLogStore.snapshotSinceWithLimit(safeSinceMs, limit);
 
     reply.send({ entries });
   });

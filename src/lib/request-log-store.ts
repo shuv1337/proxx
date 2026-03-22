@@ -1059,6 +1059,22 @@ export class RequestLogStore {
     return [...this.entries];
   }
 
+  public snapshotSinceWithLimit(sinceMs: number, limit: number): RequestLogEntry[] {
+    const since = Number.isFinite(sinceMs) ? sinceMs : 0;
+    const maxEntries = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : this.entries.length;
+    const results: RequestLogEntry[] = [];
+    for (const entry of this.entries) {
+      if (entry.timestamp < since) {
+        continue;
+      }
+      results.push(entry);
+      if (results.length >= maxEntries) {
+        break;
+      }
+    }
+    return results;
+  }
+
   public snapshotHourlyBuckets(sinceMs?: number): RequestLogHourlyBucket[] {
     const since = typeof sinceMs === "number" && Number.isFinite(sinceMs) ? sinceMs : 0;
 

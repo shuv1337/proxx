@@ -429,11 +429,13 @@ export class SqlRequestUsageStore implements RequestLogMirror {
   public async listEntriesSince(
     sinceMs: number,
     filters: Omit<RequestLogFilters, "limit" | "before"> = {},
+    limit?: number,
   ): Promise<RequestLogEntry[]> {
     const queryFilters = { ...filters, sinceMs };
     const { where, values } = this.buildWhere(queryFilters);
+    const safeLimit = sanitizeLimit(limit, MAX_PAGE_SIZE);
     const rows = await this.sql.unsafe<RequestUsageRow[]>(
-      `SELECT ${ENTRY_COLUMNS} FROM request_usage_entries ${where} ORDER BY timestamp_ms ASC, id ASC`,
+      `SELECT ${ENTRY_COLUMNS} FROM request_usage_entries ${where} ORDER BY timestamp_ms ASC, id ASC LIMIT ${safeLimit}`,
       values as (string | number | boolean | null)[],
     );
     return rows.map(toEntry);

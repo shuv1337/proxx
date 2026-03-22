@@ -69,7 +69,7 @@ services:
     environment:
       MOCK_OPENAI_PORT: "8080"
     ports:
-      - "19090:8080"
+      - "127.0.0.1:19090:8080"
     volumes:
       - ./:/workspace:ro
     networks:
@@ -124,7 +124,7 @@ services:
       FEDERATION_SELF_PEER_DID: did:web:a1.federation.test
       FEDERATION_SELF_PUBLIC_BASE_URL: http://a1.federation.test
     ports:
-      - "18891:8789"
+      - "127.0.0.1:18891:8789"
     volumes:
       - ${FEDERATION_E2E_RUNTIME_DIR:?set-runtime-dir}/a1/keys.json:/workspace/service-config/keys.json:ro
       - ${FEDERATION_E2E_RUNTIME_DIR:?set-runtime-dir}/a1/models.json:/workspace/service-config/models.json:ro
@@ -143,7 +143,7 @@ services:
       FEDERATION_SELF_PEER_DID: did:web:a2.federation.test
       FEDERATION_SELF_PUBLIC_BASE_URL: http://a2.federation.test
     ports:
-      - "18892:8789"
+      - "127.0.0.1:18892:8789"
     volumes:
       - ${FEDERATION_E2E_RUNTIME_DIR:?set-runtime-dir}/a2/keys.json:/workspace/service-config/keys.json:ro
       - ${FEDERATION_E2E_RUNTIME_DIR:?set-runtime-dir}/a2/models.json:/workspace/service-config/models.json:ro
@@ -162,7 +162,7 @@ services:
       FEDERATION_SELF_PEER_DID: did:web:b1.federation.test
       FEDERATION_SELF_PUBLIC_BASE_URL: http://b1.federation.test
     ports:
-      - "18893:8789"
+      - "127.0.0.1:18893:8789"
     volumes:
       - ${FEDERATION_E2E_RUNTIME_DIR:?set-runtime-dir}/b1/keys.json:/workspace/service-config/keys.json:ro
       - ${FEDERATION_E2E_RUNTIME_DIR:?set-runtime-dir}/b1/models.json:/workspace/service-config/models.json:ro
@@ -181,7 +181,7 @@ services:
       FEDERATION_SELF_PEER_DID: did:web:b2.federation.test
       FEDERATION_SELF_PUBLIC_BASE_URL: http://b2.federation.test
     ports:
-      - "18894:8789"
+      - "127.0.0.1:18894:8789"
     volumes:
       - ${FEDERATION_E2E_RUNTIME_DIR:?set-runtime-dir}/b2/keys.json:/workspace/service-config/keys.json:ro
       - ${FEDERATION_E2E_RUNTIME_DIR:?set-runtime-dir}/b2/models.json:/workspace/service-config/models.json:ro
@@ -199,7 +199,7 @@ services:
       federation-proxx-b2:
         condition: service_healthy
     ports:
-      - "18080:80"
+      - "127.0.0.1:18080:80"
     volumes:
       - ./deploy/nginx.federation-e2e.conf:/etc/nginx/nginx.conf:ro
     networks:

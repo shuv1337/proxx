@@ -381,9 +381,14 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       await sqlRequestUsageStore.init();
       app.log.info("request usage store initialized");
 
-      sqlFederationStore = new SqlFederationStore(sql);
-      await sqlFederationStore.init();
-      app.log.info("federation store initialized");
+      try {
+        sqlFederationStore = new SqlFederationStore(sql);
+        await sqlFederationStore.init();
+        app.log.info("federation store initialized");
+      } catch (error) {
+        sqlFederationStore = undefined;
+        app.log.warn({ error: toErrorMessage(error) }, "failed to initialize federation store; continuing with federation disabled");
+      }
 
       sqlAuthPersistence = new SqlAuthPersistence(sql);
       await sqlAuthPersistence.init();
