@@ -762,9 +762,10 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   function resolveFederationOwnerSubject(input: {
     readonly headers: Record<string, unknown>;
     readonly requestAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly subject?: string };
+    readonly hopCount?: number;
   }): string | undefined {
     const explicitHeader = readSingleHeader(input.headers, FEDERATION_OWNER_SUBJECT_HEADER)?.trim();
-    if (explicitHeader && input.requestAuth?.kind === "legacy_admin") {
+    if (explicitHeader && ((input.hopCount ?? 0) > 0 || input.requestAuth?.kind === "legacy_admin")) {
       return explicitHeader;
     }
 
@@ -968,6 +969,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     const ownerSubject = resolveFederationOwnerSubject({
       headers: input.requestHeaders,
       requestAuth: input.requestAuth,
+      hopCount,
     });
     if (!ownerSubject) {
       return false;
