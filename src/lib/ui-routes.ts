@@ -1,5 +1,7 @@
+import type { IncomingMessage } from "node:http";
 import { resolve } from "node:path";
 import { access, readFile } from "node:fs/promises";
+import type { Duplex } from "node:stream";
 
 import type { FastifyInstance } from "fastify";
 
@@ -12,7 +14,7 @@ import {
   loadHostDashboardTargetsFromEnv,
   resolveHostDashboardTargetToken,
 } from "./host-dashboard.js";
-import type { ResolvedRequestAuth } from "./request-auth.js";
+import { resolveRequestAuth, type ResolvedRequestAuth } from "./request-auth.js";
 import type { KeyPool, KeyPoolAccountStatus } from "./key-pool.js";
 import { OpenAiOAuthManager } from "./openai-oauth.js";
 import { FactoryOAuthManager } from "./factory-oauth.js";
@@ -28,6 +30,7 @@ import { shouldWarmImportProjectedAccount, type SqlFederationStore } from "./db/
 import type { SqlRequestUsageStore } from "./db/sql-request-usage-store.js";
 import type { SqlAuthPersistence } from "./auth/sql-persistence.js";
 import { DEFAULT_TENANT_ID, normalizeTenantId } from "./tenant-api-key.js";
+import { createFederationBridgeRelay, type FederationBridgeRelay } from "./federation/bridge-relay.js";
 
 interface UiRouteDependencies {
   readonly config: ProxyConfig;
@@ -2285,7 +2288,7 @@ function inferBaseUrl(request: {
   return `${protocol}://${host}`;
 }
 
-export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDependencies): Promise<void> {
+export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDependencies): Promise<FederationBridgeRelay> {
   const sessionStore = new SessionStore(resolve(process.cwd(), "data/sessions.json"));
   const sessionIndex = new ChromaSessionIndex({
     url: process.env.CHROMA_URL ?? "http://127.0.0.1:8000",
@@ -2334,6 +2337,97 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
   const hostDashboardRuntimeRoot = process.env.HOST_DASHBOARD_RUNTIME_ROOT?.trim() || undefined;
   const hostDashboardRequestTimeoutMs = toSafeLimit(process.env.HOST_DASHBOARD_REQUEST_TIMEOUT_MS, 5000, 60_000);
   const federationRequestTimeoutMs = toSafeLimit(process.env.FEDERATION_REQUEST_TIMEOUT_MS, 5000, 60_000);
+  const bridgeRelay = createFederationBridgeRelay();
+
+  const readHeaderValue = (value: string | readonly string[] | undefined): string | undefined => {
+    if (typeof value === "string") {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value[0];
+    }
+    return undefined;
+  };
+
+  const resolveBridgeUpgradeAuth = async (request: IncomingMessage): Promise<ResolvedRequestAuth | undefined> => {
+    const authorization = readHeaderValue(request.headers.authorization);
+    const cookieHeader = readHeaderValue(request.headers.cookie);
+    return resolveRequestAuth({
+      allowUnauthenticated: false,
+      proxyAuthToken: deps.config.proxyAuthToken,
+      authorization,
+      cookieToken: readCookieValue(cookieHeader, "open_hax_proxy_auth_token"),
+      oauthAccessToken: readCookieValue(cookieHeader, "proxy_auth"),
+      resolveTenantApiKey: deps.sqlCredentialStore
+        ? async (token) => deps.sqlCredentialStore!.resolveTenantApiKey(token, deps.config.proxyTokenPepper)
+        : undefined,
+      resolveUiSession: deps.sqlCredentialStore && deps.authPersistence
+        ? async (token) => {
+            const accessToken = await deps.authPersistence!.getAccessToken(token);
+            if (!accessToken) {
+              return undefined;
+            }
+
+            const activeTenantId = typeof accessToken.extra?.activeTenantId === "string"
+              ? accessToken.extra.activeTenantId
+              : undefined;
+            return deps.sqlCredentialStore!.resolveUiSession(accessToken.subject, activeTenantId);
+          }
+        : undefined,
+    });
+  };
+
+  const bridgeUpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    if (pathname !== "/api/ui/federation/bridge/ws") {
+      bridgeRelay.rejectUpgrade(socket, 404, { error: "not_found" });
+      return;
+    }
+
+    void (async () => {
+      // CSRF protection: reject cross-origin WebSocket upgrades
+      const origin = request.headers.origin;
+      const forwardedHost = request.headers["x-forwarded-host"] ?? request.headers.host ?? "localhost";
+      const allowedOrigins = new Set([
+        `http://localhost`,
+        `http://127.0.0.1`,
+        `http://${forwardedHost}`,
+        `https://${forwardedHost}`,
+      ]);
+      if (origin && !allowedOrigins.has(origin) && !origin.startsWith("http://localhost:") && !origin.startsWith("http://127.0.0.1:")) {
+        bridgeRelay.rejectUpgrade(socket, 403, { error: "invalid_origin" });
+        return;
+      }
+
+      const auth = await resolveBridgeUpgradeAuth(request);
+      if (!auth) {
+        bridgeRelay.rejectUpgrade(socket, 401, { error: "unauthorized" });
+        return;
+      }
+      if (!authCanManageFederation(auth)) {
+        bridgeRelay.rejectUpgrade(socket, 403, { error: "forbidden" });
+        return;
+      }
+
+      bridgeRelay.handleAuthorizedUpgrade(request, socket, head, {
+        authKind: auth.kind === "legacy_admin" ? "legacy_admin" : "ui_session",
+        subject: auth.subject,
+        tenantId: auth.tenantId,
+      });
+    })().catch((error) => {
+      app.log.warn(
+        { error: error instanceof Error ? error.message : String(error) },
+        "failed to authorize federation bridge upgrade",
+      );
+      bridgeRelay.rejectUpgrade(socket, 401, { error: "unauthorized" });
+    });
+  };
+
+  app.server.on("upgrade", bridgeUpgradeHandler);
+  app.addHook("onClose", async () => {
+    app.server.off("upgrade", bridgeUpgradeHandler);
+    await bridgeRelay.close();
+  });
 
   const loadCachedMcpSeeds = async () => {
     const now = Date.now();
@@ -2775,6 +2869,57 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
       publicBaseUrl: process.env.FEDERATION_SELF_PUBLIC_BASE_URL ?? null,
       peerCount,
     });
+  });
+
+  app.get("/api/ui/federation/bridge/ws", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    reply.code(426).header("upgrade", "websocket").send({ error: "websocket_upgrade_required" });
+  });
+
+  app.get("/api/ui/federation/bridges", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    // Scope bridge sessions to the authenticated tenant for non-global admins.
+    // legacy_admin has global visibility; ui_session users see only their tenant's sessions.
+    const isGlobalAdmin = auth?.kind === "legacy_admin" || auth?.role === "owner";
+    const allSessions = bridgeRelay.listSessions();
+    const sessions = isGlobalAdmin
+      ? allSessions
+      : allSessions.filter((session) => session.tenantId === auth?.tenantId);
+
+    reply.send({ sessions });
+  });
+
+  app.get<{ Params: { readonly sessionId: string } }>("/api/ui/federation/bridges/:sessionId", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    const session = bridgeRelay.getSession(request.params.sessionId);
+    if (!session) {
+      reply.code(404).send({ error: "bridge_session_not_found" });
+      return;
+    }
+
+    // Scope single session access to authenticated tenant
+    const isGlobalAdmin = auth?.kind === "legacy_admin" || auth?.role === "owner";
+    if (!isGlobalAdmin && session.tenantId !== auth?.tenantId) {
+      reply.code(404).send({ error: "bridge_session_not_found" });
+      return;
+    }
+
+    reply.send({ session });
   });
 
   app.post<{
@@ -3987,4 +4132,6 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
     await deps.eventStore.removeTag(request.params.id, tag);
     reply.send({ ok: true });
   });
+
+  return bridgeRelay;
 }

@@ -24,6 +24,7 @@ import {
   filterResponsesApiRoutes,
   filterImagesApiRoutes,
   minMsUntilAnyProviderKeyReady,
+  parseModelIdsFromCatalogPayload,
   resolveProviderRoutesForModel,
   resolveRequestRoutingState,
   type ProviderRoute,
@@ -74,12 +75,14 @@ import { SqlRequestUsageStore } from "./lib/db/sql-request-usage-store.js";
 import { SqlFederationStore, shouldWarmImportProjectedAccount, type FederationPeerRecord, type FederationProjectedAccountRecord } from "./lib/db/sql-federation-store.js";
 import { SqlAuthPersistence } from "./lib/auth/sql-persistence.js";
 import { SqlGitHubAllowlist } from "./lib/auth/github-allowlist.js";
-import { seedFromJsonFile, seedFromJsonValue, seedFactoryAuthFromFiles, seedModelsFromFile, loadModelsFromDb, getConfig, setConfig } from "./lib/db/json-seeder.js";
+import { seedFromJsonFile, seedFromJsonValue, seedFactoryAuthFromFiles, seedModelsFromFile } from "./lib/db/json-seeder.js";
 import { registerOAuthRoutes } from "./lib/oauth-routes.js";
 import { RuntimeCredentialStore } from "./lib/runtime-credential-store.js";
 import { TokenRefreshManager } from "./lib/token-refresh-manager.js";
 import { DEFAULT_TENANT_ID } from "./lib/tenant-api-key.js";
 import { resolveRequestAuth } from "./lib/request-auth.js";
+import { createEnvFederationBridgeAgent } from "./lib/federation/bridge-agent-autostart.js";
+import type { FederationBridgeRelay } from "./lib/federation/bridge-relay.js";
 
 interface ChatCompletionRequest {
   readonly model?: string;
@@ -1154,6 +1157,220 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     return resolved.catalog;
   }
 
+  let bridgeRelay: FederationBridgeRelay | undefined;
+
+  async function getBridgeAdvertisedModelIds(): Promise<string[]> {
+    if (!bridgeRelay) {
+      return [];
+    }
+
+    const connectedSessions = bridgeRelay.listSessions().filter((session) => session.state === "connected");
+    if (connectedSessions.length === 0) {
+      return [];
+    }
+
+    // Prefer advertised capabilities when available (avoids fan-out overhead).
+    // Fall back to /v1/models fan-out when capabilities are not yet advertised.
+    const advertisedModels = new Set<string>();
+    for (const session of connectedSessions) {
+      for (const capability of session.capabilities) {
+        for (const model of capability.models) {
+          advertisedModels.add(model);
+        }
+      }
+    }
+
+    if (advertisedModels.size > 0) {
+      return [...advertisedModels];
+    }
+
+    // Fallback: fan-out /v1/models to each connected session when capabilities not advertised
+    const remoteModelLists = await Promise.all(connectedSessions.map(async (session) => {
+      try {
+        const response = await bridgeRelay!.requestJson(session.sessionId, {
+          path: "/v1/models",
+          timeoutMs: Math.min(config.requestTimeoutMs, 10_000),
+          headers: { accept: "application/json" },
+        });
+        return parseModelIdsFromCatalogPayload(response.json);
+      } catch (error) {
+        app.log.warn({ error: toErrorMessage(error), sessionId: session.sessionId }, "failed to fetch bridge model inventory from connected session");
+        return [];
+      }
+    }));
+
+    return [...new Set(remoteModelLists.flat())];
+  }
+
+  async function getMergedModelIds(forceRefresh = false): Promise<string[]> {
+    const localCatalog = await getResolvedModelCatalog(forceRefresh);
+    const bridgedModels = await getBridgeAdvertisedModelIds();
+    return [...new Set([...localCatalog.modelIds, ...bridgedModels])];
+  }
+
+  async function executeBridgeRequestFallback(input: {
+    readonly requestHeaders: Record<string, unknown>;
+    readonly requestBody: Record<string, unknown>;
+    readonly requestAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly subject?: string };
+    readonly upstreamPath: string;
+    readonly reply: FastifyReply;
+    readonly timeoutMs: number;
+  }): Promise<boolean> {
+    if (!bridgeRelay) {
+      return false;
+    }
+
+    // Reject multi-hop bridge routing to prevent request loops
+    const hopCount = resolveFederationHopCount(input.requestHeaders);
+    if (hopCount >= 1) {
+      app.log.warn({ hopCount, upstreamPath: input.upstreamPath }, "bridge request rejected: hop limit exceeded");
+      return false;
+    }
+
+    const ownerSubject = resolveFederationOwnerSubject({
+      headers: input.requestHeaders,
+      requestAuth: input.requestAuth,
+      hopCount,
+    });
+    if (!ownerSubject) {
+      return false;
+    }
+
+    // Filter connected sessions by advertised capability for the requested path
+    const normalizedPath = input.upstreamPath.split("?")[0]!;
+    const connectedSessions = bridgeRelay.listSessions()
+      .filter((session) => session.state === "connected")
+      .filter((session) => session.ownerSubject === ownerSubject)
+      .filter((session) => {
+        // Check if session advertises capability for this path
+        const hasCapability = session.capabilities.some((cap) => {
+          const pathPrefixes = ["/v1/chat/completions", "/v1/models", "/v1/responses", "/v1/embeddings", "/v1/images/generations"];
+          return pathPrefixes.some((prefix) => normalizedPath.startsWith(prefix));
+        });
+        return hasCapability;
+      });
+    if (connectedSessions.length === 0) {
+      return false;
+    }
+
+    const bodyText = JSON.stringify(input.requestBody);
+
+    for (const session of connectedSessions) {
+      try {
+        const response = await bridgeRelay.requestJson(session.sessionId, {
+          method: "POST",
+          path: input.upstreamPath,
+          timeoutMs: input.timeoutMs,
+          headers: {
+            accept: typeof input.requestHeaders.accept === "string" ? input.requestHeaders.accept : "application/json",
+            "content-type": "application/json",
+          },
+          body: bodyText,
+        });
+
+        for (const [name, value] of Object.entries(response.headers)) {
+          if (name.toLowerCase() === "content-length") {
+            continue;
+          }
+          input.reply.header(name, value);
+        }
+        input.reply.header(FEDERATION_OWNER_SUBJECT_HEADER, ownerSubject);
+        input.reply.header(FEDERATION_ROUTED_PEER_HEADER, `bridge:${session.clusterId}:${session.agentId}`);
+        input.reply.code(response.status);
+
+        const contentType = response.headers["content-type"] ?? response.headers["Content-Type"] ?? "";
+        const parsed = typeof contentType === "string" && contentType.toLowerCase().includes("application/json")
+          ? parseJsonIfPossible(response.body)
+          : undefined;
+        if (parsed !== undefined) {
+          input.reply.send(parsed);
+        } else {
+          input.reply.send(response.body);
+        }
+        return true;
+      } catch (error) {
+        app.log.warn({ error: toErrorMessage(error), sessionId: session.sessionId, upstreamPath: input.upstreamPath }, "bridged request attempt failed");
+      }
+    }
+
+    return false;
+  }
+
+  const handleBridgeRequest = async (input: {
+    readonly method: string;
+    readonly path: string;
+    readonly headers: Readonly<Record<string, string>>;
+    readonly bodyText: string;
+    readonly ownerSubject: string;
+  }): Promise<{
+    readonly status: number;
+    readonly headers?: Readonly<Record<string, string>>;
+    readonly body?: string;
+    readonly encoding?: "utf8" | "base64";
+  }> => {
+    // Security: restrict bridge requests to allowed API paths only.
+    // This prevents the bridge from acting as a privileged generic proxy
+    // that could access internal routes like /api/ui/federation/accounts.
+    const allowedBridgePaths = [
+      "/v1/chat/completions",
+      "/v1/models",
+      "/v1/responses",
+      "/v1/embeddings",
+      "/v1/images/generations",
+    ];
+    const normalizedPath = input.path.split("?")[0]!;
+    if (!allowedBridgePaths.some((prefix) => normalizedPath.startsWith(prefix))) {
+      app.log.warn({ path: input.path, ownerSubject: input.ownerSubject }, "bridge request rejected: path not in allowed list");
+      return {
+        status: 403,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ error: { message: "Bridge requests are restricted to model API paths", type: "invalid_request_error" } }),
+      };
+    }
+
+    const headers: Record<string, string> = {
+      accept: input.headers.accept ?? "application/json",
+      // Use a dedicated bridge identity header instead of the global admin token.
+      // This prevents the bridge from becoming a privileged proxy with admin access.
+      "x-open-hax-bridge-auth": "internal",
+      [FEDERATION_HOP_HEADER]: "1",
+      [FEDERATION_OWNER_SUBJECT_HEADER]: input.ownerSubject,
+    };
+    if (typeof input.headers["content-type"] === "string") {
+      headers["content-type"] = input.headers["content-type"];
+    }
+
+    const injected = await app.inject({
+      method: input.method as "GET" | "POST",
+      url: input.path,
+      headers,
+      payload: input.bodyText.length > 0 ? input.bodyText : undefined,
+    });
+
+    const responseHeaders: Record<string, string> = {};
+    for (const [name, value] of Object.entries(injected.headers)) {
+      if (typeof value === "string") {
+        responseHeaders[name] = value;
+      }
+    }
+
+    return {
+      status: injected.statusCode,
+      headers: responseHeaders,
+      body: injected.body,
+      encoding: "utf8",
+    };
+  };
+
+  const bridgeAgent = createEnvFederationBridgeAgent({
+    config,
+    keyPool,
+    credentialStore: runtimeCredentialStore,
+    logger: app.log,
+    getResolvedModelCatalog: () => getResolvedModelCatalog(false),
+    handleBridgeRequest,
+  });
+
   function shouldRejectModelFromProviderCatalog(
     providerRoutes: readonly ProviderRoute[],
     routedModel: string,
@@ -1216,6 +1433,17 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     const allowUiSessionAuth = rawPath.startsWith("/api/ui/") || rawPath.startsWith("/auth/");
 
     if (allowUnauthenticatedRoute) {
+      return;
+    }
+
+    // Allow internal bridge requests via dedicated header (no admin token required)
+    const bridgeAuthHeader = request.headers["x-open-hax-bridge-auth"];
+    if (bridgeAuthHeader === "internal" && request.headers[FEDERATION_OWNER_SUBJECT_HEADER]) {
+      // Bridge internal request - authenticate as legacy_admin equivalent for model API routes
+      (request as any).openHaxAuth = {
+        kind: "legacy_admin",
+        subject: String(request.headers[FEDERATION_OWNER_SUBJECT_HEADER]),
+      };
       return;
     }
 
@@ -1413,16 +1641,16 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   });
 
   app.get("/v1/models", async (_request, reply) => {
-    const catalog = await getResolvedModelCatalog();
+    const modelIds = await getMergedModelIds();
     reply.send({
       object: "list",
-      data: catalog.modelIds.map(toOpenAiModel)
+      data: modelIds.map(toOpenAiModel)
     });
   });
 
   app.get<{ Params: { model: string } }>("/v1/models/:model", async (request, reply) => {
-    const catalog = await getResolvedModelCatalog();
-    const model = catalog.modelIds.find((entry) => entry === request.params.model);
+    const modelIds = await getMergedModelIds();
+    const model = modelIds.find((entry) => entry === request.params.model);
     if (!model) {
       sendOpenAiError(reply, 404, `Model not found: ${request.params.model}`, "invalid_request_error", "model_not_found");
       return;
@@ -1432,8 +1660,8 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   });
 
   app.get("/api/tags", async (_request, reply) => {
-    const catalog = await getResolvedModelCatalog();
-    reply.send(modelIdsToNativeTags(catalog.modelIds));
+    const modelIds = await getMergedModelIds();
+    reply.send(modelIdsToNativeTags(modelIds));
   });
 
   app.post<{ Body: WebSearchToolRequest }>("/api/tools/websearch", async (request, reply) => {
@@ -1745,6 +1973,18 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       timeoutMs: context.upstreamAttemptTimeoutMs,
     });
     if (federatedChatHandled) {
+      return;
+    }
+
+    const bridgedChatHandled = await executeBridgeRequestFallback({
+      requestHeaders: request.headers,
+      requestBody,
+      requestAuth: (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly subject?: string } }).openHaxAuth,
+      upstreamPath: "/v1/chat/completions",
+      reply,
+      timeoutMs: context.upstreamAttemptTimeoutMs,
+    });
+    if (bridgedChatHandled) {
       return;
     }
 
@@ -2398,7 +2638,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     reply.send(bridgeResponse.body);
   });
 
-  await registerUiRoutes(app, {
+  bridgeRelay = await registerUiRoutes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -2429,7 +2669,18 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     });
   }
 
+  if (bridgeAgent) {
+    void bridgeAgent.start().then(() => {
+      app.log.info({ snapshot: bridgeAgent.snapshot() }, "federation bridge agent connected");
+    }).catch((error) => {
+      app.log.warn({ error: toErrorMessage(error) }, "federation bridge agent initial connect failed; reconnect loop will continue in background");
+    });
+  }
+
   app.addHook("onClose", async () => {
+    if (bridgeAgent) {
+      await bridgeAgent.stop();
+    }
     await tokenRefreshManager.stopAndWait();
 
     if (accountHealthStore) {
