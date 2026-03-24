@@ -46,6 +46,8 @@ Similar validation, error handling, and response formatting repeated across rout
 ```typescript
 // src/routes/ui/types.ts
 export interface UIRouteGroup {
+  name: string;
+  priority?: number;               // Lower = earlier registration (default: 50)
   prefix: string;
   register(app: FastifyInstance, deps: UIRouteDependencies): Promise<void>;
 }
@@ -265,13 +267,7 @@ src/
 ### Route Order Dependencies
 Some routes may depend on registration order (e.g., static files vs API routes).
 
-**Mitigation:** Explicit priority ordering in route groups:
-```typescript
-export interface UIRouteGroup {
-  priority: number; // Lower = earlier
-  // ...
-}
-```
+**Mitigation:** The `UIRouteGroup` interface (defined in Phase 1.1) includes an optional `priority` field for ordering. Lower values register earlier.
 
 ### Shared State Between Routes
 Routes currently share closures over `keyPool`, `requestLogStore`, etc.
@@ -307,3 +303,20 @@ export const usageOverviewSchema = {
 - Feature flag `USE_MODULAR_UI_ROUTES` allows instant switch back
 - Old routes preserved behind flag
 - Response-compatibility tests compare both implementations
+
+## Lint Threshold Enforcement
+
+Each phase should update ESLint thresholds to enforce progress:
+
+| Phase | Target | ESLint Rule Changes |
+|-------|--------|---------------------|
+| P1 | registerUiRoutes <600 lines | `max-lines-per-function: [600, "error"]` for ui-routes.ts |
+| P2 | registerUiRoutes <300 lines | Lower threshold, `max-lines: [2000, "warn"]` for file |
+| P3 | registerUiRoutes <100 lines | Final thresholds: `max-lines-per-function: [100]`, `max-lines: [1000]` |
+
+**Function-Specific Thresholds:**
+- `buildUsageOverviewFromEntries`: Add complexity/function-lines to worst-offenders
+- `buildUsageOverview`: Add cognitive complexity threshold
+- `sanitizeFederationUsageEntry`: Add cyclomatic complexity threshold (~61 → target <20)
+
+**Checkpoint:** Update `eslint.config.mjs` worst-offenders for `ui-routes.ts` after each extraction.
