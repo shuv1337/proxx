@@ -249,6 +249,23 @@ test("resolveRequestRoutingState does not set factoryPrefixed for non-factory mo
   );
 });
 
+test("resolveRequestRoutingState does not classify gpt mini models as local ollama", async () => {
+  await withEnv(
+    {
+      PROXY_AUTH_TOKEN: "test-token",
+    },
+    () => {
+      const config = loadConfig("/tmp/factory-config-test");
+      const state = resolveRequestRoutingState(config, "gpt-5.4-mini");
+
+      assert.equal(state.localOllama, false);
+      assert.equal(state.explicitOllama, false);
+      assert.equal(state.openAiPrefixed, false);
+      assert.equal(state.routedModel, "gpt-5.4-mini");
+    },
+  );
+});
+
 // --- Factory auth.v2 decryption ---
 
 test("decryptAuthV2 correctly decrypts AES-256-GCM encrypted credentials", () => {

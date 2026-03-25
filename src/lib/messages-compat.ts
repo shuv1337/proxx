@@ -574,6 +574,7 @@ export function chatRequestToMessagesRequest(body: Record<string, unknown>): Rec
   let system: string | undefined;
   const messages: Record<string, unknown>[] = [];
   let pendingToolResults: Record<string, unknown>[] = [];
+  const shouldStream = body["stream"] === true;
 
   const flushToolResults = () => {
     if (pendingToolResults.length === 0) {
@@ -634,7 +635,7 @@ export function chatRequestToMessagesRequest(body: Record<string, unknown>): Rec
   const payload: Record<string, unknown> = {
     model: body["model"],
     messages,
-    stream: false
+    stream: shouldStream
   };
 
   if (system && system.trim().length > 0) {
@@ -732,6 +733,284 @@ function extractReasoningContent(content: unknown): string {
       return "";
     })
     .join("");
+}
+
+interface MessagesStreamTranslatorOptions {
+  readonly fallbackModel: string;
+  readonly writeFn: (data: string) => void;
+}
+
+export async function streamMessagesSseToChatCompletionChunks(
+  body: ReadableStream<Uint8Array>,
+  options: MessagesStreamTranslatorOptions,
+): Promise<{ sawError: Record<string, unknown> | null }> {
+  const { fallbackModel, writeFn } = options;
+  const decoder = new TextDecoder();
+
+  let responseId = `chatcmpl_${Date.now()}`;
+  let createdAt = Math.floor(Date.now() / 1000);
+  let model = fallbackModel;
+  let isFirstChunk = true;
+  let hasToolCalls = false;
+  let sawError: Record<string, unknown> | null = null;
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
+  let buffer = "";
+
+  function emitChunk(delta: Record<string, unknown>, finishReason: string | null): void {
+    const chunk = {
+      id: responseId,
+      object: "chat.completion.chunk",
+      created: createdAt,
+      model,
+      choices: [{ index: 0, delta, finish_reason: finishReason }],
+    };
+    writeFn(`data: ${JSON.stringify(chunk)}\n\n`);
+  }
+
+  function emitUsageAndDone(finishReason: string): void {
+    if (inputTokens !== undefined && outputTokens !== undefined) {
+      const usageChunk = {
+        id: responseId,
+        object: "chat.completion.chunk",
+        created: createdAt,
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+        usage: {
+          prompt_tokens: inputTokens,
+          completion_tokens: outputTokens,
+          total_tokens: inputTokens + outputTokens,
+        },
+      };
+      writeFn(`data: ${JSON.stringify(usageChunk)}\n\n`);
+      writeFn("data: [DONE]\n\n");
+      return;
+    }
+
+    emitChunk({}, finishReason);
+    writeFn("data: [DONE]\n\n");
+  }
+
+  function processEvent(payload: Record<string, unknown>): boolean {
+    const type = asString(payload["type"]);
+    if (!type) {
+      return false;
+    }
+
+    if (type === "error") {
+      sawError = isRecord(payload["error"]) ? payload["error"] : payload;
+      return true;
+    }
+
+    if (type === "message_start") {
+      const message = isRecord(payload["message"]) ? payload["message"] : null;
+      if (message) {
+        const messageId = asString(message["id"]);
+        if (messageId) {
+          responseId = messageId;
+        }
+        const responseModel = asString(message["model"]);
+        if (responseModel) {
+          model = responseModel;
+        }
+        const usage = isRecord(message["usage"]) ? message["usage"] : null;
+        const nextInputTokens = usage ? asNumber(usage["input_tokens"]) : undefined;
+        const nextOutputTokens = usage ? asNumber(usage["output_tokens"]) : undefined;
+        if (nextInputTokens !== undefined) {
+          inputTokens = nextInputTokens;
+        }
+        if (nextOutputTokens !== undefined) {
+          outputTokens = nextOutputTokens;
+        }
+      }
+      return false;
+    }
+
+    if (type === "content_block_delta") {
+      const delta = isRecord(payload["delta"]) ? payload["delta"] : null;
+      const deltaType = delta ? asString(delta["type"]) : undefined;
+
+      if (deltaType === "text_delta") {
+        const text = delta ? asString(delta["text"]) : undefined;
+        if (text && text.length > 0) {
+          const chunkDelta: Record<string, unknown> = { content: text };
+          if (isFirstChunk) {
+            chunkDelta["role"] = "assistant";
+            isFirstChunk = false;
+          }
+          emitChunk(chunkDelta, null);
+        }
+        return false;
+      }
+
+      if (deltaType === "thinking_delta") {
+        const thinking = delta ? asString(delta["thinking"]) ?? asString(delta["text"]) : undefined;
+        if (thinking && thinking.length > 0) {
+          const chunkDelta: Record<string, unknown> = { reasoning_content: thinking };
+          if (isFirstChunk) {
+            chunkDelta["role"] = "assistant";
+            isFirstChunk = false;
+          }
+          emitChunk(chunkDelta, null);
+        }
+        return false;
+      }
+
+      if (deltaType === "input_json_delta") {
+        const partialJson = delta ? asString(delta["partial_json"]) : undefined;
+        if (partialJson && partialJson.length > 0) {
+          const index = asNumber(payload["index"]) ?? 0;
+          hasToolCalls = true;
+          const chunkDelta: Record<string, unknown> = {
+            tool_calls: [{
+              index,
+              function: { arguments: partialJson },
+            }],
+          };
+          if (isFirstChunk) {
+            chunkDelta["role"] = "assistant";
+            isFirstChunk = false;
+          }
+          emitChunk(chunkDelta, null);
+        }
+        return false;
+      }
+
+      return false;
+    }
+
+    if (type === "content_block_start") {
+      const index = asNumber(payload["index"]) ?? 0;
+      const block = isRecord(payload["content_block"]) ? payload["content_block"] : null;
+      const blockType = block ? asString(block["type"]) : undefined;
+
+      if (blockType === "tool_use") {
+        const name = block ? asString(block["name"]) ?? "" : "";
+        const callId = block ? asString(block["id"]) ?? `call_${index}` : `call_${index}`;
+        hasToolCalls = true;
+        const chunkDelta: Record<string, unknown> = {
+          tool_calls: [{
+            index,
+            id: callId,
+            type: "function",
+            function: { name, arguments: "" },
+          }],
+        };
+        if (isFirstChunk) {
+          chunkDelta["role"] = "assistant";
+          isFirstChunk = false;
+        }
+        emitChunk(chunkDelta, null);
+      }
+
+      return false;
+    }
+
+    if (type === "message_delta") {
+      const usage = isRecord(payload["usage"]) ? payload["usage"] : null;
+      const nextOutputTokens = usage ? asNumber(usage["output_tokens"]) : undefined;
+      if (nextOutputTokens !== undefined) {
+        outputTokens = nextOutputTokens;
+      }
+      return false;
+    }
+
+    if (type === "message_stop") {
+      if (isFirstChunk) {
+        emitChunk({ role: "assistant", content: "" }, null);
+        isFirstChunk = false;
+      }
+      emitUsageAndDone(hasToolCalls ? "tool_calls" : "stop");
+      return true;
+    }
+
+    return false;
+  }
+
+  const SSE_BLOCK_SEP = /\r?\n\r?\n/;
+
+  function drainBuffer(): boolean {
+    let shouldStop = false;
+    while (!shouldStop) {
+      const match = buffer.match(SSE_BLOCK_SEP);
+      if (!match || match.index === undefined) {
+        break;
+      }
+
+      const sepIdx = match.index;
+      const block = buffer.slice(0, sepIdx);
+      buffer = buffer.slice(sepIdx + match[0].length);
+
+      const dataLines = block
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+      if (dataLines.length === 0) {
+        continue;
+      }
+
+      const data = dataLines.join("\n").trim();
+      if (data.length === 0 || data === "[DONE]") {
+        continue;
+      }
+
+      try {
+        const parsed: unknown = JSON.parse(data);
+        if (isRecord(parsed)) {
+          shouldStop = processEvent(parsed);
+        }
+      } catch {
+        // Skip malformed events.
+      }
+    }
+
+    return shouldStop;
+  }
+
+  const reader = body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      if (drainBuffer()) {
+        return { sawError };
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (buffer.trim().length > 0) {
+    const dataLines = buffer
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim());
+    const data = dataLines.join("\n").trim();
+    if (data.length > 0 && data !== "[DONE]") {
+      try {
+        const parsed: unknown = JSON.parse(data);
+        if (isRecord(parsed)) {
+          const shouldStop = processEvent(parsed);
+          if (shouldStop) {
+            return { sawError };
+          }
+        }
+      } catch {
+        // Skip malformed trailing event.
+      }
+    }
+  }
+
+  if (isFirstChunk) {
+    emitChunk({ role: "assistant", content: "" }, null);
+  }
+  emitUsageAndDone(hasToolCalls ? "tool_calls" : "stop");
+  return { sawError };
 }
 
 interface ChatToolCall {

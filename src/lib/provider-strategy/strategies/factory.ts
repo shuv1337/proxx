@@ -6,6 +6,7 @@ import { copyUpstreamHeaders } from "../../proxy.js";
 import {
   chatRequestToMessagesRequest,
   messagesToChatCompletion,
+  streamMessagesSseToChatCompletionChunks,
 } from "../../messages-compat.js";
 import {
   chatRequestToResponsesRequest,
@@ -161,6 +162,56 @@ export class FactoryMessagesProviderStrategy extends TransformedJsonProviderStra
     for (const [name, value] of Object.entries(anthropicHeaders)) {
       headers.set(name, value);
     }
+  }
+
+  public override async handleProviderAttempt(
+    reply: FastifyReply,
+    upstreamResponse: Response,
+    context: ProviderAttemptContext,
+  ): Promise<ProviderAttemptOutcome> {
+    const contentType = upstreamResponse.headers.get("content-type") ?? "";
+    const looksLikeEventStream = contentType.toLowerCase().includes("text/event-stream")
+      || contentType.length === 0;
+
+    if (!upstreamResponse.ok) {
+      return this.handleStandardProviderAttempt(reply, upstreamResponse, context);
+    }
+
+    if (context.clientWantsStream && looksLikeEventStream && upstreamResponse.body) {
+      reply.header("x-open-hax-upstream-provider", context.providerId);
+      reply.code(200);
+      reply.header("content-type", "text/event-stream; charset=utf-8");
+      reply.header("cache-control", "no-cache");
+      reply.header("x-accel-buffering", "no");
+      reply.hijack();
+      const rawResponse = reply.raw;
+      rawResponse.statusCode = 200;
+      for (const [name, value] of Object.entries(reply.getHeaders())) {
+        if (value !== undefined) {
+          rawResponse.setHeader(name, value as never);
+        }
+      }
+      rawResponse.flushHeaders();
+
+      try {
+        const result = await streamMessagesSseToChatCompletionChunks(
+          upstreamResponse.body,
+          { fallbackModel: context.routedModel, writeFn: (data) => rawResponse.write(data) },
+        );
+        if (result.sawError && !rawResponse.writableEnded) {
+          rawResponse.end();
+          return { kind: "handled" };
+        }
+      } catch {
+        // Stream read error — close gracefully.
+      }
+      if (!rawResponse.writableEnded) {
+        rawResponse.end();
+      }
+      return { kind: "handled" };
+    }
+
+    return super.handleProviderAttempt(reply, upstreamResponse, context);
   }
 
   protected convertResponseToChatCompletion(upstreamJson: unknown, routedModel: string): Record<string, unknown> {

@@ -1198,6 +1198,71 @@ test("does not misclassify gemini models as local ollama because they contain mi
   );
 });
 
+test("does not misclassify gpt mini models as local ollama because they end with mini", async () => {
+  const observedPaths: string[] = [];
+
+  await withProxyApp(
+    {
+      keys: ["key-a"],
+      upstreamHandler: async (request) => {
+        observedPaths.push(request.url ?? "");
+
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            id: "resp-gpt-mini",
+            object: "response",
+            created_at: 1772916803,
+            model: "gpt-5.4-mini",
+            output: [
+              {
+                id: "msg-gpt-mini",
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: "gpt-mini-ok"
+                  }
+                ]
+              }
+            ]
+          })
+        };
+      }
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "gpt-5.4-mini",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.headers["x-open-hax-upstream-mode"], "responses");
+      assert.deepEqual(observedPaths, ["/v1/responses"]);
+
+      const payload: unknown = response.json();
+      assert.ok(isRecord(payload));
+      assert.equal(payload.object, "chat.completion");
+      assert.ok(Array.isArray(payload.choices));
+      assert.ok(isRecord(payload.choices[0]));
+      assert.ok(isRecord(payload.choices[0].message));
+      assert.equal(payload.choices[0].message.content, "gpt-mini-ok");
+    }
+  );
+});
+
 test("falls back from vivgrid to ollama-cloud for shared models when primary provider auth fails", async () => {
   const observedAuth: string[] = [];
 

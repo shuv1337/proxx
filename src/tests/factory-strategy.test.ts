@@ -1039,7 +1039,92 @@ test("factory claude requests translate chat format to Anthropic Messages format
           // Anthropic Messages format should have model and messages
           assert.equal(parsedBody["model"], "claude-opus-4-5");
           assert.ok(Array.isArray(parsedBody["messages"]));
-          assert.equal(parsedBody["stream"], false); // Messages format sets stream: false
+          assert.equal(parsedBody["stream"], false);
+        },
+      );
+    },
+  );
+});
+
+test("factory claude streaming preserves stream=true and forwards incremental SSE", { concurrency: false }, async () => {
+  let capturedBody = "";
+
+  await withEnv(
+    {
+      FACTORY_API_KEY: "fk-test-key", // pragma: allowlist secret
+      FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
+      FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: { providers: {} },
+          upstreamHandler: async (_request, body) => {
+            capturedBody = body;
+
+            return {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+              body: [
+                `event: message_start\ndata: ${JSON.stringify({
+                  type: "message_start",
+                  message: {
+                    id: "msg_stream_123",
+                    type: "message",
+                    role: "assistant",
+                    model: "claude-opus-4-6-fast",
+                    content: [],
+                    usage: { input_tokens: 12, output_tokens: 1 },
+                  },
+                })}\n\n`,
+                `event: content_block_start\ndata: ${JSON.stringify({
+                  type: "content_block_start",
+                  index: 0,
+                  content_block: { type: "text", text: "" },
+                })}\n\n`,
+                `event: content_block_delta\ndata: ${JSON.stringify({
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: { type: "text_delta", text: "Hello" },
+                })}\n\n`,
+                `event: content_block_delta\ndata: ${JSON.stringify({
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: { type: "text_delta", text: " world" },
+                })}\n\n`,
+                `event: message_delta\ndata: ${JSON.stringify({
+                  type: "message_delta",
+                  delta: { stop_reason: "end_turn" },
+                  usage: { output_tokens: 7 },
+                })}\n\n`,
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+              ].join(""),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            payload: {
+              model: "factory/claude-opus-4-6-fast",
+              messages: [{ role: "user", content: "hello" }],
+              stream: true,
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          assert.match(String(response.headers["content-type"]), /text\/event-stream/i);
+
+          const parsedBody = JSON.parse(capturedBody) as Record<string, unknown>;
+          assert.equal(parsedBody["stream"], true);
+
+          assert.ok(response.body.includes('"content":"Hello"'));
+          assert.ok(response.body.includes('"content":" world"'));
+          assert.ok(response.body.includes('"model":"claude-opus-4-6-fast"'));
+          assert.ok(response.body.includes('"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}'));
+          assert.ok(response.body.includes("data: [DONE]"));
         },
       );
     },

@@ -54,6 +54,11 @@ export function hasModelPrefix(model: string, prefixes: readonly string[]): bool
 
 export function shouldUseLocalOllama(model: string, patterns: readonly string[]): boolean {
   const lowered = model.toLowerCase();
+
+  if (lowered.startsWith("gpt-")) {
+    return false;
+  }
+
   for (const pattern of patterns) {
     const normalizedPattern = pattern.toLowerCase();
     if (normalizedPattern.startsWith(":")) {
