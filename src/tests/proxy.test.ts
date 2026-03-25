@@ -220,6 +220,11 @@ async function withPatchedFetch(
   }
 }
 
+function startOfUtcDay(timestampMs: number): number {
+  const date = new Date(timestampMs);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
 test("rotates API key when first key is rate-limited", async () => {
   const observedKeys: string[] = [];
 
@@ -3681,11 +3686,15 @@ test("request-level service tier overrides global fast mode", async () => {
 });
 
 test("weekly dashboard uses persisted daily model/account aggregates and reports incomplete coverage", async () => {
+  const now = Date.now();
+  const latestDayStart = startOfUtcDay(now - 24 * 60 * 60 * 1000);
+  const priorDayStart = latestDayStart - 24 * 60 * 60 * 1000;
+
   const requestLogsPayload = {
     entries: [
       {
         id: "recent-entry",
-        timestamp: Date.now() - 60_000,
+        timestamp: now - 60_000,
         providerId: "openai",
         accountId: "acct-openai",
         authType: "oauth_bearer",
@@ -3705,7 +3714,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
     hourlyBuckets: [],
     dailyBuckets: [
       {
-        startMs: Date.UTC(2026, 2, 17, 0, 0, 0),
+        startMs: priorDayStart,
         requestCount: 5,
         errorCount: 0,
         totalTokens: 1500,
@@ -3724,7 +3733,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
         waterEvaporatedMl: 0.075,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: latestDayStart,
         requestCount: 4,
         errorCount: 1,
         totalTokens: 900,
@@ -3745,7 +3754,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
     ],
     dailyModelBuckets: [
       {
-        startMs: Date.UTC(2026, 2, 17, 0, 0, 0),
+        startMs: priorDayStart,
         providerId: "openai",
         model: "gpt-5.4",
         requestCount: 5,
@@ -3766,7 +3775,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
         waterEvaporatedMl: 0.075,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: latestDayStart,
         providerId: "factory",
         model: "claude-sonnet-4-5",
         requestCount: 4,
@@ -3789,7 +3798,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
     ],
     dailyAccountBuckets: [
       {
-        startMs: Date.UTC(2026, 2, 17, 0, 0, 0),
+        startMs: priorDayStart,
         providerId: "openai",
         accountId: "acct-openai",
         authType: "oauth_bearer",
@@ -3810,13 +3819,13 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
         ttftCount: 5,
         tpsSum: 50,
         tpsCount: 5,
-        lastUsedAtMs: Date.UTC(2026, 2, 17, 12, 0, 0),
+        lastUsedAtMs: priorDayStart + 12 * 60 * 60 * 1000,
         costUsd: 1.5,
         energyJoules: 150,
         waterEvaporatedMl: 0.075,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: latestDayStart,
         providerId: "factory",
         accountId: "acct-factory",
         authType: "oauth_bearer",
@@ -3837,7 +3846,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
         ttftCount: 4,
         tpsSum: 40,
         tpsCount: 4,
-        lastUsedAtMs: Date.UTC(2026, 2, 18, 12, 0, 0),
+        lastUsedAtMs: latestDayStart + 12 * 60 * 60 * 1000,
         costUsd: 0.9,
         energyJoules: 90,
         waterEvaporatedMl: 0.045,
@@ -3941,13 +3950,17 @@ test("/api/ui/me exposes resolved auth context for legacy admin token", async ()
 });
 
 test("provider-model analytics summarizes global models, providers, and provider-model pairs", async () => {
+  const now = Date.now();
+  const latestDayStart = startOfUtcDay(now - 24 * 60 * 60 * 1000);
+  const priorDayStart = latestDayStart - 24 * 60 * 60 * 1000;
+
   const requestLogsPayload = {
     entries: [],
     hourlyBuckets: [],
     dailyBuckets: [],
     dailyModelBuckets: [
       {
-        startMs: Date.UTC(2026, 2, 17, 0, 0, 0),
+        startMs: priorDayStart,
         providerId: "openai",
         model: "gpt-5.4",
         requestCount: 6,
@@ -3967,13 +3980,13 @@ test("provider-model analytics summarizes global models, providers, and provider
         ttftCount: 6,
         tpsSum: 72,
         tpsCount: 6,
-        lastUsedAtMs: Date.UTC(2026, 2, 17, 12, 0, 0),
+        lastUsedAtMs: priorDayStart + 12 * 60 * 60 * 1000,
         costUsd: 1.8,
         energyJoules: 180,
         waterEvaporatedMl: 0.09,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: latestDayStart,
         providerId: "factory",
         model: "gpt-5.4",
         requestCount: 4,
@@ -3993,13 +4006,13 @@ test("provider-model analytics summarizes global models, providers, and provider
         ttftCount: 4,
         tpsSum: 44,
         tpsCount: 4,
-        lastUsedAtMs: Date.UTC(2026, 2, 18, 12, 0, 0),
+        lastUsedAtMs: latestDayStart + 12 * 60 * 60 * 1000,
         costUsd: 1.0,
         energyJoules: 100,
         waterEvaporatedMl: 0.05,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: latestDayStart,
         providerId: "factory",
         model: "claude-sonnet-4-5",
         requestCount: 3,
@@ -4019,7 +4032,7 @@ test("provider-model analytics summarizes global models, providers, and provider
         ttftCount: 3,
         tpsSum: 24,
         tpsCount: 3,
-        lastUsedAtMs: Date.UTC(2026, 2, 18, 15, 0, 0),
+        lastUsedAtMs: latestDayStart + 15 * 60 * 60 * 1000,
         costUsd: 0.9,
         energyJoules: 90,
         waterEvaporatedMl: 0.045,
