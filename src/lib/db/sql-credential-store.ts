@@ -89,7 +89,62 @@ function normalizeAuthType(raw: string): ProviderAuthType {
   return "api_key";
 }
 
-function toProviderCredential(row: AccountRow, authType: ProviderAuthType): ProviderCredential {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function parseJwtClaims(token: string): Record<string, unknown> | undefined {
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(parts[1] ?? "", "base64url").toString("utf8"));
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function deriveOAuthMetadataFromToken(token: string): {
+  readonly email?: string;
+  readonly subject?: string;
+  readonly chatgptAccountId?: string;
+  readonly planType?: string;
+} {
+  const claims = parseJwtClaims(token);
+  if (!claims) {
+    return {};
+  }
+
+  const profile = isRecord(claims["https://api.openai.com/profile"])
+    ? claims["https://api.openai.com/profile"]
+    : undefined;
+  const auth = isRecord(claims["https://api.openai.com/auth"])
+    ? claims["https://api.openai.com/auth"]
+    : undefined;
+
+  const email = (asString(claims.email) ?? asString(profile?.email))?.trim().toLowerCase();
+  const subject = asString(claims.sub)?.trim();
+  const chatgptAccountId = (asString(claims.chatgpt_account_id)
+    ?? asString(auth?.chatgpt_account_id))?.trim();
+  const planType = asString(auth?.chatgpt_plan_type)?.trim().toLowerCase();
+
+  return {
+    email: email && email.length > 0 ? email : undefined,
+    subject: subject && subject.length > 0 ? subject : undefined,
+    chatgptAccountId: chatgptAccountId && chatgptAccountId.length > 0 ? chatgptAccountId : undefined,
+    planType: planType && planType.length > 0 ? planType : undefined,
+  };
+}
+
+function mergeOAuthMetadata(row: AccountRow, authType: ProviderAuthType): ProviderCredential {
+  const derived = authType === "oauth_bearer" ? deriveOAuthMetadataFromToken(row.token) : {};
   return {
     providerId: row.provider_id,
     accountId: row.id,
@@ -97,11 +152,15 @@ function toProviderCredential(row: AccountRow, authType: ProviderAuthType): Prov
     authType,
     refreshToken: row.refresh_token ?? undefined,
     expiresAt: normalizeEpochMilliseconds(row.expires_at ?? undefined),
-    chatgptAccountId: row.chatgpt_account_id ?? undefined,
-    planType: row.plan_type ?? undefined,
-    email: row.email ?? undefined,
-    subject: row.subject ?? undefined,
+    chatgptAccountId: row.chatgpt_account_id ?? derived.chatgptAccountId,
+    planType: row.plan_type ?? derived.planType,
+    email: row.email ?? derived.email,
+    subject: row.subject ?? derived.subject,
   };
+}
+
+function toProviderCredential(row: AccountRow, authType: ProviderAuthType): ProviderCredential {
+  return mergeOAuthMetadata(row, authType);
 }
 
 function maskSecret(secret: string): string {
@@ -183,6 +242,7 @@ export class SqlCredentialStore {
 
   public async init(): Promise<void> {
     await this.runMigrations();
+    await this.backfillOAuthMetadata();
     this.initialized = true;
   }
 
@@ -223,6 +283,31 @@ export class SqlCredentialStore {
   private async ensureDefaultTenant(): Promise<void> {
     const tenantId = normalizeTenantId(this.options.defaultTenantId ?? DEFAULT_TENANT_ID);
     await this.sql.unsafe(UPSERT_TENANT, [tenantId, tenantId, "active"]);
+  }
+
+  private async backfillOAuthMetadata(): Promise<void> {
+    const providerRows = await this.sql.unsafe<ProviderRow[]>(SELECT_ALL_PROVIDERS);
+    const accountRows = await this.sql.unsafe<AccountRow[]>(SELECT_ALL_ACCOUNTS);
+    const authTypeByProvider = new Map<string, ProviderAuthType>(
+      providerRows.map((row) => [row.id, normalizeAuthType(row.auth_type)])
+    );
+
+    for (const row of accountRows) {
+      const authType = authTypeByProvider.get(row.provider_id) ?? "api_key";
+      if (authType !== "oauth_bearer") {
+        continue;
+      }
+
+      const nextAccount = mergeOAuthMetadata(row, authType);
+      if (
+        nextAccount.email !== row.email
+        || nextAccount.subject !== row.subject
+        || nextAccount.chatgptAccountId !== row.chatgpt_account_id
+        || nextAccount.planType !== row.plan_type
+      ) {
+        await this.upsertAccount(nextAccount);
+      }
+    }
   }
 
   public async getStatus(): Promise<SqlCredentialStoreStatus> {

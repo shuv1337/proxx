@@ -201,13 +201,14 @@ function normalizeAccounts(
   providerId: string,
   authType: ProviderAuthType,
   rawAccounts: unknown,
-): NormalizedAccount[] {
+): { accounts: NormalizedAccount[]; backfilled: boolean } {
   if (!Array.isArray(rawAccounts)) {
-    return [];
+    return { accounts: [], backfilled: false };
   }
 
   const uniqueTokens = new Set<string>();
   const accounts: NormalizedAccount[] = [];
+  let backfilled = false;
 
   for (const [index, rawAccount] of rawAccounts.entries()) {
     const token = accountTokenFromRaw(rawAccount, authType);
@@ -239,6 +240,22 @@ function normalizeAccounts(
       ? asString(rawAccount.plan_type) ?? asString(rawAccount.planType) ?? derivedOauthMetadata.planType
       : derivedOauthMetadata.planType;
 
+    if (authType === "oauth_bearer" && isRecord(rawAccount)) {
+      const rawEmail = asString(rawAccount.email);
+      const rawSubject = asString(rawAccount.subject) ?? asString(rawAccount.sub);
+      const rawChatgptAccountId = asString(rawAccount.chatgpt_account_id) ?? asString(rawAccount.chatgptAccountId);
+      const rawPlanType = asString(rawAccount.plan_type) ?? asString(rawAccount.planType);
+
+      if (
+        ((!rawEmail || rawEmail.trim().length === 0) && typeof derivedOauthMetadata.email === "string")
+        || ((!rawSubject || rawSubject.trim().length === 0) && typeof derivedOauthMetadata.subject === "string")
+        || ((!rawChatgptAccountId || rawChatgptAccountId.trim().length === 0) && typeof derivedOauthMetadata.chatgptAccountId === "string")
+        || ((!rawPlanType || rawPlanType.trim().length === 0) && typeof derivedOauthMetadata.planType === "string")
+      ) {
+        backfilled = true;
+      }
+    }
+
     accounts.push({
       id: accountIdFromRaw(providerId, index, rawAccount),
       token,
@@ -252,46 +269,49 @@ function normalizeAccounts(
     });
   }
 
-  return accounts;
+  return { accounts, backfilled };
 }
 
-function normalizeCredentials(raw: unknown, defaultProviderId: string): NormalizedCredentials {
+function normalizeCredentials(raw: unknown, defaultProviderId: string): { credentials: NormalizedCredentials; backfilled: boolean } {
   const providers: Record<string, NormalizedProvider> = {};
   const fallbackProviderId = normalizeProviderId(defaultProviderId, "default");
+  let backfilled = false;
 
   if (Array.isArray(raw)) {
-    const accounts = normalizeAccounts(fallbackProviderId, "api_key", raw);
+    const normalizedAccounts = normalizeAccounts(fallbackProviderId, "api_key", raw);
     providers[fallbackProviderId] = {
       id: fallbackProviderId,
       authType: "api_key",
-      accounts,
+      accounts: normalizedAccounts.accounts,
     };
-    return { providers };
+    return { credentials: { providers }, backfilled: normalizedAccounts.backfilled };
   }
 
   if (isRecord(raw) && Array.isArray(raw.keys)) {
-    const accounts = normalizeAccounts(fallbackProviderId, "api_key", raw.keys);
+    const normalizedAccounts = normalizeAccounts(fallbackProviderId, "api_key", raw.keys);
     providers[fallbackProviderId] = {
       id: fallbackProviderId,
       authType: "api_key",
-      accounts,
+      accounts: normalizedAccounts.accounts,
     };
-    return { providers };
+    return { credentials: { providers }, backfilled: normalizedAccounts.backfilled };
   }
 
   if (!isRecord(raw) || !isRecord(raw.providers)) {
-    return { providers };
+    return { credentials: { providers }, backfilled };
   }
 
   for (const [rawProviderId, rawProvider] of Object.entries(raw.providers)) {
     const providerId = normalizeProviderId(rawProviderId, fallbackProviderId);
 
     if (Array.isArray(rawProvider)) {
+      const normalizedAccounts = normalizeAccounts(providerId, "api_key", rawProvider);
       providers[providerId] = {
         id: providerId,
         authType: "api_key",
-        accounts: normalizeAccounts(providerId, "api_key", rawProvider),
+        accounts: normalizedAccounts.accounts,
       };
+      backfilled ||= normalizedAccounts.backfilled;
       continue;
     }
 
@@ -304,11 +324,12 @@ function normalizeCredentials(raw: unknown, defaultProviderId: string): Normaliz
     providers[providerId] = {
       id: providerId,
       authType,
-      accounts,
+      accounts: accounts.accounts,
     };
+    backfilled ||= accounts.backfilled;
   }
 
-  return { providers };
+  return { credentials: { providers }, backfilled };
 }
 
 function toPersistedJson(normalized: NormalizedCredentials): Record<string, unknown> {
@@ -626,8 +647,12 @@ export class CredentialStore {
       const contents = await readFile(this.filePath, "utf8");
       const parsed: unknown = JSON.parse(contents);
       const normalized = normalizeCredentials(parsed, this.defaultProviderId);
-      this.cachedCredentials = normalized;
-      return normalized;
+      this.cachedCredentials = normalized.credentials;
+      if (normalized.backfilled) {
+        this.dirty = true;
+        this.scheduleDebouncedFlush();
+      }
+      return normalized.credentials;
     } catch {
       return { providers: {} };
     }
