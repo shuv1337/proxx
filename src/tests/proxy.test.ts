@@ -1149,11 +1149,190 @@ test("fetches live OpenAI Codex quota windows and persists refreshed OAuth token
         assert.equal(parsedKeys.providers.openai.accounts[0].access_token, refreshedAccessToken);
         assert.equal(parsedKeys.providers.openai.accounts[0].refresh_token, "refresh-token-new");
         assert.equal(parsedKeys.providers.openai.accounts[0].plan_type, "pro");
+        assert.equal(parsedKeys.providers.openai.accounts[0].email, "quota@example.com");
       },
     );
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("persists email metadata when saving OpenAI OAuth browser logins", async () => {
+  const accessToken = makeJwt({
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "workspace-browser",
+      chatgpt_plan_type: "pro",
+    },
+    "https://api.openai.com/profile": {
+      email: "browser@example.com",
+    },
+    sub: "user-browser",
+  });
+
+  await withPatchedFetch(
+    async (input) => {
+      const url = String(input);
+      if (url === "https://auth.openai.com/oauth/token") {
+        return new Response(JSON.stringify({
+          access_token: accessToken,
+          refresh_token: "refresh-browser",
+          expires_in: 3600,
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return undefined;
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: { providers: {} },
+          upstreamHandler: async () => ({
+            status: 404,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ error: "not_used" }),
+          }),
+        },
+        async ({ app, tempDir }) => {
+          const startResponse = await app.inject({
+            method: "POST",
+            url: "/api/ui/credentials/openai/oauth/browser/start",
+            payload: { redirectBaseUrl: "http://127.0.0.1:8789" },
+          });
+
+          assert.equal(startResponse.statusCode, 200);
+          const startPayload: unknown = startResponse.json();
+          assert.ok(isRecord(startPayload));
+          assert.equal(typeof startPayload.state, "string");
+
+          const callbackResponse = await app.inject({
+            method: "GET",
+            url: `/auth/callback?state=${encodeURIComponent(String(startPayload.state))}&code=browser-code`,
+          });
+
+          assert.equal(callbackResponse.statusCode, 200);
+
+          const keysJson = await readFile(path.join(tempDir, "keys.json"), "utf8");
+          const parsedKeys: unknown = JSON.parse(keysJson);
+          assert.ok(isRecord(parsedKeys));
+          assert.ok(isRecord(parsedKeys.providers));
+          assert.ok(isRecord(parsedKeys.providers.openai));
+          assert.ok(Array.isArray(parsedKeys.providers.openai.accounts));
+          assert.ok(isRecord(parsedKeys.providers.openai.accounts[0]));
+          assert.equal(parsedKeys.providers.openai.accounts[0].email, "browser@example.com");
+          assert.equal(parsedKeys.providers.openai.accounts[0].subject, "user-browser");
+          assert.equal(parsedKeys.providers.openai.accounts[0].plan_type, "pro");
+          assert.equal(parsedKeys.providers.openai.accounts[0].chatgpt_account_id, "workspace-browser");
+        },
+      );
+    },
+  );
+});
+
+test("persists email metadata when saving OpenAI OAuth device logins", async () => {
+  const accessToken = makeJwt({
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "workspace-device",
+      chatgpt_plan_type: "plus",
+    },
+    "https://api.openai.com/profile": {
+      email: "device@example.com",
+    },
+    sub: "user-device",
+  });
+
+  await withPatchedFetch(
+    async (input) => {
+      const url = String(input);
+      if (url === "https://auth.openai.com/api/accounts/deviceauth/usercode") {
+        return new Response(JSON.stringify({
+          device_auth_id: "device-auth-1",
+          user_code: "USER-CODE",
+          interval: "5",
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url === "https://auth.openai.com/api/accounts/deviceauth/token") {
+        return new Response(JSON.stringify({
+          authorization_code: "device-code-authz",
+          code_verifier: "device-verifier",
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      if (url === "https://auth.openai.com/oauth/token") {
+        return new Response(JSON.stringify({
+          access_token: accessToken,
+          refresh_token: "refresh-device",
+          expires_in: 3600,
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      return undefined;
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: { providers: {} },
+          upstreamHandler: async () => ({
+            status: 404,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ error: "not_used" }),
+          }),
+        },
+        async ({ app, tempDir }) => {
+          const startResponse = await app.inject({
+            method: "POST",
+            url: "/api/ui/credentials/openai/oauth/device/start",
+          });
+
+          assert.equal(startResponse.statusCode, 200);
+          const startPayload: unknown = startResponse.json();
+          assert.ok(isRecord(startPayload));
+          assert.equal(startPayload.deviceAuthId, "device-auth-1");
+          assert.equal(startPayload.userCode, "USER-CODE");
+
+          const pollResponse = await app.inject({
+            method: "POST",
+            url: "/api/ui/credentials/openai/oauth/device/poll",
+            payload: {
+              deviceAuthId: "device-auth-1",
+              userCode: "USER-CODE",
+            },
+          });
+
+          assert.equal(pollResponse.statusCode, 200);
+          const pollPayload: unknown = pollResponse.json();
+          assert.ok(isRecord(pollPayload));
+          assert.equal(pollPayload.state, "authorized");
+
+          const keysJson = await readFile(path.join(tempDir, "keys.json"), "utf8");
+          const parsedKeys: unknown = JSON.parse(keysJson);
+          assert.ok(isRecord(parsedKeys));
+          assert.ok(isRecord(parsedKeys.providers));
+          assert.ok(isRecord(parsedKeys.providers.openai));
+          assert.ok(Array.isArray(parsedKeys.providers.openai.accounts));
+          assert.ok(isRecord(parsedKeys.providers.openai.accounts[0]));
+          assert.equal(parsedKeys.providers.openai.accounts[0].email, "device@example.com");
+          assert.equal(parsedKeys.providers.openai.accounts[0].subject, "user-device");
+          assert.equal(parsedKeys.providers.openai.accounts[0].plan_type, "plus");
+          assert.equal(parsedKeys.providers.openai.accounts[0].chatgpt_account_id, "workspace-device");
+        },
+      );
+    },
+  );
 });
 
 test("does not misclassify gemini models as local ollama because they contain mini", async () => {

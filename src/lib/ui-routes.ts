@@ -1601,6 +1601,9 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
         tokens.refreshToken,
         tokens.expiresAt,
         tokens.chatgptAccountId,
+        tokens.email,
+        tokens.subject,
+        tokens.planType,
       );
       await deps.keyPool.warmup().catch(() => undefined);
       app.log.info({
@@ -1654,6 +1657,9 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
         result.tokens.refreshToken,
         result.tokens.expiresAt,
         result.tokens.chatgptAccountId,
+        result.tokens.email,
+        result.tokens.subject,
+        result.tokens.planType,
       );
       await deps.keyPool.warmup().catch(() => undefined);
       app.log.info({
