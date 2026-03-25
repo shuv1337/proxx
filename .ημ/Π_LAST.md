@@ -1,17 +1,45 @@
-# Π handoff
+# Π Snapshot: Federation Bridge Implementation
 
-- time: 2026-03-20T16:31:18Z
-- branch: main
-- pre-Π HEAD: 427fb7c
-- Π HEAD: pending at capture time; resolved by the final git commit created after artifact assembly
+**Branch:** `feat/consolidate-federation-into-staging`
+**Commit:** `f33516c`
+**Date:** 2026-03-23
 
-## Summary
-- Finalize the Phase 2 dashboard/analytics snapshot by recording the new tenant-scoped dashboard/provider analytics rollup behavior in the multitenancy user-model draft.
-- Reuse the immediately preceding green typecheck/test/build/web-build verification because this amend is documentation-only on top of that verified code state.
-- Refresh receipts and .ημ artifacts so the root superproject can reference a clean post-doc snapshot.
+## Work Summary
 
-## Verification
-- pass: pnpm run typecheck (from 2026-03-20T16:29:46Z verification)
-- pass: pnpm test (316/316 from 2026-03-20T16:29:46Z verification)
-- pass: pnpm run build (from 2026-03-20T16:29:46Z verification)
-- pass: pnpm run web:build (from 2026-03-20T16:29:46Z verification)
+Implemented WebSocket-based federation bridge for multi-instance communication:
+
+### Core Components
+- **bridge-relay.ts** – WebSocket relay for routing messages between instances
+- **bridge-protocol.ts** – Wire protocol, message types, and type definitions
+- **bridge-agent.ts** – Federation agent for inter-instance coordination
+- **bridge-bridge-agent-autostart.ts** – Auto-start integration with main app
+
+### Integration Points
+- Updated `src/app.ts` with federation agent initialization
+- Added federation status routes in `src/lib/ui-routes.ts`
+- Added GitHub Actions workflow updates for staging deployment
+- Updated `.env.example` with federation environment variables
+
+### Specification
+- `specs/drafts/federation-bridge-ws-v0.md` – Protocol specification document
+
+### Tests
+- Federation bridge agent tests
+- Federation bridge autostart tests
+- Federation bridge protocol tests
+- Federation bridge relay tests
+
+## Verification Status
+
+| Check | Status |
+|-------|--------|
+| TypeScript | ✅ Pass |
+| Lint | ⚠️ 143 errors (pre-existing web/ issues, some unused vars in new code) |
+| Tests | Not run for snapshot |
+
+## Next Steps
+
+1. Run tests: `pnpm test src/tests/federation-bridge*.test.ts`
+2. Address unused variables in federation modules
+3. Resolve lint warnings in web/ components (separate from this work)
+4. Merge to staging after CI gate

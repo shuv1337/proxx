@@ -259,6 +259,15 @@ export interface RequestLogPerfSummary {
   readonly updatedAt: number;
 }
 
+export interface RequestLogMirror {
+  upsertEntry(entry: RequestLogEntry): Promise<void>;
+  close?(): Promise<void>;
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 interface RequestLogDb {
   readonly entries: RequestLogEntry[];
   readonly hourlyBuckets?: readonly RequestLogHourlyBucket[];
@@ -889,6 +898,9 @@ export class RequestLogStore {
   private persistChain: Promise<void> = Promise.resolve();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private persistPending = false;
+  private mirrorChain: Promise<void> = Promise.resolve();
+  private mirrorFailureCount = 0;
+  private lastMirrorWarningAt = 0;
   private journalLineCount = 0;
   private needsCompaction = false;
   private closed = false;
@@ -897,6 +909,7 @@ export class RequestLogStore {
     private readonly filePath: string,
     private readonly maxEntries: number = 1000,
     private readonly persistIntervalMs: number = 1000,
+    private readonly mirror?: RequestLogMirror,
   ) {}
 
   public async warmup(): Promise<void> {
@@ -965,6 +978,7 @@ export class RequestLogStore {
     this.updatePerfIndexFromEntry(entry);
     this.pendingJournalEntries.push(entry);
     this.schedulePersist();
+    this.queueMirror(entry);
 
     return entry;
   }
@@ -1037,11 +1051,35 @@ export class RequestLogStore {
     this.updatePerfIndexFromEntry(next);
     this.pendingJournalEntries.push(next);
     this.schedulePersist();
+    this.queueMirror(next);
     return next;
   }
 
   public snapshot(): RequestLogEntry[] {
     return [...this.entries];
+  }
+
+  public snapshotSinceWithLimit(
+    sinceMs: number,
+    limit: number,
+    after?: { readonly timestampMs: number; readonly id: string },
+  ): RequestLogEntry[] {
+    const since = Number.isFinite(sinceMs) ? sinceMs : 0;
+    const maxEntries = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : this.entries.length;
+    const results: RequestLogEntry[] = [];
+    for (const entry of this.entries) {
+      if (entry.timestamp < since) {
+        continue;
+      }
+      if (after && (entry.timestamp < after.timestampMs || (entry.timestamp === after.timestampMs && entry.id <= after.id))) {
+        continue;
+      }
+      results.push(entry);
+      if (results.length >= maxEntries) {
+        break;
+      }
+    }
+    return results;
   }
 
   public snapshotHourlyBuckets(sinceMs?: number): RequestLogHourlyBucket[] {
@@ -1157,6 +1195,45 @@ export class RequestLogStore {
     }
     await this.queuePersist(true);
     await this.persistChain.catch(() => undefined);
+    try {
+      await this.mirrorChain;
+    } catch (error) {
+      this.noteMirrorFailure("flush", error);
+    }
+    if (this.mirror?.close) {
+      try {
+        await this.mirror.close();
+      } catch (error) {
+        this.noteMirrorFailure("close", error);
+      }
+    }
+  }
+
+  private queueMirror(entry: RequestLogEntry): void {
+    if (!this.mirror) {
+      return;
+    }
+
+    this.mirrorChain = this.mirrorChain
+      .then(async () => {
+        await this.mirror?.upsertEntry(entry);
+      })
+      .catch((error) => {
+        this.noteMirrorFailure("upsert", error);
+      });
+  }
+
+  private noteMirrorFailure(stage: "upsert" | "flush" | "close", error: unknown): void {
+    this.mirrorFailureCount += 1;
+    const now = Date.now();
+    const count = this.mirrorFailureCount;
+    const shouldWarn = count <= 3 || count === 5 || count === 10 || now - this.lastMirrorWarningAt >= 60_000;
+    if (!shouldWarn) {
+      return;
+    }
+
+    this.lastMirrorWarningAt = now;
+    console.warn(`[request-log-store] mirror ${stage} failed (#${count}): ${formatErrorMessage(error)}`);
   }
 
   private matchesFilters(entry: RequestLogEntry, filters: RequestLogFilters = {}): boolean {

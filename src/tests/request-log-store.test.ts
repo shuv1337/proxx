@@ -183,6 +183,47 @@ test("request log close flushes batched writes", async () => {
   });
 });
 
+test("request log store reports mirror failures during upsert and close", async () => {
+  await withTempDir(async (tempDir) => {
+    const filePath = path.join(tempDir, "request-logs.jsonl");
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((value) => String(value)).join(" "));
+    };
+
+    try {
+      const store = new RequestLogStore(filePath, 100, 0, {
+        upsertEntry: async () => {
+          throw new Error("mirror-upsert-failed");
+        },
+        close: async () => {
+          throw new Error("mirror-close-failed");
+        },
+      });
+
+      await store.warmup();
+      store.record({
+        providerId: "openai",
+        accountId: "acct-1",
+        authType: "api_key",
+        model: "gpt-5.4",
+        upstreamMode: "responses",
+        upstreamPath: "/v1/responses",
+        status: 200,
+        latencyMs: 125,
+      });
+
+      await store.close();
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    assert.ok(warnings.some((entry) => entry.includes("mirror upsert failed") && entry.includes("mirror-upsert-failed")));
+    assert.ok(warnings.some((entry) => entry.includes("mirror close failed") && entry.includes("mirror-close-failed")));
+  });
+});
+
 test("request log persistence preserves upstream error summaries and factory diagnostics", async () => {
   await withTempDir(async (tempDir) => {
     const filePath = path.join(tempDir, "request-logs.jsonl");
@@ -365,5 +406,44 @@ test("request log store tracks tenant usage attribution separately", async () =>
     assert.equal(persistedEntries.length, 2);
     assert.equal(persistedEntries[0]?.tenantId, "acme");
     assert.equal(persistedEntries[1]?.tenantId, "beta");
+  });
+});
+
+test("request log store mirrors records and updates into the shared usage sink", async () => {
+  await withTempDir(async (tempDir) => {
+    const filePath = path.join(tempDir, "request-logs.jsonl");
+    const mirroredEntries: Array<Record<string, unknown>> = [];
+    const store = new RequestLogStore(filePath, 100, 60_000, {
+      upsertEntry: async (entry) => {
+        mirroredEntries.push({ ...entry });
+      },
+    });
+    await store.warmup();
+
+    const entry = store.record({
+      providerId: "openai",
+      accountId: "acct-shared",
+      authType: "oauth_bearer",
+      model: "gpt-5.4",
+      upstreamMode: "responses",
+      upstreamPath: "/v1/responses",
+      status: 200,
+      latencyMs: 150,
+    });
+
+    store.update(entry.id, {
+      promptTokens: 21,
+      completionTokens: 21,
+      totalTokens: 42,
+      cacheHit: true,
+    });
+
+    await store.close();
+
+    assert.equal(mirroredEntries.length, 2);
+    assert.equal(mirroredEntries[0]?.id, entry.id);
+    assert.equal(mirroredEntries[1]?.id, entry.id);
+    assert.equal(mirroredEntries[1]?.totalTokens, 42);
+    assert.equal(mirroredEntries[1]?.cacheHit, true);
   });
 });

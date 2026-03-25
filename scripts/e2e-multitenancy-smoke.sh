@@ -95,11 +95,28 @@ else
   fail "tenant provider allowlist persisted" "unexpected response"
 fi
 
+# Test tenant allowlist blocking by setting allowlist to vivgrid/openai only,
+# then verifying that factory/ prefixed models are blocked.
+# The factory provider is always distinct from vivgrid/openai, ensuring the test
+# validates blocking regardless of how OPENAI_PROVIDER_ID is configured.
+
+# First, set allowlist to vivgrid+openai (common production config)
+# This ensures factory is definitively NOT in the allowlist.
+RESTRICT_SETTINGS=$(admin_json -X POST "${BASE}/api/ui/settings" -d '{"allowedProviderIds":["vivgrid","openai"]}') || RESTRICT_SETTINGS=''
+if [[ -n "$RESTRICT_SETTINGS" && "$(printf '%s' "$RESTRICT_SETTINGS" | json_field 'allowedProviderIds.0' 2>/dev/null || true)" == "vivgrid" ]]; then
+  pass "tenant provider allowlist set to vivgrid+openai"
+else
+  fail "tenant provider allowlist set to vivgrid+openai" "unexpected response"
+fi
+
+# Test: factory/gpt-5 should be blocked (factory not in allowlist)
+# The factory/ prefix always resolves to provider "factory", which is never
+# vivgrid or openai, so this test is deterministic across all environments.
 BLOCKED_RESPONSE=$(curl -sS -w '\nHTTP_STATUS:%{http_code}' --max-time 30 \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${AUTH_TOKEN}" \
   -X POST "${BASE}/v1/chat/completions" \
-  -d '{"model":"factory/gpt-5.3-codex","messages":[{"role":"user","content":"blocked"}],"stream":false}' || true)
+  -d '{"model":"factory/gpt-5","messages":[{"role":"user","content":"blocked"}],"stream":false}' || true)
 BLOCKED_STATUS="${BLOCKED_RESPONSE##*$'\n'HTTP_STATUS:}"
 BLOCKED_BODY="${BLOCKED_RESPONSE%$'\n'HTTP_STATUS:*}"
 printf '%s' "$BLOCKED_BODY" >/tmp/proxx-multitenancy-blocked.out
@@ -119,6 +136,14 @@ else
   fail "factory provider blocked by tenant allowlist" "status=${BLOCKED_STATUS} code=${BLOCKED_CODE}"
 fi
 
+# Restore allowlist to openai for subsequent tests
+RESTORED_SETTINGS=$(admin_json -X POST "${BASE}/api/ui/settings" -d '{"allowedProviderIds":["openai"]}') || RESTORED_SETTINGS=''
+if [[ -n "$RESTORED_SETTINGS" && "$(printf '%s' "$RESTORED_SETTINGS" | json_field 'allowedProviderIds.0' 2>/dev/null || true)" == "openai" ]]; then
+  pass "tenant provider allowlist restored to openai"
+else
+  fail "tenant provider allowlist restored to openai" "unexpected response"
+fi
+
 CREATED_KEY=$(admin_json -X POST "${BASE}/api/ui/tenants/default/api-keys" -d '{"label":"live-smoke-key","scopes":["proxy:use"]}') || CREATED_KEY=''
 if [[ -z "$CREATED_KEY" ]]; then
   fail "tenant key create" "no response"
@@ -136,7 +161,7 @@ TENANT_RESPONSE=$(curl -sS -w '\nHTTP_STATUS:%{http_code}' --max-time 30 \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${KEY_TOKEN}" \
   -X POST "${BASE}/v1/chat/completions" \
-  -d '{"model":"factory/gpt-5.3-codex","messages":[{"role":"user","content":"touch last_used_at"}],"stream":false}' || true)
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"touch last_used_at"}],"stream":false}' || true)
 TENANT_STATUS="${TENANT_RESPONSE##*$'\n'HTTP_STATUS:}"
 TENANT_BODY="${TENANT_RESPONSE%$'\n'HTTP_STATUS:*}"
 printf '%s' "$TENANT_BODY" >/tmp/proxx-multitenancy-tenant-key.out

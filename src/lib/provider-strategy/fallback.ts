@@ -1,15 +1,13 @@
 import type { FastifyReply } from "fastify";
 
-import type { ProxyConfig } from "../config.js";
 import type { AccountHealthStore } from "../db/account-health-store.js";
 import type { EventStore } from "../db/event-store.js";
 import type { ProviderCredential } from "../key-pool.js";
 import type { PolicyEngine } from "../policy/index.js";
 import type { PromptAffinityStore } from "../prompt-affinity-store.js";
 import type { RequestLogStore } from "../request-log-store.js";
-import { buildUpstreamHeadersForCredential, isRateLimitResponse, parseRetryAfterMs } from "../proxy.js";
+import { buildUpstreamHeadersForCredential, extractRateLimitCooldownMs, isRateLimitResponse } from "../proxy.js";
 import {
-  extractTerminalResponseFromEventStream,
   responsesEventStreamToErrorPayload,
 } from "../responses-compat.js";
 import type { ProviderRoute } from "../provider-routing.js";
@@ -40,9 +38,9 @@ import {
   recordAttempt,
   updateFailedAttemptDiagnostics,
   updateUsageCountsFromResponse,
+  readHeaderValue,
   type BuildPayloadResult,
   type FallbackAccumulator,
-  type PreferredAffinity,
   type ProviderAttemptContext,
   type ProviderAvailabilitySummary,
   type ProviderFallbackExecutionResult,
@@ -72,6 +70,22 @@ function requestyModelPrefix(model: string): string {
     }
   }
   return "openai";
+}
+
+function resolveForcedCredentialSelection(context: StrategyRequestContext): {
+  readonly providerId?: string;
+  readonly accountId?: string;
+} {
+  if (context.requestAuth?.kind !== "legacy_admin") {
+    return {};
+  }
+
+  const providerId = readHeaderValue(context.clientHeaders, "x-open-hax-forced-provider")?.trim().toLowerCase();
+  const accountId = readHeaderValue(context.clientHeaders, "x-open-hax-forced-account-id")?.trim();
+  return {
+    providerId: providerId && providerId.length > 0 ? providerId : undefined,
+    accountId: accountId && accountId.length > 0 ? accountId : undefined,
+  };
 }
 
 export async function executeProviderFallback(
@@ -105,8 +119,13 @@ export async function executeProviderFallback(
   };
 
   const candidatesByProvider: Record<string, Array<{ readonly providerId: string; readonly baseUrl: string; readonly account: ProviderCredential }>> = {};
+  const forcedCredentialSelection = resolveForcedCredentialSelection(context);
 
   for (const route of providerRoutes) {
+    if (forcedCredentialSelection.providerId && route.providerId !== forcedCredentialSelection.providerId) {
+      continue;
+    }
+
     let routeAccounts: ProviderCredential[];
     try {
       const rawAccounts = await keyPool.getRequestOrder(route.providerId);
@@ -122,6 +141,10 @@ export async function executeProviderFallback(
     }
 
     routeAccounts = reorderAccountsForLatency(requestLogStore, route.providerId, routeAccounts, context.routedModel, strategy.mode);
+
+    if (forcedCredentialSelection.accountId) {
+      routeAccounts = routeAccounts.filter((account) => account.accountId === forcedCredentialSelection.accountId);
+    }
 
     const routeCandidates = routeAccounts.map((account) => ({
       providerId: route.providerId,
@@ -454,7 +477,9 @@ export async function executeProviderFallback(
 
         if (isRateLimitResponse(upstreamResponse)) {
           accumulator.sawRateLimit = true;
-          keyPool.markRateLimited(candidate.account, parseRetryAfterMs(upstreamResponse.headers.get("retry-after")));
+          // Extract cooldown from both header and body
+          const cooldownMs = await extractRateLimitCooldownMs(upstreamResponse);
+          keyPool.markRateLimited(candidate.account, cooldownMs);
           if (
             preferredAffinity
             && candidate.providerId === preferredAffinity.providerId
@@ -689,7 +714,8 @@ export async function executeProviderFallback(
               await refreshedDiagnosticsPromise;
               if (isRateLimitResponse(refreshedResponse)) {
                 accumulator.sawRateLimit = true;
-                keyPool.markRateLimited(refreshedCredential, parseRetryAfterMs(refreshedResponse.headers.get("retry-after")));
+                const refreshedCooldownMs = await extractRateLimitCooldownMs(refreshedResponse);
+                keyPool.markRateLimited(refreshedCredential, refreshedCooldownMs);
                 try {
                   await refreshedResponse.arrayBuffer();
                 } catch {

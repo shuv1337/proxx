@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 
 import { DEFAULT_MODELS, type ProxyConfig } from "./lib/config.js";
 import { KeyPool, type ProviderCredential } from "./lib/key-pool.js";
@@ -23,6 +24,7 @@ import {
   filterResponsesApiRoutes,
   filterImagesApiRoutes,
   minMsUntilAnyProviderKeyReady,
+  parseModelIdsFromCatalogPayload,
   resolveProviderRoutesForModel,
   resolveRequestRoutingState,
   type ProviderRoute,
@@ -69,14 +71,18 @@ import { SqlCredentialStore } from "./lib/db/sql-credential-store.js";
 import { AccountHealthStore } from "./lib/db/account-health-store.js";
 import { EventStore } from "./lib/db/event-store.js";
 import { createDefaultLabelers } from "./lib/db/event-labelers.js";
+import { SqlRequestUsageStore } from "./lib/db/sql-request-usage-store.js";
+import { SqlFederationStore, shouldWarmImportProjectedAccount, type FederationPeerRecord, type FederationProjectedAccountRecord } from "./lib/db/sql-federation-store.js";
 import { SqlAuthPersistence } from "./lib/auth/sql-persistence.js";
 import { SqlGitHubAllowlist } from "./lib/auth/github-allowlist.js";
-import { seedFromJsonFile, seedFromJsonValue, seedFactoryAuthFromFiles, seedModelsFromFile, loadModelsFromDb, getConfig, setConfig } from "./lib/db/json-seeder.js";
+import { seedFromJsonFile, seedFromJsonValue, seedFactoryAuthFromFiles, seedModelsFromFile } from "./lib/db/json-seeder.js";
 import { registerOAuthRoutes } from "./lib/oauth-routes.js";
 import { RuntimeCredentialStore } from "./lib/runtime-credential-store.js";
 import { TokenRefreshManager } from "./lib/token-refresh-manager.js";
 import { DEFAULT_TENANT_ID } from "./lib/tenant-api-key.js";
-import { resolveRequestAuth } from "./lib/request-auth.js";
+import { resolveRequestAuth, type ResolvedRequestAuth } from "./lib/request-auth.js";
+import { createEnvFederationBridgeAgent } from "./lib/federation/bridge-agent-autostart.js";
+import type { BridgeRelayResponseEvent, FederationBridgeRelay } from "./lib/federation/bridge-relay.js";
 
 interface ChatCompletionRequest {
   readonly model?: string;
@@ -351,6 +357,8 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   let sqlGitHubAllowlist: SqlGitHubAllowlist | undefined;
   let accountHealthStore: AccountHealthStore | undefined;
   let eventStore: EventStore | undefined;
+  let sqlRequestUsageStore: SqlRequestUsageStore | undefined;
+  let sqlFederationStore: SqlFederationStore | undefined;
 
   if (config.databaseUrl) {
     try {
@@ -371,6 +379,19 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         eventStore.registerLabeler(labeler);
       }
       app.log.info("event store initialized");
+
+      sqlRequestUsageStore = new SqlRequestUsageStore(sql);
+      await sqlRequestUsageStore.init();
+      app.log.info("request usage store initialized");
+
+      try {
+        sqlFederationStore = new SqlFederationStore(sql);
+        await sqlFederationStore.init();
+        app.log.info("federation store initialized");
+      } catch (error) {
+        sqlFederationStore = undefined;
+        app.log.warn({ error: toErrorMessage(error) }, "failed to initialize federation store; continuing with federation disabled");
+      }
 
       sqlAuthPersistence = new SqlAuthPersistence(sql);
       await sqlAuthPersistence.init();
@@ -455,6 +476,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     config.requestLogsFilePath,
     config.requestLogsMaxEntries,
     config.requestLogsFlushMs,
+    sqlRequestUsageStore,
   );
   await requestLogStore.warmup();
   const promptAffinityStore = new PromptAffinityStore(
@@ -686,6 +708,418 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     }
   }
 
+  const FEDERATION_HOP_HEADER = "x-open-hax-federation-hop";
+  const FEDERATION_OWNER_SUBJECT_HEADER = "x-open-hax-federation-owner-subject";
+  const FEDERATION_BRIDGE_TENANT_HEADER = "x-open-hax-bridge-tenant-id";
+  const FEDERATION_FORCED_PROVIDER_HEADER = "x-open-hax-forced-provider";
+  const FEDERATION_FORCED_ACCOUNT_ID_HEADER = "x-open-hax-forced-account-id";
+  const FEDERATION_ROUTED_PEER_HEADER = "x-open-hax-federation-routed-peer";
+  const FEDERATION_ROUTED_PROVIDER_HEADER = "x-open-hax-federation-routed-provider";
+  const FEDERATION_ROUTED_ACCOUNT_HEADER = "x-open-hax-federation-routed-account";
+  const FEDERATION_IMPORTED_HEADER = "x-open-hax-federation-imported";
+  const FEDERATION_BLOCKED_RESPONSE_HEADERS = new Set([
+    "set-cookie",
+    "x-open-hax-federation-hop",
+    "x-open-hax-federation-owner-subject",
+    "x-open-hax-federation-routed-peer",
+    "x-open-hax-federation-routed-provider",
+    "x-open-hax-federation-routed-account",
+    "x-open-hax-federation-imported",
+    "x-open-hax-forced-provider",
+    "x-open-hax-forced-account-id",
+  ]);
+
+  interface FederationCredentialExport {
+    readonly providerId: string;
+    readonly accountId: string;
+    readonly authType: "api_key" | "oauth_bearer";
+    readonly secret: string;
+    readonly refreshToken?: string;
+    readonly expiresAt?: number;
+    readonly chatgptAccountId?: string;
+    readonly email?: string;
+    readonly subject?: string;
+    readonly planType?: string;
+  }
+
+  function readSingleHeader(headers: Record<string, unknown>, name: string): string | undefined {
+    const raw = headers[name];
+    if (typeof raw === "string") {
+      return raw;
+    }
+    if (Array.isArray(raw)) {
+      return raw.find((value) => typeof value === "string" && value.length > 0);
+    }
+    return undefined;
+  }
+
+  function isTrustedLocalBridgeAddress(remoteAddress: string | undefined): boolean {
+    if (!remoteAddress) {
+      return false;
+    }
+
+    return remoteAddress === "127.0.0.1"
+      || remoteAddress === "::1"
+      || remoteAddress === "::ffff:127.0.0.1";
+  }
+
+  function normalizeRequestedModel(value: unknown): string | undefined {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+
+    const normalized = value.trim();
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
+  function resolveFederationHopCount(headers: Record<string, unknown>): number {
+    const raw = readSingleHeader(headers, FEDERATION_HOP_HEADER)?.trim();
+    if (!raw) {
+      return 0;
+    }
+
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  }
+
+  function resolveFederationOwnerSubject(input: {
+    readonly headers: Record<string, unknown>;
+    readonly requestAuth?: Pick<ResolvedRequestAuth, "kind" | "subject">;
+    readonly hopCount?: number;
+  }): string | undefined {
+    const explicitHeader = readSingleHeader(input.headers, FEDERATION_OWNER_SUBJECT_HEADER)?.trim();
+    if (explicitHeader && ((input.hopCount ?? 0) > 0 || input.requestAuth?.kind === "legacy_admin")) {
+      return explicitHeader;
+    }
+
+    const authSubject = input.requestAuth?.subject?.trim();
+    if (authSubject && authSubject !== "legacy:proxy-auth-token") {
+      return authSubject;
+    }
+
+    if (input.requestAuth?.kind === "legacy_admin") {
+      const defaultOwnerSubject = process.env.FEDERATION_DEFAULT_OWNER_SUBJECT?.trim();
+      if (defaultOwnerSubject) {
+        return defaultOwnerSubject;
+      }
+    }
+
+    return undefined;
+  }
+
+  function extractPeerCredential(auth: Record<string, unknown>): string | undefined {
+    const direct = typeof auth.credential === "string" ? auth.credential.trim() : "";
+    if (direct.length > 0) {
+      return direct;
+    }
+
+    const bearer = typeof auth.bearer === "string" ? auth.bearer.trim() : "";
+    return bearer.length > 0 ? bearer : undefined;
+  }
+
+  async function fetchFederationJson<T>(input: {
+    readonly url: string;
+    readonly credential?: string;
+    readonly timeoutMs: number;
+    readonly method?: "GET" | "POST";
+    readonly body?: Record<string, unknown>;
+  }): Promise<T> {
+    const headers = new Headers();
+    headers.set("content-type", "application/json");
+    if (input.credential && input.credential.length > 0) {
+      headers.set("authorization", `Bearer ${input.credential}`);
+    }
+
+    const response = await fetchWithResponseTimeout(input.url, {
+      method: input.method ?? "GET",
+      headers,
+      body: input.body ? JSON.stringify(input.body) : undefined,
+    }, input.timeoutMs);
+
+    const text = await response.text();
+    const parsed = text.length > 0 ? JSON.parse(text) as T & { readonly error?: string } : {} as T & { readonly error?: string };
+    if (!response.ok) {
+      throw new Error(typeof parsed.error === "string" ? parsed.error : `request failed with ${response.status}`);
+    }
+
+    return parsed as T;
+  }
+
+  async function noteFederatedProjectedAccountRouted(input: {
+    readonly projectedAccount: FederationProjectedAccountRecord;
+    readonly timeoutMs: number;
+  }): Promise<{ readonly importedCredential: boolean; readonly projectedAccount: FederationProjectedAccountRecord }> {
+    if (!sqlFederationStore) {
+      return { importedCredential: false, projectedAccount: input.projectedAccount };
+    }
+
+    let projectedAccount = await sqlFederationStore.noteProjectedAccountRouted({
+      sourcePeerId: input.projectedAccount.sourcePeerId,
+      providerId: input.projectedAccount.providerId,
+      accountId: input.projectedAccount.accountId,
+    }) ?? input.projectedAccount;
+
+    let importedCredential = false;
+    if (shouldWarmImportProjectedAccount(projectedAccount.warmRequestCount)) {
+      const importResult = await sqlFederationStore.withProjectedAccountImportLock({
+        sourcePeerId: projectedAccount.sourcePeerId,
+        providerId: projectedAccount.providerId,
+        accountId: projectedAccount.accountId,
+      }, async (tx) => {
+        const latest = await sqlFederationStore.getProjectedAccount({
+          sourcePeerId: projectedAccount.sourcePeerId,
+          providerId: projectedAccount.providerId,
+          accountId: projectedAccount.accountId,
+        }, tx);
+        if (!latest) {
+          return undefined;
+        }
+        if (latest.availabilityState === "imported") {
+          return { importedCredential: false, projectedAccount: latest };
+        }
+
+        const peer = await sqlFederationStore.getPeer(latest.sourcePeerId, tx);
+        const credential = peer ? extractPeerCredential(peer.auth) : undefined;
+        if (!peer || !credential) {
+          return { importedCredential: false, projectedAccount: latest };
+        }
+
+        try {
+          const remoteExport = await fetchFederationJson<{ readonly account: FederationCredentialExport }>({
+            url: `${peer.controlBaseUrl ?? peer.baseUrl}/api/ui/federation/accounts/export`,
+            credential,
+            timeoutMs: input.timeoutMs,
+            method: "POST",
+            body: {
+              providerId: latest.providerId,
+              accountId: latest.accountId,
+            },
+          });
+
+          if (remoteExport.account.authType === "oauth_bearer") {
+            await runtimeCredentialStore.upsertOAuthAccount(
+              remoteExport.account.providerId,
+              remoteExport.account.accountId,
+              remoteExport.account.secret,
+              remoteExport.account.refreshToken,
+              remoteExport.account.expiresAt,
+              remoteExport.account.chatgptAccountId,
+              remoteExport.account.email,
+              remoteExport.account.subject,
+              remoteExport.account.planType,
+            );
+          } else {
+            await runtimeCredentialStore.upsertApiKeyAccount(
+              remoteExport.account.providerId,
+              remoteExport.account.accountId,
+              remoteExport.account.secret,
+            );
+          }
+
+          await keyPool.warmup().catch(() => undefined);
+
+          const imported = await sqlFederationStore.markProjectedAccountImported({
+            sourcePeerId: latest.sourcePeerId,
+            providerId: latest.providerId,
+            accountId: latest.accountId,
+          }, tx);
+          return {
+            importedCredential: true,
+            projectedAccount: imported ?? latest,
+          };
+        } catch (error) {
+          app.log.warn({
+            error: toErrorMessage(error),
+            sourcePeerId: latest.sourcePeerId,
+            providerId: latest.providerId,
+            accountId: latest.accountId,
+          }, "failed warm federation credential import during request routing");
+          return { importedCredential: false, projectedAccount: latest };
+        }
+      });
+
+      if (importResult) {
+        projectedAccount = importResult.projectedAccount;
+        importedCredential = importResult.importedCredential;
+      } else {
+        const latest = await sqlFederationStore.getProjectedAccount({
+          sourcePeerId: projectedAccount.sourcePeerId,
+          providerId: projectedAccount.providerId,
+          accountId: projectedAccount.accountId,
+        });
+        if (latest) {
+          projectedAccount = latest;
+          importedCredential = latest.availabilityState === "imported";
+        }
+      }
+    }
+
+    await sqlFederationStore.appendDiffEvent({
+      ownerSubject: projectedAccount.ownerSubject,
+      entityType: "projected_account",
+      entityKey: `${projectedAccount.sourcePeerId}:${projectedAccount.providerId}:${projectedAccount.accountId}`,
+      op: "note_routed",
+      payload: {
+        providerId: projectedAccount.providerId,
+        accountId: projectedAccount.accountId,
+        availabilityState: projectedAccount.availabilityState,
+        warmRequestCount: projectedAccount.warmRequestCount,
+        importedCredential,
+      },
+    });
+
+    return { importedCredential, projectedAccount };
+  }
+
+  async function executeFederatedRequestFallback(input: {
+    readonly requestHeaders: Record<string, unknown>;
+    readonly requestBody: Record<string, unknown>;
+    readonly requestAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly subject?: string };
+    readonly providerRoutes: readonly ProviderRoute[];
+    readonly upstreamPath: string;
+    readonly reply: FastifyReply;
+    readonly timeoutMs: number;
+  }): Promise<boolean> {
+    if (!sqlFederationStore) {
+      return false;
+    }
+
+    const hopCount = resolveFederationHopCount(input.requestHeaders);
+    if (hopCount >= 1) {
+      return false;
+    }
+
+    const ownerSubject = resolveFederationOwnerSubject({
+      headers: input.requestHeaders,
+      requestAuth: input.requestAuth,
+      hopCount,
+    });
+    if (!ownerSubject) {
+      return false;
+    }
+
+    const localProviderIds = new Set(input.providerRoutes.map((route) => route.providerId.trim().toLowerCase()));
+    if (localProviderIds.size === 0) {
+      return false;
+    }
+
+    const peers = await sqlFederationStore.listPeers(ownerSubject);
+    const peersById = new Map(peers
+      .filter((peer) => peer.status.trim().toLowerCase() === "active")
+      .map((peer) => [peer.id, peer] as const));
+
+    const projectedCandidates = (await sqlFederationStore.getProjectedAccountsForOwner(ownerSubject))
+      .filter((account) => account.availabilityState !== "imported")
+      .filter((account) => localProviderIds.has(account.providerId.trim().toLowerCase()))
+      .map((projectedAccount) => {
+        const peer = peersById.get(projectedAccount.sourcePeerId);
+        const credential = peer ? extractPeerCredential(peer.auth) : undefined;
+        return peer && credential
+          ? { peer, credential, projectedAccount }
+          : undefined;
+      })
+      .filter((candidate): candidate is { readonly peer: FederationPeerRecord; readonly credential: string; readonly projectedAccount: FederationProjectedAccountRecord } => candidate !== undefined)
+      .sort((left, right) => {
+        const stateWeight = (value: FederationProjectedAccountRecord["availabilityState"]): number => value === "remote_route" ? 0 : 1;
+        return stateWeight(left.projectedAccount.availabilityState) - stateWeight(right.projectedAccount.availabilityState)
+          || right.projectedAccount.warmRequestCount - left.projectedAccount.warmRequestCount
+          || left.projectedAccount.providerId.localeCompare(right.projectedAccount.providerId)
+          || left.projectedAccount.accountId.localeCompare(right.projectedAccount.accountId)
+          || left.projectedAccount.sourcePeerId.localeCompare(right.projectedAccount.sourcePeerId);
+      });
+
+    if (projectedCandidates.length === 0) {
+      return false;
+    }
+
+    const bodyText = JSON.stringify(input.requestBody);
+
+    for (const candidate of projectedCandidates) {
+      const headers = buildForwardHeaders(input.requestHeaders as never);
+      headers.set("authorization", `Bearer ${candidate.credential}`);
+      headers.set(FEDERATION_HOP_HEADER, String(hopCount + 1));
+      headers.set(FEDERATION_OWNER_SUBJECT_HEADER, ownerSubject);
+      headers.set(FEDERATION_FORCED_PROVIDER_HEADER, candidate.projectedAccount.providerId);
+      headers.set(FEDERATION_FORCED_ACCOUNT_ID_HEADER, candidate.projectedAccount.accountId);
+
+      let remoteResponse: Response;
+      try {
+        remoteResponse = await fetchWithResponseTimeout(
+          `${candidate.peer.baseUrl}${input.upstreamPath}`,
+          {
+            method: "POST",
+            headers,
+            body: bodyText,
+          },
+          input.timeoutMs,
+        );
+      } catch (error) {
+        app.log.warn({
+          error: toErrorMessage(error),
+          peerId: candidate.peer.id,
+          upstreamPath: input.upstreamPath,
+          providerId: candidate.projectedAccount.providerId,
+          accountId: candidate.projectedAccount.accountId,
+        }, "federated request attempt failed before response");
+        continue;
+      }
+
+      if (!remoteResponse.ok) {
+        try {
+          await remoteResponse.arrayBuffer();
+        } catch {
+          // ignore response drain failure while trying the next candidate
+        }
+        app.log.warn({
+          peerId: candidate.peer.id,
+          status: remoteResponse.status,
+          providerId: candidate.projectedAccount.providerId,
+          accountId: candidate.projectedAccount.accountId,
+        }, "federated request attempt returned non-success response");
+        continue;
+      }
+
+      const routed = await noteFederatedProjectedAccountRouted({
+        projectedAccount: candidate.projectedAccount,
+        timeoutMs: input.timeoutMs,
+      });
+
+      for (const [name, value] of remoteResponse.headers.entries()) {
+        if (FEDERATION_BLOCKED_RESPONSE_HEADERS.has(name.toLowerCase())) {
+          continue;
+        }
+        input.reply.header(name, value);
+      }
+      input.reply.header(FEDERATION_OWNER_SUBJECT_HEADER, ownerSubject);
+      input.reply.header(FEDERATION_ROUTED_PEER_HEADER, candidate.peer.id);
+      input.reply.header(FEDERATION_ROUTED_PROVIDER_HEADER, candidate.projectedAccount.providerId);
+      input.reply.header(FEDERATION_ROUTED_ACCOUNT_HEADER, candidate.projectedAccount.accountId);
+      if (routed.importedCredential) {
+        input.reply.header(FEDERATION_IMPORTED_HEADER, "true");
+      }
+
+      input.reply.code(remoteResponse.status);
+      const contentType = remoteResponse.headers.get("content-type") ?? "";
+      const isEventStream = contentType.toLowerCase().includes("text/event-stream");
+
+      if (!remoteResponse.body) {
+        input.reply.send(await remoteResponse.text());
+        return true;
+      }
+
+      if (isEventStream) {
+        input.reply.removeHeader("content-length");
+        input.reply.send(Readable.fromWeb(remoteResponse.body as never));
+        return true;
+      }
+
+      input.reply.send(Buffer.from(await remoteResponse.arrayBuffer()));
+      return true;
+    }
+
+    return false;
+  }
+
   async function refreshOpenAiOauthAccounts(accountId?: string): Promise<{
     readonly totalAccounts: number;
     readonly refreshedCount: number;
@@ -743,6 +1177,503 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     return resolved.catalog;
   }
 
+  // Declared separately to allow closure capture before assignment
+  // eslint-disable-next-line prefer-const
+  let bridgeRelay: FederationBridgeRelay | undefined;
+
+  async function getBridgeAdvertisedModelIds(): Promise<string[]> {
+    if (!bridgeRelay) {
+      return [];
+    }
+
+    const connectedSessions = bridgeRelay.listSessions().filter((session) => session.state === "connected");
+    if (connectedSessions.length === 0) {
+      return [];
+    }
+
+    // Prefer advertised capabilities when available (avoids fan-out overhead).
+    // Fall back to /v1/models fan-out when capabilities are not yet advertised.
+    const advertisedModels = new Set<string>();
+    for (const session of connectedSessions) {
+      for (const capability of session.capabilities) {
+        for (const model of capability.models) {
+          advertisedModels.add(model);
+        }
+      }
+    }
+
+    if (advertisedModels.size > 0) {
+      return [...advertisedModels];
+    }
+
+    // Fallback: fan-out /v1/models to each connected session when capabilities not advertised
+    const remoteModelLists = await Promise.all(connectedSessions.map(async (session) => {
+      try {
+        const response = await bridgeRelay!.requestJson(session.sessionId, {
+          path: "/v1/models",
+          timeoutMs: Math.min(config.requestTimeoutMs, 10_000),
+          headers: { accept: "application/json" },
+        });
+        return parseModelIdsFromCatalogPayload(response.json);
+      } catch (error) {
+        app.log.warn({ error: toErrorMessage(error), sessionId: session.sessionId }, "failed to fetch bridge model inventory from connected session");
+        return [];
+      }
+    }));
+
+    return [...new Set(remoteModelLists.flat())];
+  }
+
+  async function getMergedModelIds(forceRefresh = false): Promise<string[]> {
+    const localCatalog = await getResolvedModelCatalog(forceRefresh);
+    const bridgedModels = await getBridgeAdvertisedModelIds();
+    return [...new Set([...localCatalog.modelIds, ...bridgedModels])];
+  }
+
+  const legacyBridgePathPrefixes = [
+    "/v1/chat/completions",
+    "/v1/models",
+    "/v1/responses",
+    "/v1/embeddings",
+    "/v1/images/generations",
+  ] as const;
+
+  function bridgeCapabilitySupportsPath(capability: {
+    readonly paths?: readonly string[];
+    readonly routes?: readonly string[];
+    readonly supportsModelsList?: boolean;
+    readonly supportsChatCompletions?: boolean;
+    readonly supportsResponses?: boolean;
+  }, normalizedPath: string): boolean {
+    const advertisedRoutes = [...(capability.paths ?? []), ...(capability.routes ?? [])]
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+
+    if (advertisedRoutes.length > 0) {
+      return advertisedRoutes.some((prefix) => normalizedPath.startsWith(prefix));
+    }
+
+    if (normalizedPath.startsWith("/v1/models")) {
+      return capability.supportsModelsList === true;
+    }
+    if (normalizedPath.startsWith("/v1/chat/completions")) {
+      return capability.supportsChatCompletions === true;
+    }
+    if (normalizedPath.startsWith("/v1/responses")) {
+      return capability.supportsResponses === true;
+    }
+
+    const hasStructuredCapabilityHints = capability.supportsModelsList !== undefined
+      || capability.supportsChatCompletions !== undefined
+      || capability.supportsResponses !== undefined;
+
+    return !hasStructuredCapabilityHints
+      && legacyBridgePathPrefixes.some((prefix) => normalizedPath.startsWith(prefix));
+  }
+
+  function bridgeCapabilitySupportsModel(capability: {
+    readonly models?: readonly string[];
+    readonly modelPrefixes?: readonly string[];
+  }, requestedModel: string | undefined): boolean {
+    if (!requestedModel) {
+      return true;
+    }
+
+    const normalizedModel = requestedModel.trim();
+    if (normalizedModel.length === 0) {
+      return true;
+    }
+
+    const advertisedModels = (capability.models ?? [])
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    if (advertisedModels.includes(normalizedModel)) {
+      return true;
+    }
+
+    const advertisedPrefixes = (capability.modelPrefixes ?? [])
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    return advertisedPrefixes.some((prefix) => normalizedModel.startsWith(prefix));
+  }
+
+  function appendBridgeResponseHeaders(reply: FastifyReply, headers: Readonly<Record<string, string>>): void {
+    for (const [name, value] of Object.entries(headers)) {
+      if (name.toLowerCase() === "content-length") {
+        continue;
+      }
+      reply.header(name, value);
+    }
+  }
+
+  function decodeBridgeResponseChunk(event: Extract<BridgeRelayResponseEvent, { readonly type: "response_chunk" }>): Buffer {
+    return event.encoding === "base64"
+      ? Buffer.from(event.chunk, "base64")
+      : Buffer.from(event.chunk, "utf8");
+  }
+
+  async function executeBridgeRequestFallback(input: {
+    readonly requestHeaders: Record<string, unknown>;
+    readonly requestBody: Record<string, unknown>;
+    readonly requestAuth?: Pick<ResolvedRequestAuth, "kind" | "subject" | "tenantId">;
+    readonly upstreamPath: string;
+    readonly reply: FastifyReply;
+    readonly timeoutMs: number;
+  }): Promise<boolean> {
+    if (!bridgeRelay) {
+      return false;
+    }
+
+    // Reject multi-hop bridge routing to prevent request loops
+    const hopCount = resolveFederationHopCount(input.requestHeaders);
+    if (hopCount >= 1) {
+      app.log.warn({ hopCount, upstreamPath: input.upstreamPath }, "bridge request rejected: hop limit exceeded");
+      return false;
+    }
+
+    const ownerSubject = resolveFederationOwnerSubject({
+      headers: input.requestHeaders,
+      requestAuth: input.requestAuth,
+      hopCount,
+    });
+    if (!ownerSubject) {
+      return false;
+    }
+
+    const tenantId = input.requestAuth?.tenantId
+      ?? (input.requestAuth?.kind === "legacy_admin" ? DEFAULT_TENANT_ID : undefined);
+    if (!tenantId) {
+      return false;
+    }
+
+    const requestedModel = normalizeRequestedModel(input.requestBody.model);
+
+    // Filter connected sessions by advertised capability for the requested path
+    const normalizedPath = input.upstreamPath.split("?")[0]!;
+    const connectedSessions = bridgeRelay.listSessions()
+      .filter((session) => session.state === "connected")
+      .filter((session) => session.ownerSubject === ownerSubject)
+      .filter((session) => session.tenantId === tenantId)
+      .filter((session) => {
+        const hasCapability = session.capabilities.some((cap) => {
+          return bridgeCapabilitySupportsPath(cap, normalizedPath)
+            && bridgeCapabilitySupportsModel(cap, requestedModel);
+        });
+        return hasCapability;
+      });
+    if (connectedSessions.length === 0) {
+      return false;
+    }
+
+    const bodyText = JSON.stringify(input.requestBody);
+
+    for (const session of connectedSessions) {
+      let responseStarted = false;
+      let rawResponse: typeof input.reply.raw | undefined;
+      try {
+        const responseEvents = bridgeRelay.requestStream(session.sessionId, {
+          method: "POST",
+          path: input.upstreamPath,
+          timeoutMs: input.timeoutMs,
+          headers: {
+            accept: typeof input.requestHeaders.accept === "string" ? input.requestHeaders.accept : "application/json",
+            "content-type": "application/json",
+          },
+          body: bodyText,
+          requestContext: { tenantId },
+          routingIntent: requestedModel ? { model: requestedModel } : undefined,
+        });
+
+        let sawHead = false;
+        let isStreaming = false;
+        let responseHeaders: Readonly<Record<string, string>> = {};
+        const bufferedChunks: Buffer[] = [];
+
+        for await (const event of responseEvents) {
+          switch (event.type) {
+            case "response_head": {
+              sawHead = true;
+              responseStarted = true;
+              responseHeaders = event.headers;
+              appendBridgeResponseHeaders(input.reply, event.headers);
+              input.reply.header(FEDERATION_OWNER_SUBJECT_HEADER, ownerSubject);
+              input.reply.header(FEDERATION_ROUTED_PEER_HEADER, `bridge:${session.clusterId}:${session.agentId}`);
+              input.reply.code(event.status);
+
+              const contentType = event.headers["content-type"] ?? event.headers["Content-Type"] ?? "";
+              isStreaming = typeof contentType === "string" && contentType.toLowerCase().includes("text/event-stream");
+              if (isStreaming) {
+                input.reply.removeHeader("content-length");
+                input.reply.header("cache-control", "no-cache");
+                input.reply.header("x-accel-buffering", "no");
+                input.reply.header("content-type", "text/event-stream; charset=utf-8");
+                input.reply.hijack();
+                rawResponse = input.reply.raw;
+                rawResponse.statusCode = event.status;
+                for (const [name, value] of Object.entries(input.reply.getHeaders())) {
+                  if (value !== undefined) {
+                    rawResponse.setHeader(name, value as never);
+                  }
+                }
+                rawResponse.flushHeaders();
+              }
+              break;
+            }
+            case "response_chunk": {
+              if (!sawHead) {
+                sawHead = true;
+                responseStarted = true;
+                input.reply.header(FEDERATION_OWNER_SUBJECT_HEADER, ownerSubject);
+                input.reply.header(FEDERATION_ROUTED_PEER_HEADER, `bridge:${session.clusterId}:${session.agentId}`);
+                input.reply.code(200);
+              }
+
+              const chunk = decodeBridgeResponseChunk(event);
+              if (isStreaming && rawResponse) {
+                rawResponse.write(chunk);
+              } else {
+                bufferedChunks.push(chunk);
+              }
+              break;
+            }
+            case "response_end":
+              break;
+            default:
+              break;
+          }
+        }
+
+        if (isStreaming && rawResponse) {
+          if (!rawResponse.writableEnded) {
+            rawResponse.end();
+          }
+          return true;
+        }
+
+        const responseBody = Buffer.concat(bufferedChunks).toString("utf8");
+        const contentType = responseHeaders["content-type"] ?? responseHeaders["Content-Type"] ?? "";
+        const parsed = typeof contentType === "string" && contentType.toLowerCase().includes("application/json")
+          ? parseJsonIfPossible(responseBody)
+          : undefined;
+        if (parsed !== undefined) {
+          input.reply.send(parsed);
+        } else {
+          input.reply.send(responseBody);
+        }
+        return true;
+      } catch (error) {
+        if (rawResponse && !rawResponse.writableEnded) {
+          rawResponse.end();
+        }
+        app.log.warn({ error: toErrorMessage(error), sessionId: session.sessionId, upstreamPath: input.upstreamPath }, "bridged request attempt failed");
+        if (responseStarted) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  const handleBridgeRequest = async (input: {
+    readonly method: string;
+    readonly path: string;
+    readonly headers: Readonly<Record<string, string>>;
+    readonly bodyText: string;
+    readonly ownerSubject: string;
+    readonly tenantId?: string;
+  }): ReturnType<NonNullable<Parameters<typeof createEnvFederationBridgeAgent>[0]["handleBridgeRequest"]>> => {
+    // Security: restrict bridge requests to allowed API paths only.
+    // This prevents the bridge from acting as a privileged generic proxy
+    // that could access internal routes like /api/ui/federation/accounts.
+    const allowedBridgePaths = [
+      "/v1/chat/completions",
+      "/v1/models",
+      "/v1/responses",
+      "/v1/embeddings",
+      "/v1/images/generations",
+    ];
+    const normalizedPath = input.path.split("?")[0]!;
+    if (!allowedBridgePaths.some((prefix) => normalizedPath.startsWith(prefix))) {
+      app.log.warn({ path: input.path, ownerSubject: input.ownerSubject }, "bridge request rejected: path not in allowed list");
+      return {
+        status: 403,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ error: { message: "Bridge requests are restricted to model API paths", type: "invalid_request_error" } }),
+        servedByClusterId: process.env.FEDERATION_SELF_CLUSTER_ID?.trim(),
+        servedByGroupId: process.env.FEDERATION_SELF_GROUP_ID?.trim(),
+        servedByNodeId: process.env.FEDERATION_SELF_NODE_ID?.trim(),
+      };
+    }
+
+    const headers: Record<string, string> = {
+      accept: input.headers.accept ?? "application/json",
+      // Use a dedicated bridge identity header instead of the global admin token.
+      // This prevents the bridge from becoming a privileged proxy with admin access.
+      "x-open-hax-bridge-auth": "internal",
+      [FEDERATION_HOP_HEADER]: "1",
+      [FEDERATION_OWNER_SUBJECT_HEADER]: input.ownerSubject,
+    };
+    if (typeof input.tenantId === "string" && input.tenantId.trim().length > 0) {
+      headers[FEDERATION_BRIDGE_TENANT_HEADER] = input.tenantId.trim();
+    }
+    if (typeof input.headers["content-type"] === "string") {
+      headers["content-type"] = input.headers["content-type"];
+    }
+
+    const appAddress = app.server.address();
+    if (appAddress && typeof appAddress !== "string") {
+      const response = await fetch(`http://127.0.0.1:${appAddress.port}${input.path}`, {
+        method: input.method,
+        headers,
+        body: input.bodyText.length > 0 ? input.bodyText : undefined,
+      });
+
+      return (async function* () {
+        const responseHeaders: Record<string, string> = {};
+        for (const [name, value] of response.headers.entries()) {
+          responseHeaders[name] = value;
+        }
+
+        const providerId = responseHeaders["x-open-hax-upstream-provider"];
+        const servedByClusterId = process.env.FEDERATION_SELF_CLUSTER_ID?.trim();
+        const servedByGroupId = process.env.FEDERATION_SELF_GROUP_ID?.trim();
+        const servedByNodeId = process.env.FEDERATION_SELF_NODE_ID?.trim();
+
+        yield {
+          type: "response_head" as const,
+          status: response.status,
+          headers: responseHeaders,
+          servedByClusterId,
+          servedByGroupId,
+          servedByNodeId,
+          providerId,
+        };
+
+        if (!response.body) {
+          yield {
+            type: "response_end" as const,
+            servedByClusterId,
+            servedByGroupId,
+            servedByNodeId,
+            providerId,
+          };
+          return;
+        }
+
+        const contentType = (response.headers.get("content-type") ?? "").trim().toLowerCase();
+        const encodeAsUtf8 = contentType.length === 0
+          || contentType.startsWith("text/")
+          || contentType.includes("json")
+          || contentType.includes("xml")
+          || contentType.includes("javascript")
+          || contentType.includes("event-stream");
+        const decoder = encodeAsUtf8 ? new TextDecoder("utf8") : undefined;
+        const reader = response.body.getReader();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+          if (!value || value.length === 0) {
+            continue;
+          }
+
+          if (decoder) {
+            const chunk = decoder.decode(value, { stream: true });
+            if (chunk.length > 0) {
+              yield {
+                type: "response_chunk" as const,
+                chunk,
+                encoding: "utf8" as const,
+                servedByClusterId,
+                servedByGroupId,
+                servedByNodeId,
+                providerId,
+              };
+            }
+            continue;
+          }
+
+          yield {
+            type: "response_chunk" as const,
+            chunk: Buffer.from(value).toString("base64"),
+            encoding: "base64" as const,
+            servedByClusterId,
+            servedByGroupId,
+            servedByNodeId,
+            providerId,
+          };
+        }
+
+        if (decoder) {
+          const tail = decoder.decode();
+          if (tail.length > 0) {
+            yield {
+              type: "response_chunk" as const,
+              chunk: tail,
+              encoding: "utf8" as const,
+              servedByClusterId,
+              servedByGroupId,
+              servedByNodeId,
+              providerId,
+            };
+          }
+        }
+
+        yield {
+          type: "response_end" as const,
+          servedByClusterId,
+          servedByGroupId,
+          servedByNodeId,
+          providerId,
+        };
+      })();
+    }
+
+    const injected = await app.inject({
+      method: input.method as "GET" | "POST",
+      url: input.path,
+      headers,
+      payload: input.bodyText.length > 0 ? input.bodyText : undefined,
+    });
+
+    const responseHeaders: Record<string, string> = {};
+    for (const [name, value] of Object.entries(injected.headers)) {
+      if (typeof value === "string") {
+        responseHeaders[name] = value;
+      }
+    }
+
+    const provenance = {
+      servedByClusterId: process.env.FEDERATION_SELF_CLUSTER_ID?.trim(),
+      servedByGroupId: process.env.FEDERATION_SELF_GROUP_ID?.trim(),
+      servedByNodeId: process.env.FEDERATION_SELF_NODE_ID?.trim(),
+      providerId: responseHeaders["x-open-hax-upstream-provider"],
+    };
+
+    return {
+      status: injected.statusCode,
+      headers: responseHeaders,
+      body: injected.body,
+      encoding: "utf8",
+      ...provenance,
+    };
+  };
+
+  const bridgeAgent = createEnvFederationBridgeAgent({
+    config,
+    keyPool,
+    credentialStore: runtimeCredentialStore,
+    logger: app.log,
+    getResolvedModelCatalog: () => getResolvedModelCatalog(false),
+    handleBridgeRequest,
+  });
+
   function shouldRejectModelFromProviderCatalog(
     providerRoutes: readonly ProviderRoute[],
     routedModel: string,
@@ -784,9 +1715,15 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     app.log.warn("proxy auth disabled via PROXY_ALLOW_UNAUTHENTICATED=true");
   }
 
+  type DecoratedAppRequest = FastifyRequest & {
+    openHaxAuth: ResolvedRequestAuth | null;
+    _otelSpan: TelemetrySpan | null;
+  };
+
   app.decorateRequest("openHaxAuth", null);
 
   app.addHook("onRequest", async (request, reply) => {
+    const decoratedRequest = request as DecoratedAppRequest;
     const origin = request.headers.origin;
     reply.header("Access-Control-Allow-Origin", origin ?? "*");
     reply.header("Vary", "Origin");
@@ -808,7 +1745,30 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
-    const resolvedAuth = await resolveRequestAuth({
+    let bridgeResolvedAuth: ResolvedRequestAuth | undefined;
+    const bridgeAuthHeader = request.headers["x-open-hax-bridge-auth"];
+    const internalOwnerSubject = typeof request.headers[FEDERATION_OWNER_SUBJECT_HEADER] === "string"
+      ? request.headers[FEDERATION_OWNER_SUBJECT_HEADER].trim()
+      : undefined;
+    const internalTenantId = typeof request.headers[FEDERATION_BRIDGE_TENANT_HEADER] === "string"
+      ? request.headers[FEDERATION_BRIDGE_TENANT_HEADER].trim()
+      : undefined;
+    if (
+      bridgeAuthHeader === "internal"
+      && rawPath.startsWith("/v1/")
+      && internalOwnerSubject
+      && isTrustedLocalBridgeAddress(request.raw.socket.remoteAddress)
+    ) {
+      bridgeResolvedAuth = {
+        kind: "legacy_admin",
+        tenantId: internalTenantId || DEFAULT_TENANT_ID,
+        role: "owner",
+        source: "none",
+        subject: internalOwnerSubject,
+      };
+    }
+
+    const resolvedAuth = bridgeResolvedAuth ?? await resolveRequestAuth({
       allowUnauthenticated: config.allowUnauthenticated,
       proxyAuthToken: config.proxyAuthToken,
       authorization: request.headers.authorization,
@@ -837,7 +1797,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
-    (request as any).openHaxAuth = resolvedAuth;
+    decoratedRequest.openHaxAuth = resolvedAuth;
 
     const enforceTenantQuotaRoute = request.method === "POST" && (
       rawPath === "/v1/chat/completions"
@@ -887,11 +1847,11 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       "http.method": request.method,
       "http.path": (request.raw.url ?? request.url).split("?")[0],
     });
-    (request as any)._otelSpan = span;
+    (request as DecoratedAppRequest)._otelSpan = span;
   });
 
   app.addHook("onResponse", async (request, reply) => {
-    const span = (request as any)._otelSpan as TelemetrySpan | null;
+    const span = (request as DecoratedAppRequest)._otelSpan;
     if (!span) return;
     span.setAttribute("http.status_code", reply.statusCode);
     if (reply.statusCode >= 400) span.setStatus("error", `HTTP ${reply.statusCode}`);
@@ -1002,16 +1962,16 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   });
 
   app.get("/v1/models", async (_request, reply) => {
-    const catalog = await getResolvedModelCatalog();
+    const modelIds = await getMergedModelIds();
     reply.send({
       object: "list",
-      data: catalog.modelIds.map(toOpenAiModel)
+      data: modelIds.map(toOpenAiModel)
     });
   });
 
   app.get<{ Params: { model: string } }>("/v1/models/:model", async (request, reply) => {
-    const catalog = await getResolvedModelCatalog();
-    const model = catalog.modelIds.find((entry) => entry === request.params.model);
+    const modelIds = await getMergedModelIds();
+    const model = modelIds.find((entry) => entry === request.params.model);
     if (!model) {
       sendOpenAiError(reply, 404, `Model not found: ${request.params.model}`, "invalid_request_error", "model_not_found");
       return;
@@ -1021,8 +1981,8 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   });
 
   app.get("/api/tags", async (_request, reply) => {
-    const catalog = await getResolvedModelCatalog();
-    reply.send(modelIdsToNativeTags(catalog.modelIds));
+    const modelIds = await getMergedModelIds();
+    reply.send(modelIdsToNativeTags(modelIds));
   });
 
   app.post<{ Body: WebSearchToolRequest }>("/api/tools/websearch", async (request, reply) => {
@@ -1324,6 +2284,31 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
+    const federatedChatHandled = await executeFederatedRequestFallback({
+      requestHeaders: request.headers,
+      requestBody,
+      requestAuth: (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly subject?: string } }).openHaxAuth,
+      providerRoutes,
+      upstreamPath: "/v1/chat/completions",
+      reply,
+      timeoutMs: context.upstreamAttemptTimeoutMs,
+    });
+    if (federatedChatHandled) {
+      return;
+    }
+
+    const bridgedChatHandled = await executeBridgeRequestFallback({
+      requestHeaders: request.headers,
+      requestBody,
+      requestAuth: (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly subject?: string } }).openHaxAuth,
+      upstreamPath: "/v1/chat/completions",
+      reply,
+      timeoutMs: context.upstreamAttemptTimeoutMs,
+    });
+    if (bridgedChatHandled) {
+      return;
+    }
+
     if (execution.candidateCount === 0) {
       const retryInMs = await minMsUntilAnyProviderKeyReady(keyPool, providerRoutes);
       if (retryInMs > 0) {
@@ -1543,6 +2528,19 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
+    const federatedResponsesHandled = await executeFederatedRequestFallback({
+      requestHeaders: request.headers,
+      requestBody,
+      requestAuth: (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly subject?: string } }).openHaxAuth,
+      providerRoutes,
+      upstreamPath: "/v1/responses",
+      reply,
+      timeoutMs: context.upstreamAttemptTimeoutMs,
+    });
+    if (federatedResponsesHandled) {
+      return;
+    }
+
     if (execution.candidateCount === 0) {
       const retryInMs = await minMsUntilAnyProviderKeyReady(keyPool, providerRoutes);
       if (retryInMs > 0) {
@@ -1704,6 +2702,19 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     );
 
     if (execution.handled) {
+      return;
+    }
+
+    const federatedImagesHandled = await executeFederatedRequestFallback({
+      requestHeaders: request.headers,
+      requestBody,
+      requestAuth: (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly subject?: string } }).openHaxAuth,
+      providerRoutes,
+      upstreamPath: "/v1/images/generations",
+      reply,
+      timeoutMs: context.upstreamAttemptTimeoutMs,
+    });
+    if (federatedImagesHandled) {
       return;
     }
 
@@ -1948,12 +2959,14 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     reply.send(bridgeResponse.body);
   });
 
-  await registerUiRoutes(app, {
+  bridgeRelay = await registerUiRoutes(app, {
     config,
     keyPool,
     requestLogStore,
     credentialStore: runtimeCredentialStore,
     sqlCredentialStore,
+    sqlFederationStore,
+    sqlRequestUsageStore,
     authPersistence: sqlAuthPersistence,
     proxySettingsStore,
     eventStore,
@@ -1977,7 +2990,18 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     });
   }
 
+  if (bridgeAgent) {
+    void bridgeAgent.start().then(() => {
+      app.log.info({ snapshot: bridgeAgent.snapshot() }, "federation bridge agent connected");
+    }).catch((error) => {
+      app.log.warn({ error: toErrorMessage(error) }, "federation bridge agent initial connect failed; reconnect loop will continue in background");
+    });
+  }
+
   app.addHook("onClose", async () => {
+    if (bridgeAgent) {
+      await bridgeAgent.stop();
+    }
     await tokenRefreshManager.stopAndWait();
 
     if (accountHealthStore) {

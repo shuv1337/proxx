@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -103,7 +104,7 @@ async function withProxyApp(
     throw new Error("Failed to resolve upstream server address");
   }
 
-  const config: ProxyConfig = {
+  const defaultConfig: ProxyConfig = {
     host: "127.0.0.1",
     port: 0,
     upstreamProviderId: "vivgrid",
@@ -112,6 +113,7 @@ async function withProxyApp(
     upstreamProviderBaseUrls: {
       vivgrid: `http://127.0.0.1:${address.port}`,
       "ollama-cloud": `http://127.0.0.1:${address.port}`,
+      ob1: `http://127.0.0.1:${address.port}`,
       openai: `http://127.0.0.1:${address.port}`,
       openrouter: `http://127.0.0.1:${address.port}`,
       requesty: `http://127.0.0.1:${address.port}`,
@@ -169,11 +171,19 @@ async function withProxyApp(
     openaiOauthScopes: "openid profile email offline_access",
     openaiOauthClientId: "app_EMoamEEZ73f0CkXaXp7hrann",
     openaiOauthIssuer: "https://auth.openai.com",
-    ...options.configOverrides,
     proxyTokenPepper: options.configOverrides?.proxyTokenPepper ?? "test-proxy-token-pepper",
     oauthRefreshMaxConcurrency: options.configOverrides?.oauthRefreshMaxConcurrency ?? 32,
     oauthRefreshBackgroundIntervalMs: options.configOverrides?.oauthRefreshBackgroundIntervalMs ?? 15_000,
     oauthRefreshProactiveWindowMs: options.configOverrides?.oauthRefreshProactiveWindowMs ?? 30 * 60_000,
+  };
+
+  const config: ProxyConfig = {
+    ...defaultConfig,
+    ...options.configOverrides,
+    upstreamProviderBaseUrls: {
+      ...defaultConfig.upstreamProviderBaseUrls,
+      ...(options.configOverrides?.upstreamProviderBaseUrls ?? {}),
+    },
   };
 
   const app = await createApp(config);
@@ -236,6 +246,37 @@ async function withPatchedFetch(
   } finally {
     globalThis.fetch = originalFetch;
   }
+}
+
+async function withZaiProxyApp(
+  upstreamHandler: (request: IncomingMessage, body: string) => Promise<{ status: number; headers?: Record<string, string>; body: string }>,
+  fn: (ctx: TestContext) => Promise<void>,
+): Promise<void> {
+  await withEnv(
+    {
+      ZAI_API_KEY: "zai-key-1", // pragma: allowlist secret
+      ZAI_PROVIDER_ID: undefined,
+      GEMINI_API_KEY: undefined,
+      OPENROUTER_API_KEY: undefined,
+      REQUESTY_API_TOKEN: undefined,
+      REQUESTY_API_KEY: undefined,
+    },
+    async () => {
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: { providers: {} },
+          configOverrides: {
+            upstreamProviderId: "zai",
+            upstreamFallbackProviderIds: [],
+            localOllamaEnabled: false,
+          },
+          upstreamHandler,
+        },
+        fn,
+      );
+    },
+  );
 }
 
 test("rotates API key when first key is rate-limited", async () => {
@@ -415,6 +456,66 @@ test("routes claude models through chat completions for the requesty provider", 
           assert.equal(response.statusCode, 200);
         },
       );
+    },
+  );
+});
+
+test("routes claude models through chat completions for the ob1 provider", { concurrency: false }, async () => {
+  await withProxyApp(
+    {
+      keys: [],
+      keysPayload: {
+        providers: {
+          ob1: {
+            auth: "api_key",
+            accounts: ["ob1-key-1"],
+          },
+        },
+      },
+      configOverrides: {
+        upstreamProviderId: "ob1",
+        upstreamFallbackProviderIds: [],
+      },
+      upstreamHandler: async (request, body) => {
+        if (request.url === "/api/embed" || request.url === "/api/embeddings") {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ embeddings: [[0.1, 0.2, 0.3]] }),
+          };
+        }
+
+        assert.equal(request.url, "/v1/chat/completions");
+        assert.match(body, /claude-opus-4-5/);
+        assert.equal(request.headers.authorization, "Bearer ob1-key-1");
+
+        return {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: "cmpl-ob1",
+            object: "chat.completion",
+            created: 1,
+            model: "claude-opus-4-5",
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          }),
+        };
+      },
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        payload: {
+          model: "claude-opus-4-5",
+          messages: [{ role: "user", content: "hello" }],
+        },
+        headers: {
+          authorization: "Bearer local-test",
+        },
+      });
+
+      assert.equal(response.statusCode, 200);
     },
   );
 });
@@ -972,71 +1073,141 @@ test("maps Gemini 3.1 Pro reasoning effort to thinkingLevel", { concurrency: fal
 });
 
 test("routes glm chat requests through z.ai custom chat-completions path when ZAI_API_KEY is configured", { concurrency: false }, async () => {
-  await withEnv(
-    {
-      ZAI_API_KEY: "zai-key-1", // pragma: allowlist secret
-      ZAI_PROVIDER_ID: undefined,
-      GEMINI_API_KEY: undefined,
-      OPENROUTER_API_KEY: undefined,
-      REQUESTY_API_TOKEN: undefined,
-      REQUESTY_API_KEY: undefined,
+  await withZaiProxyApp(
+    async (request, body) => {
+      assert.equal(request.url, "/api/paas/v4/chat/completions");
+      assert.equal(request.headers.authorization, "Bearer zai-key-1");
+
+      const parsed = JSON.parse(body) as Record<string, unknown>;
+      assert.equal(parsed.model, "glm-5");
+      assert.ok(Array.isArray(parsed.messages));
+
+      return {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "chatcmpl_zai",
+          object: "chat.completion",
+          created: 1772516801,
+          model: "glm-5",
+          choices: [{
+            index: 0,
+            message: { role: "assistant", content: "zai-glm-ok" },
+            finish_reason: "stop",
+          }],
+        }),
+      };
     },
-    async () => {
-      await withProxyApp(
-        {
-          keys: [],
-          keysPayload: { providers: {} },
-          configOverrides: {
-            upstreamProviderId: "zai",
-            upstreamFallbackProviderIds: [],
-            localOllamaEnabled: false,
-          },
-          upstreamHandler: async (request, body) => {
-            assert.equal(request.url, "/api/paas/v4/chat/completions");
-            assert.equal(request.headers.authorization, "Bearer zai-key-1");
-
-            const parsed = JSON.parse(body) as Record<string, unknown>;
-            assert.equal(parsed.model, "glm-5");
-            assert.ok(Array.isArray(parsed.messages));
-
-            return {
-              status: 200,
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                id: "chatcmpl_zai",
-                object: "chat.completion",
-                created: 1772516801,
-                model: "glm-5",
-                choices: [{
-                  index: 0,
-                  message: { role: "assistant", content: "zai-glm-ok" },
-                  finish_reason: "stop",
-                }],
-              }),
-            };
-          },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
         },
-        async ({ app }) => {
-          const response = await app.inject({
-            method: "POST",
-            url: "/v1/chat/completions",
-            headers: {
-              "content-type": "application/json"
-            },
-            payload: {
-              model: "glm-5",
-              messages: [{ role: "user", content: "hello" }],
-              stream: false,
-            }
-          });
+        payload: {
+          model: "glm-5",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false,
+        }
+      });
 
-          assert.equal(response.statusCode, 200);
-          assert.equal(response.headers["x-open-hax-upstream-provider"], "zai");
-          const payload: unknown = response.json();
-          assert.ok(isRecord(payload));
-          assert.equal((payload.choices as any)[0].message.content, "zai-glm-ok");
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.headers["x-open-hax-upstream-provider"], "zai");
+      const payload: unknown = response.json();
+      assert.ok(isRecord(payload));
+      assert.equal((payload.choices as any)[0].message.content, "zai-glm-ok");
+    },
+  );
+});
+
+test("lists z.ai models through the custom models path when ZAI_API_KEY is configured", { concurrency: false }, async () => {
+  await withZaiProxyApp(
+    async (request) => {
+      assert.equal(request.url, "/api/paas/v4/models");
+
+      return {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          object: "list",
+          data: [
+            { id: "glm-5" },
+            { id: "glm-4.7-flash" },
+          ],
+        }),
+      };
+    },
+    async ({ app }) => {
+      const response = await app.inject({ method: "GET", url: "/v1/models" });
+
+      assert.equal(response.statusCode, 200);
+      const payload: unknown = response.json();
+      assert.ok(isRecord(payload));
+      assert.equal(payload.object, "list");
+      assert.ok(Array.isArray(payload.data));
+      assert.ok(payload.data.some((entry: unknown) => isRecord(entry) && entry.id === "glm-5"));
+      assert.ok(payload.data.some((entry: unknown) => isRecord(entry) && entry.id === "glm-4.7-flash"));
+    },
+  );
+});
+
+test("records z.ai chat-completions usage in request logs", { concurrency: false }, async () => {
+  await withZaiProxyApp(
+    async () => ({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "chatcmpl_zai_usage",
+        object: "chat.completion",
+        created: 1772516801,
+        model: "glm-5-turbo",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "zai-usage-ok" },
+          finish_reason: "stop",
+        }],
+        usage: {
+          prompt_tokens: 11,
+          completion_tokens: 7,
+          total_tokens: 18,
+          prompt_tokens_details: { cached_tokens: 3 },
+          completion_tokens_details: { reasoning_tokens: 5 },
         },
-      );
+      }),
+    }),
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "glm-5-turbo",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false,
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+
+      const logsResponse = await app.inject({
+        method: "GET",
+        url: "/api/ui/request-logs?providerId=zai&limit=1"
+      });
+      assert.equal(logsResponse.statusCode, 200);
+
+      const payload: unknown = logsResponse.json();
+      assert.ok(isRecord(payload));
+      assert.ok(Array.isArray(payload.entries));
+      assert.ok(isRecord(payload.entries[0]));
+      assert.equal(payload.entries[0].providerId, "zai");
+      assert.equal(payload.entries[0].promptTokens, 11);
+      assert.equal(payload.entries[0].completionTokens, 7);
+      assert.equal(payload.entries[0].totalTokens, 18);
+      assert.equal(payload.entries[0].cachedPromptTokens, 3);
+      assert.equal(payload.entries[0].cacheHit, true);
     },
   );
 });
@@ -1511,7 +1682,7 @@ test("does not misclassify gemini models as local ollama because they contain mi
   );
 });
 
-test("falls back from vivgrid to ollama-cloud for shared models when primary provider auth fails", async () => {
+test("prefers ollama-cloud over vivgrid for glm shared models when both are available", async () => {
   const observedAuth: string[] = [];
 
   await withProxyApp(
@@ -1582,8 +1753,7 @@ test("falls back from vivgrid to ollama-cloud for shared models when primary pro
 
       assert.equal(response.statusCode, 200);
       assert.equal(response.headers["x-open-hax-upstream-provider"], "ollama-cloud");
-      assert.ok(observedAuth.length >= 2);
-      assert.deepEqual(observedAuth.slice(-2), ["vivgrid-failing-key", "ollama-cloud-working-key"]);
+      assert.deepEqual(observedAuth, ["ollama-cloud-working-key"]);
 
       const payload: unknown = response.json();
       assert.ok(isRecord(payload));
@@ -1741,7 +1911,7 @@ test("tries all candidate keys until one succeeds", async () => {
   );
 });
 
-test("tries all primary provider accounts before fallback provider accounts", async () => {
+test("glm provider ordering uses ollama-cloud before vivgrid candidate keys", async () => {
   const observedAuth: string[] = [];
 
   await withProxyApp(
@@ -1808,7 +1978,7 @@ test("tries all primary provider accounts before fallback provider accounts", as
 
       assert.equal(response.statusCode, 200);
       assert.equal(response.headers["x-open-hax-upstream-provider"], "ollama-cloud");
-      assert.deepEqual(observedAuth, ["vivgrid-bad-a", "vivgrid-bad-b", "vivgrid-bad-c", "ollama-good"]);
+      assert.deepEqual(observedAuth, ["ollama-good"]);
     }
   );
 });
@@ -2454,7 +2624,7 @@ test("refreshes oauth tokens on 401 unauthorized before marking rate-limited", a
             upstreamProviderId: "openai",
             upstreamFallbackProviderIds: [],
           },
-          upstreamHandler: async (request, body) => {
+          upstreamHandler: async (request, _body) => {
             const auth = request.headers.authorization;
             if (typeof auth === "string") {
               observedAuth.push(auth.replace(/^Bearer\s+/i, ""));
@@ -3181,7 +3351,7 @@ test("permanently disables api_key accounts on 403 (forbidden/suspended)", async
       assert.ok(first.statusCode >= 400, `first request should fail, got ${first.statusCode}`);
       const firstCount = requestCount;
 
-      const second = await app.inject({
+      const _second = await app.inject({
         method: "POST",
         url: "/v1/chat/completions",
         headers: { "content-type": "application/json" },
@@ -4036,6 +4206,9 @@ test("tenant disabledProviderIds blocks local ollama usage", async () => {
 });
 
 test("weekly dashboard uses persisted daily model/account aggregates and reports incomplete coverage", async () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const day0 = Math.floor((Date.now() - 5 * DAY_MS) / DAY_MS) * DAY_MS;
+  const day1 = day0 + DAY_MS;
   const requestLogsPayload = {
     entries: [
       {
@@ -4060,7 +4233,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
     hourlyBuckets: [],
     dailyBuckets: [
       {
-        startMs: Date.UTC(2026, 2, 17, 0, 0, 0),
+        startMs: day0,
         requestCount: 5,
         errorCount: 0,
         totalTokens: 1500,
@@ -4079,7 +4252,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
         waterEvaporatedMl: 0.075,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: day1,
         requestCount: 4,
         errorCount: 1,
         totalTokens: 900,
@@ -4100,7 +4273,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
     ],
     dailyModelBuckets: [
       {
-        startMs: Date.UTC(2026, 2, 17, 0, 0, 0),
+        startMs: day0,
         providerId: "openai",
         model: "gpt-5.4",
         requestCount: 5,
@@ -4121,7 +4294,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
         waterEvaporatedMl: 0.075,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: day1,
         providerId: "factory",
         model: "claude-sonnet-4-5",
         requestCount: 4,
@@ -4144,7 +4317,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
     ],
     dailyAccountBuckets: [
       {
-        startMs: Date.UTC(2026, 2, 17, 0, 0, 0),
+        startMs: day0,
         providerId: "openai",
         accountId: "acct-openai",
         authType: "oauth_bearer",
@@ -4165,13 +4338,13 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
         ttftCount: 5,
         tpsSum: 50,
         tpsCount: 5,
-        lastUsedAtMs: Date.UTC(2026, 2, 17, 12, 0, 0),
+        lastUsedAtMs: day0 + 12 * 60 * 60 * 1000,
         costUsd: 1.5,
         energyJoules: 150,
         waterEvaporatedMl: 0.075,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: day1,
         providerId: "factory",
         accountId: "acct-factory",
         authType: "oauth_bearer",
@@ -4192,7 +4365,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
         ttftCount: 4,
         tpsSum: 40,
         tpsCount: 4,
-        lastUsedAtMs: Date.UTC(2026, 2, 18, 12, 0, 0),
+        lastUsedAtMs: day1 + 12 * 60 * 60 * 1000,
         costUsd: 0.9,
         energyJoules: 90,
         waterEvaporatedMl: 0.045,
@@ -4296,13 +4469,16 @@ test("/api/ui/me exposes resolved auth context for legacy admin token", async ()
 });
 
 test("provider-model analytics summarizes global models, providers, and provider-model pairs", async () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const day0 = Math.floor((Date.now() - 5 * DAY_MS) / DAY_MS) * DAY_MS;
+  const day1 = day0 + DAY_MS;
   const requestLogsPayload = {
     entries: [],
     hourlyBuckets: [],
     dailyBuckets: [],
     dailyModelBuckets: [
       {
-        startMs: Date.UTC(2026, 2, 17, 0, 0, 0),
+        startMs: day0,
         providerId: "openai",
         model: "gpt-5.4",
         requestCount: 6,
@@ -4322,13 +4498,13 @@ test("provider-model analytics summarizes global models, providers, and provider
         ttftCount: 6,
         tpsSum: 72,
         tpsCount: 6,
-        lastUsedAtMs: Date.UTC(2026, 2, 17, 12, 0, 0),
+        lastUsedAtMs: day0 + 12 * 60 * 60 * 1000,
         costUsd: 1.8,
         energyJoules: 180,
         waterEvaporatedMl: 0.09,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: day1,
         providerId: "factory",
         model: "gpt-5.4",
         requestCount: 4,
@@ -4348,13 +4524,13 @@ test("provider-model analytics summarizes global models, providers, and provider
         ttftCount: 4,
         tpsSum: 44,
         tpsCount: 4,
-        lastUsedAtMs: Date.UTC(2026, 2, 18, 12, 0, 0),
+        lastUsedAtMs: day1 + 12 * 60 * 60 * 1000,
         costUsd: 1.0,
         energyJoules: 100,
         waterEvaporatedMl: 0.05,
       },
       {
-        startMs: Date.UTC(2026, 2, 18, 0, 0, 0),
+        startMs: day1,
         providerId: "factory",
         model: "claude-sonnet-4-5",
         requestCount: 3,
@@ -4374,7 +4550,7 @@ test("provider-model analytics summarizes global models, providers, and provider
         ttftCount: 3,
         tpsSum: 24,
         tpsCount: 3,
-        lastUsedAtMs: Date.UTC(2026, 2, 18, 15, 0, 0),
+        lastUsedAtMs: day1 + 15 * 60 * 60 * 1000,
         costUsd: 0.9,
         energyJoules: 90,
         waterEvaporatedMl: 0.045,

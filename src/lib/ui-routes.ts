@@ -1,24 +1,36 @@
+import type { IncomingMessage } from "node:http";
 import { resolve } from "node:path";
 import { access, readFile } from "node:fs/promises";
+import type { Duplex } from "node:stream";
 
 import type { FastifyInstance } from "fastify";
 
 import type { ProxyConfig } from "./config.js";
 import { CredentialStore, type CredentialStoreLike } from "./credential-store.js";
-import type { ResolvedRequestAuth } from "./request-auth.js";
+import {
+  collectLocalHostDashboardSnapshot,
+  fetchRemoteHostDashboardSnapshot,
+  inferSelfHostDashboardTargetId,
+  loadHostDashboardTargetsFromEnv,
+  resolveHostDashboardTargetToken,
+} from "./host-dashboard.js";
+import { resolveRequestAuth, type ResolvedRequestAuth } from "./request-auth.js";
 import type { KeyPool, KeyPoolAccountStatus } from "./key-pool.js";
 import { OpenAiOAuthManager } from "./openai-oauth.js";
 import { FactoryOAuthManager } from "./factory-oauth.js";
 import { fetchOpenAiQuotaSnapshots } from "./openai-quota.js";
-import { RequestLogStore } from "./request-log-store.js";
+import { RequestLogStore, type RequestLogEntry } from "./request-log-store.js";
 import { ChromaSessionIndex } from "./chroma-session-index.js";
 import { SessionStore, type ChatRole } from "./session-store.js";
 import { getToolSeedForModel, loadMcpSeeds } from "./tool-mcp-seed.js";
 import type { ProxySettingsStore } from "./proxy-settings-store.js";
 import type { EventStore } from "./db/event-store.js";
 import type { SqlCredentialStore } from "./db/sql-credential-store.js";
+import { shouldWarmImportProjectedAccount, type SqlFederationStore } from "./db/sql-federation-store.js";
+import type { SqlRequestUsageStore } from "./db/sql-request-usage-store.js";
 import type { SqlAuthPersistence } from "./auth/sql-persistence.js";
 import { DEFAULT_TENANT_ID, normalizeTenantId } from "./tenant-api-key.js";
+import { createFederationBridgeRelay, type FederationBridgeRelay } from "./federation/bridge-relay.js";
 
 interface UiRouteDependencies {
   readonly config: ProxyConfig;
@@ -26,6 +38,8 @@ interface UiRouteDependencies {
   readonly requestLogStore: RequestLogStore;
   readonly credentialStore: CredentialStoreLike;
   readonly sqlCredentialStore?: SqlCredentialStore;
+  readonly sqlFederationStore?: SqlFederationStore;
+  readonly sqlRequestUsageStore?: SqlRequestUsageStore;
   readonly authPersistence?: SqlAuthPersistence;
   readonly proxySettingsStore: ProxySettingsStore;
   readonly eventStore?: EventStore;
@@ -351,6 +365,329 @@ function authCanManageTenantKeys(auth: ResolvedRequestAuth | undefined, tenantId
   return membership?.role === "owner" || membership?.role === "admin";
 }
 
+function authCanAccessHostDashboard(auth: ResolvedRequestAuth | undefined): boolean {
+  if (!auth) {
+    return false;
+  }
+
+  if (auth.kind === "legacy_admin") {
+    return true;
+  }
+
+  if (auth.kind === "ui_session") {
+    return auth.role === "owner" || auth.role === "admin";
+  }
+
+  return false;
+}
+
+function authCanManageFederation(auth: ResolvedRequestAuth | undefined): boolean {
+  if (!auth) {
+    return false;
+  }
+
+  if (auth.kind === "legacy_admin") {
+    return true;
+  }
+
+  return auth.kind === "ui_session" && (auth.role === "owner" || auth.role === "admin");
+}
+
+type FederationKnownAccountSummary = {
+  readonly providerId: string;
+  readonly accountId: string;
+  readonly displayName: string;
+  readonly authType?: "api_key" | "oauth_bearer";
+  readonly planType?: string;
+  readonly chatgptAccountId?: string;
+  readonly email?: string;
+  readonly subject?: string;
+  readonly ownerSubject?: string;
+  readonly sourcePeerId?: string;
+  readonly projectedState?: string;
+  readonly warmRequestCount?: number;
+  readonly hasCredentials: boolean;
+  readonly knowledgeSources: readonly string[];
+};
+
+type FederationAccountsResponse = {
+  readonly ownerSubject: string | null;
+  readonly localAccounts: readonly FederationKnownAccountSummary[];
+  readonly projectedAccounts: ReadonlyArray<{
+    readonly sourcePeerId: string;
+    readonly ownerSubject: string;
+    readonly providerId: string;
+    readonly accountId: string;
+    readonly accountSubject?: string;
+    readonly chatgptAccountId?: string;
+    readonly email?: string;
+    readonly planType?: string;
+    readonly availabilityState: string;
+    readonly warmRequestCount: number;
+    readonly lastRoutedAt?: string;
+    readonly importedAt?: string;
+  }>;
+  readonly knownAccounts: readonly FederationKnownAccountSummary[];
+};
+
+function accountKnowledgeKey(providerId: string, accountId: string): string {
+  return `${providerId}\0${accountId}`;
+}
+
+async function buildFederationAccountKnowledge(
+  credentialStore: CredentialStoreLike,
+  projectedAccounts: ReadonlyArray<{
+    readonly sourcePeerId: string;
+    readonly ownerSubject: string;
+    readonly providerId: string;
+    readonly accountId: string;
+    readonly accountSubject?: string;
+    readonly chatgptAccountId?: string;
+    readonly email?: string;
+    readonly planType?: string;
+    readonly availabilityState: string;
+    readonly warmRequestCount: number;
+  }>,
+  options: {
+    readonly ownerSubject?: string;
+    readonly defaultOwnerSubject?: string;
+  } = {},
+): Promise<{
+  readonly localAccounts: readonly FederationKnownAccountSummary[];
+  readonly knownAccounts: readonly FederationKnownAccountSummary[];
+}> {
+  const providers = await credentialStore.listProviders(false);
+  const localAccounts: FederationKnownAccountSummary[] = [];
+  const known = new Map<string, FederationKnownAccountSummary>();
+  const requestedOwnerSubject = options.ownerSubject?.trim();
+  const defaultOwnerSubject = options.defaultOwnerSubject?.trim();
+  const includeAllLocalAccounts = !requestedOwnerSubject
+    || (defaultOwnerSubject !== undefined && defaultOwnerSubject.length > 0 && requestedOwnerSubject === defaultOwnerSubject);
+  const projectedAccountKeys = new Set(projectedAccounts.map((projected) => accountKnowledgeKey(projected.providerId, projected.accountId)));
+
+  for (const provider of providers) {
+    for (const account of provider.accounts) {
+      const key = accountKnowledgeKey(provider.id, account.id);
+      if (!includeAllLocalAccounts && account.subject !== requestedOwnerSubject && !projectedAccountKeys.has(key)) {
+        continue;
+      }
+
+      const summary: FederationKnownAccountSummary = {
+        providerId: provider.id,
+        accountId: account.id,
+        displayName: account.displayName,
+        authType: account.authType,
+        planType: account.planType,
+        chatgptAccountId: account.chatgptAccountId,
+        email: account.email,
+        subject: account.subject,
+        ownerSubject: requestedOwnerSubject,
+        hasCredentials: true,
+        knowledgeSources: ["local_credential"],
+      };
+      localAccounts.push(summary);
+      known.set(key, summary);
+    }
+  }
+
+  for (const projected of projectedAccounts) {
+    const key = accountKnowledgeKey(projected.providerId, projected.accountId);
+    const existing = known.get(key);
+    const projectedSource = `projected:${projected.availabilityState}`;
+    if (existing) {
+      known.set(key, {
+        ...existing,
+        ownerSubject: existing.ownerSubject ?? projected.ownerSubject,
+        sourcePeerId: existing.sourcePeerId ?? projected.sourcePeerId,
+        projectedState: projected.availabilityState,
+        warmRequestCount: projected.warmRequestCount,
+        knowledgeSources: [...new Set([...existing.knowledgeSources, projectedSource])],
+      });
+      continue;
+    }
+
+    known.set(key, {
+      providerId: projected.providerId,
+      accountId: projected.accountId,
+      displayName: projected.email ?? projected.chatgptAccountId ?? projected.accountSubject ?? projected.accountId,
+      planType: projected.planType,
+      chatgptAccountId: projected.chatgptAccountId,
+      email: projected.email,
+      subject: projected.accountSubject,
+      ownerSubject: projected.ownerSubject,
+      sourcePeerId: projected.sourcePeerId,
+      projectedState: projected.availabilityState,
+      warmRequestCount: projected.warmRequestCount,
+      hasCredentials: false,
+      knowledgeSources: [projectedSource],
+    });
+  }
+
+  const sortAccounts = (left: FederationKnownAccountSummary, right: FederationKnownAccountSummary): number =>
+    left.providerId.localeCompare(right.providerId)
+      || left.accountId.localeCompare(right.accountId)
+      || left.displayName.localeCompare(right.displayName);
+
+  return {
+    localAccounts: [...localAccounts].sort(sortAccounts),
+    knownAccounts: [...known.values()].sort(sortAccounts),
+  };
+}
+
+function extractPeerCredential(auth: Record<string, unknown>): string | undefined {
+  const direct = typeof auth.credential === "string" ? auth.credential.trim() : "";
+  if (direct.length > 0) {
+    return direct;
+  }
+
+  const bearer = typeof auth.bearer === "string" ? auth.bearer.trim() : "";
+  return bearer.length > 0 ? bearer : undefined;
+}
+
+async function fetchFederationJson<T>(input: {
+  readonly url: string;
+  readonly credential?: string;
+  readonly timeoutMs: number;
+  readonly method?: "GET" | "POST";
+  readonly body?: Record<string, unknown>;
+}): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
+
+  try {
+    const headers = new Headers();
+    headers.set("content-type", "application/json");
+    if (input.credential && input.credential.length > 0) {
+      headers.set("authorization", `Bearer ${input.credential}`);
+    }
+
+    const response = await fetch(input.url, {
+      method: input.method ?? "GET",
+      headers,
+      body: input.body ? JSON.stringify(input.body) : undefined,
+      signal: controller.signal,
+    });
+
+    const text = await response.text();
+    const parsed = text.length > 0 ? JSON.parse(text) as T & { readonly error?: string } : {} as T & { readonly error?: string };
+    if (!response.ok) {
+      const detail = typeof parsed.error === "string" ? parsed.error : `request failed with ${response.status}`;
+      throw new Error(detail);
+    }
+
+    return parsed as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function sanitizeFederationUsageEntry(candidate: unknown): RequestLogEntry | undefined {
+  if (typeof candidate !== "object" || candidate === null) {
+    return undefined;
+  }
+
+  const row = candidate as Record<string, unknown>;
+  const id = typeof row.id === "string" ? row.id.trim() : "";
+  const providerId = typeof row.providerId === "string" ? row.providerId.trim() : "";
+  const accountId = typeof row.accountId === "string" ? row.accountId.trim() : "";
+  const authType = row.authType;
+  const model = typeof row.model === "string" ? row.model.trim() : "";
+  const upstreamMode = typeof row.upstreamMode === "string" ? row.upstreamMode.trim() : "";
+  const upstreamPath = typeof row.upstreamPath === "string" ? row.upstreamPath.trim() : "";
+  const timestamp = typeof row.timestamp === "number" && Number.isFinite(row.timestamp) ? row.timestamp : undefined;
+  const status = typeof row.status === "number" && Number.isFinite(row.status) ? row.status : undefined;
+  const latencyMs = typeof row.latencyMs === "number" && Number.isFinite(row.latencyMs) ? row.latencyMs : undefined;
+  const serviceTierSource = row.serviceTierSource;
+
+  if (!id || !providerId || !accountId || !model || !upstreamMode || !upstreamPath || timestamp === undefined || status === undefined || latencyMs === undefined) {
+    return undefined;
+  }
+
+  const normalizedAuthType: RequestLogEntry["authType"] =
+    authType === "api_key" || authType === "oauth_bearer" || authType === "local" || authType === "none"
+      ? authType
+      : "none";
+
+  const normalizedServiceTierSource: RequestLogEntry["serviceTierSource"] =
+    serviceTierSource === "fast_mode" || serviceTierSource === "explicit" || serviceTierSource === "none"
+      ? serviceTierSource
+      : "none";
+
+  return {
+    id,
+    timestamp,
+    tenantId: typeof row.tenantId === "string" ? row.tenantId : undefined,
+    issuer: typeof row.issuer === "string" ? row.issuer : undefined,
+    keyId: typeof row.keyId === "string" ? row.keyId : undefined,
+    providerId,
+    accountId,
+    authType: normalizedAuthType,
+    model,
+    upstreamMode,
+    upstreamPath,
+    status,
+    latencyMs,
+    serviceTier: typeof row.serviceTier === "string" ? row.serviceTier : undefined,
+    serviceTierSource: normalizedServiceTierSource,
+    promptTokens: typeof row.promptTokens === "number" && Number.isFinite(row.promptTokens) ? row.promptTokens : undefined,
+    completionTokens: typeof row.completionTokens === "number" && Number.isFinite(row.completionTokens) ? row.completionTokens : undefined,
+    totalTokens: typeof row.totalTokens === "number" && Number.isFinite(row.totalTokens) ? row.totalTokens : undefined,
+    cachedPromptTokens: typeof row.cachedPromptTokens === "number" && Number.isFinite(row.cachedPromptTokens) ? row.cachedPromptTokens : undefined,
+    imageCount: typeof row.imageCount === "number" && Number.isFinite(row.imageCount) ? row.imageCount : undefined,
+    imageCostUsd: typeof row.imageCostUsd === "number" && Number.isFinite(row.imageCostUsd) ? row.imageCostUsd : undefined,
+    promptCacheKeyUsed: row.promptCacheKeyUsed === true,
+    cacheHit: row.cacheHit === true,
+    ttftMs: typeof row.ttftMs === "number" && Number.isFinite(row.ttftMs) ? row.ttftMs : undefined,
+    tps: typeof row.tps === "number" && Number.isFinite(row.tps) ? row.tps : undefined,
+    error: typeof row.error === "string" ? row.error : undefined,
+    upstreamErrorCode: typeof row.upstreamErrorCode === "string" ? row.upstreamErrorCode : undefined,
+    upstreamErrorType: typeof row.upstreamErrorType === "string" ? row.upstreamErrorType : undefined,
+    upstreamErrorMessage: typeof row.upstreamErrorMessage === "string" ? row.upstreamErrorMessage : undefined,
+    costUsd: typeof row.costUsd === "number" && Number.isFinite(row.costUsd) ? row.costUsd : undefined,
+    energyJoules: typeof row.energyJoules === "number" && Number.isFinite(row.energyJoules) ? row.energyJoules : undefined,
+    waterEvaporatedMl: typeof row.waterEvaporatedMl === "number" && Number.isFinite(row.waterEvaporatedMl) ? row.waterEvaporatedMl : undefined,
+  };
+}
+
+type FederationCredentialExport = {
+  readonly providerId: string;
+  readonly accountId: string;
+  readonly authType: "api_key" | "oauth_bearer";
+  readonly secret: string;
+  readonly refreshToken?: string;
+  readonly expiresAt?: number;
+  readonly chatgptAccountId?: string;
+  readonly email?: string;
+  readonly subject?: string;
+  readonly planType?: string;
+};
+
+async function findCredentialForFederationExport(
+  credentialStore: CredentialStoreLike,
+  providerId: string,
+  accountId: string,
+): Promise<FederationCredentialExport | undefined> {
+  const providers = await credentialStore.listProviders(true);
+  const provider = providers.find((candidate) => candidate.id === providerId);
+  const account = provider?.accounts.find((candidate) => candidate.id === accountId);
+  if (!provider || !account || typeof account.secret !== "string" || account.secret.trim().length === 0) {
+    return undefined;
+  }
+
+  return {
+    providerId,
+    accountId,
+    authType: account.authType,
+    secret: account.secret,
+    refreshToken: account.refreshToken,
+    expiresAt: account.expiresAt,
+    chatgptAccountId: account.chatgptAccountId,
+    email: account.email,
+    subject: account.subject,
+    planType: account.planType,
+  };
+}
+
 function toChatRole(value: unknown): ChatRole {
   if (value === "system" || value === "user" || value === "assistant" || value === "tool") {
     return value;
@@ -472,291 +809,88 @@ async function resolveUsageScopeFromAuth(input: {
   };
 }
 
-async function buildUsageOverview(
-  requestLogStore: RequestLogStore,
+function resolveUsageWindowConfig(window: UsageWindow, now: number): {
+  readonly bucketMs: number;
+  readonly bucketCount: number;
+  readonly bucketWindowStart: number;
+} {
+  const bucketMs = window === "daily" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+  const bucketCount = window === "monthly" ? 30 : window === "weekly" ? 7 : 24;
+  const bucketWindowStart = bucketStart(now - (bucketCount - 1) * bucketMs, bucketMs);
+
+  return {
+    bucketMs,
+    bucketCount,
+    bucketWindowStart,
+  };
+}
+
+async function buildUsageOverviewFromEntries(
+  entries: readonly RequestLogEntry[],
   keyPool: KeyPool,
   credentialStore: CredentialStoreLike,
-  sort?: string,
-  window: UsageWindow = "daily",
-  scope?: UsageScope,
+  sort: string | undefined,
+  window: UsageWindow,
+  now: number,
+  coverage: {
+    readonly coverageStartMs: number | null;
+    readonly retainedEntryCount: number;
+    readonly maxRetainedEntries: number;
+  },
 ): Promise<UsageOverviewResponse> {
-  if (hasUsageScope(scope)) {
-    const allLogs = requestLogStore.snapshot().filter((entry) => entryMatchesUsageScope(entry, scope));
-    const allAccountStatuses: Record<string, readonly KeyPoolAccountStatus[]> = await keyPool.getAllAccountStatuses().catch(() => ({}));
-    const credentialProviders = await credentialStore.listProviders(false).catch(() => []);
-    const providerById = new Map(credentialProviders.map((provider) => [provider.id, provider]));
-    const now = Date.now();
-    const bucketMs = window === "daily" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-    const bucketCount = window === "monthly" ? 30 : window === "weekly" ? 7 : 24;
-    const bucketWindowStart = bucketStart(now - (bucketCount - 1) * bucketMs, bucketMs);
-    const recentLogs = allLogs.filter((entry) => entry.timestamp >= bucketWindowStart);
+  const allAccountStatuses: Record<string, readonly KeyPoolAccountStatus[]> = await keyPool.getAllAccountStatuses().catch(() => ({}));
+  const credentialProviders = await credentialStore.listProviders(false).catch(() => []);
+  const providerById = new Map(credentialProviders.map((provider) => [provider.id, provider]));
+  const { bucketMs, bucketCount, bucketWindowStart } = resolveUsageWindowConfig(window, now);
+  const recentLogs = entries.filter((entry) => entry.timestamp >= bucketWindowStart);
 
-    const bucketAgg = new Map<number, {
-      requests: number;
-      tokens: number;
-      promptTokens: number;
-      completionTokens: number;
-      cachedPromptTokens: number;
-      imageCount: number;
-      imageCostUsd: number;
-      costUsd: number;
-      energyJoules: number;
-      waterEvaporatedMl: number;
-      cacheHits: number;
-      cacheKeyUses: number;
-      errors: number;
-      fastMode: number;
-      priority: number;
-      standard: number;
-    }>();
-    const modelTotals = new Map<string, number>();
-    const providerTotals = new Map<string, number>();
-    const accountAgg = new Map<string, {
-      accountId: string;
-      providerId: string;
-      authType: "api_key" | "oauth_bearer" | "local" | "none";
-      requestCount: number;
-      totalTokens: number;
-      promptTokens: number;
-      completionTokens: number;
-      cachedPromptTokens: number;
-      imageCount: number;
-      imageCostUsd: number;
-      costUsd: number;
-      energyJoules: number;
-      waterEvaporatedMl: number;
-      cacheHitCount: number;
-      cacheKeyUseCount: number;
-      ttftSum: number;
-      ttftCount: number;
-      tpsSum: number;
-      tpsCount: number;
-      lastUsedAtMs: number;
-    }>();
-    const shortAgg = new Map<string, { ttftSum: number; ttftCount: number; tpsSum: number; tpsCount: number }>();
-    const shortWindowMs = 2 * 60 * 1000;
+  const bucketAgg = new Map<number, {
+    requests: number;
+    tokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    cachedPromptTokens: number;
+    imageCount: number;
+    imageCostUsd: number;
+    costUsd: number;
+    energyJoules: number;
+    waterEvaporatedMl: number;
+    cacheHits: number;
+    cacheKeyUses: number;
+    errors: number;
+    fastMode: number;
+    priority: number;
+    standard: number;
+  }>();
+  const modelTotals = new Map<string, number>();
+  const providerTotals = new Map<string, number>();
+  const accountAgg = new Map<string, {
+    accountId: string;
+    providerId: string;
+    authType: "api_key" | "oauth_bearer" | "local" | "none";
+    requestCount: number;
+    totalTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    cachedPromptTokens: number;
+    imageCount: number;
+    imageCostUsd: number;
+    costUsd: number;
+    energyJoules: number;
+    waterEvaporatedMl: number;
+    cacheHitCount: number;
+    cacheKeyUseCount: number;
+    ttftSum: number;
+    ttftCount: number;
+    tpsSum: number;
+    tpsCount: number;
+    lastUsedAtMs: number;
+  }>();
+  const shortAgg = new Map<string, { ttftSum: number; ttftCount: number; tpsSum: number; tpsCount: number }>();
+  const shortWindowMs = 2 * 60 * 1000;
 
-    for (const entry of recentLogs) {
-      const seriesBucket = bucketAgg.get(bucketStart(entry.timestamp, bucketMs)) ?? {
-        requests: 0,
-        tokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        cachedPromptTokens: 0,
-        imageCount: 0,
-        imageCostUsd: 0,
-        costUsd: 0,
-        energyJoules: 0,
-        waterEvaporatedMl: 0,
-        cacheHits: 0,
-        cacheKeyUses: 0,
-        errors: 0,
-        fastMode: 0,
-        priority: 0,
-        standard: 0,
-      };
-      seriesBucket.requests += 1;
-      seriesBucket.tokens += usageCount(entry.totalTokens);
-      seriesBucket.promptTokens += usageCount(entry.promptTokens);
-      seriesBucket.completionTokens += usageCount(entry.completionTokens);
-      seriesBucket.cachedPromptTokens += usageCount(entry.cachedPromptTokens);
-      seriesBucket.imageCount += usageCount(entry.imageCount);
-      seriesBucket.imageCostUsd += usageCount(entry.imageCostUsd);
-      seriesBucket.costUsd += usageCount(entry.costUsd);
-      seriesBucket.energyJoules += usageCount(entry.energyJoules);
-      seriesBucket.waterEvaporatedMl += usageCount(entry.waterEvaporatedMl);
-      if (entry.cacheHit) {
-        seriesBucket.cacheHits += 1;
-      }
-      if (entry.promptCacheKeyUsed) {
-        seriesBucket.cacheKeyUses += 1;
-      }
-      if (entry.status >= 400 || typeof entry.error === "string") {
-        seriesBucket.errors += 1;
-      }
-      if (entry.serviceTierSource === "fast_mode") {
-        seriesBucket.fastMode += 1;
-      } else if (entry.serviceTier === "priority") {
-        seriesBucket.priority += 1;
-      } else {
-        seriesBucket.standard += 1;
-      }
-      bucketAgg.set(bucketStart(entry.timestamp, bucketMs), seriesBucket);
-
-      modelTotals.set(entry.model, (modelTotals.get(entry.model) ?? 0) + usageCount(entry.totalTokens));
-      providerTotals.set(entry.providerId, (providerTotals.get(entry.providerId) ?? 0) + usageCount(entry.totalTokens));
-
-      const accountKey = `${entry.providerId}\0${entry.accountId}`;
-      const account = accountAgg.get(accountKey) ?? {
-        accountId: entry.accountId,
-        providerId: entry.providerId,
-        authType: entry.authType,
-        requestCount: 0,
-        totalTokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        cachedPromptTokens: 0,
-        imageCount: 0,
-        imageCostUsd: 0,
-        costUsd: 0,
-        energyJoules: 0,
-        waterEvaporatedMl: 0,
-        cacheHitCount: 0,
-        cacheKeyUseCount: 0,
-        ttftSum: 0,
-        ttftCount: 0,
-        tpsSum: 0,
-        tpsCount: 0,
-        lastUsedAtMs: 0,
-      };
-      account.requestCount += 1;
-      account.totalTokens += usageCount(entry.totalTokens);
-      account.promptTokens += usageCount(entry.promptTokens);
-      account.completionTokens += usageCount(entry.completionTokens);
-      account.cachedPromptTokens += usageCount(entry.cachedPromptTokens);
-      account.imageCount += usageCount(entry.imageCount);
-      account.imageCostUsd += usageCount(entry.imageCostUsd);
-      account.costUsd += usageCount(entry.costUsd);
-      account.energyJoules += usageCount(entry.energyJoules);
-      account.waterEvaporatedMl += usageCount(entry.waterEvaporatedMl);
-      if (entry.cacheHit) {
-        account.cacheHitCount += 1;
-      }
-      if (entry.promptCacheKeyUsed) {
-        account.cacheKeyUseCount += 1;
-      }
-      if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) {
-        account.ttftSum += entry.ttftMs;
-        account.ttftCount += 1;
-      }
-      if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) {
-        account.tpsSum += entry.tps;
-        account.tpsCount += 1;
-      }
-      account.lastUsedAtMs = Math.max(account.lastUsedAtMs, entry.timestamp);
-      accountAgg.set(accountKey, account);
-
-      if (entry.timestamp >= now - shortWindowMs) {
-        const short = shortAgg.get(accountKey) ?? { ttftSum: 0, ttftCount: 0, tpsSum: 0, tpsCount: 0 };
-        if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) {
-          short.ttftSum += entry.ttftMs;
-          short.ttftCount += 1;
-        }
-        if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) {
-          short.tpsSum += entry.tps;
-          short.tpsCount += 1;
-        }
-        shortAgg.set(accountKey, short);
-      }
-    }
-
-    const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
-    const healthScoreFor = (account: {
-      providerId: string;
-      accountId: string;
-      requestCount: number;
-      totalTokens: number;
-      ttftSum: number;
-      ttftCount: number;
-      tpsSum: number;
-      tpsCount: number;
-    }, status: "healthy" | "cooldown" | "idle") => {
-      if (status === "cooldown") {
-        return { score: 0, debuff: 1, avgTtftMs: null, avgTps: null };
-      }
-
-      const avgTtftMs = account.ttftCount > 0 ? account.ttftSum / account.ttftCount : null;
-      const avgTps = account.tpsCount > 0 ? account.tpsSum / account.tpsCount : null;
-      const recent = shortAgg.get(`${account.providerId}\0${account.accountId}`);
-      const recentTtft = recent && recent.ttftCount > 0 ? recent.ttftSum / recent.ttftCount : null;
-      const recentTps = recent && recent.tpsCount > 0 ? recent.tpsSum / recent.tpsCount : null;
-
-      let debuff = 0;
-      if (avgTtftMs !== null && recentTtft !== null && recentTtft > avgTtftMs * 1.3) {
-        debuff = Math.max(debuff, clamp01((recentTtft / avgTtftMs - 1) * 0.6));
-      }
-      if (avgTps !== null && recentTps !== null && recentTps < avgTps * 0.7) {
-        debuff = Math.max(debuff, clamp01((avgTps / Math.max(1e-9, recentTps) - 1) * 0.25));
-      }
-
-      const ttftScore = avgTtftMs !== null ? 1 / (1 + avgTtftMs / 800) : 0.5;
-      const tpsScore = avgTps !== null ? clamp01(avgTps / 50) : 0.5;
-      const usageScore = clamp01(Math.log10(1 + account.totalTokens) / 6);
-      return {
-        score: clamp01(0.65 * ttftScore + 0.25 * tpsScore + 0.10 * usageScore - debuff * 0.35),
-        debuff,
-        avgTtftMs,
-        avgTps,
-      };
-    };
-
-    const accountStats = [...accountAgg.values()].map((account) => {
-      const provider = providerById.get(account.providerId);
-      const providerAccount = provider?.accounts.find((candidate) => candidate.id === account.accountId);
-      const accountStatus = (allAccountStatuses[account.providerId] ?? []).find((candidate) => candidate.accountId === account.accountId);
-      const status = accountStatus && !accountStatus.available
-        ? "cooldown"
-        : account.requestCount > 0
-          ? "healthy"
-          : "idle";
-      const health = healthScoreFor(account, status);
-
-      return {
-        accountId: account.accountId,
-        displayName: `${account.providerId}/${account.accountId}`,
-        providerId: account.providerId,
-        authType: providerAccount?.authType ?? account.authType,
-        planType: providerAccount?.planType,
-        status,
-        requestCount: account.requestCount,
-        totalTokens: account.totalTokens,
-        promptTokens: account.promptTokens,
-        completionTokens: account.completionTokens,
-        cachedPromptTokens: account.cachedPromptTokens,
-        imageCount: account.imageCount,
-        imageCostUsd: account.imageCostUsd,
-        costUsd: account.costUsd,
-        energyJoules: account.energyJoules,
-        waterEvaporatedMl: account.waterEvaporatedMl,
-        cacheHitCount: account.cacheHitCount,
-        cacheKeyUseCount: account.cacheKeyUseCount,
-        avgTtftMs: health.avgTtftMs,
-        avgTps: health.avgTps,
-        healthScore: health.score,
-        transientDebuff: health.debuff,
-        lastUsedAt: isoFromTimestamp(account.lastUsedAtMs),
-      } satisfies UsageAccountSummary;
-    });
-
-    const bucketSeries = Array.from({ length: bucketCount }, (_, index) => {
-      const timestamp = bucketStart(now - (bucketCount - index - 1) * bucketMs, bucketMs);
-      const bucket = bucketAgg.get(timestamp);
-      return {
-        t: new Date(timestamp).toISOString(),
-        requests: bucket?.requests ?? 0,
-        tokens: bucket?.tokens ?? 0,
-        errors: bucket?.errors ?? 0,
-      };
-    });
-
-    const totals = [...bucketAgg.values()].reduce((acc, bucket) => ({
-      requests: acc.requests + bucket.requests,
-      tokens: acc.tokens + bucket.tokens,
-      promptTokens: acc.promptTokens + bucket.promptTokens,
-      completionTokens: acc.completionTokens + bucket.completionTokens,
-      cachedPromptTokens: acc.cachedPromptTokens + bucket.cachedPromptTokens,
-      imageCount: acc.imageCount + bucket.imageCount,
-      imageCostUsd: acc.imageCostUsd + bucket.imageCostUsd,
-      costUsd: acc.costUsd + bucket.costUsd,
-      energyJoules: acc.energyJoules + bucket.energyJoules,
-      waterEvaporatedMl: acc.waterEvaporatedMl + bucket.waterEvaporatedMl,
-      cacheHits: acc.cacheHits + bucket.cacheHits,
-      cacheKeyUses: acc.cacheKeyUses + bucket.cacheKeyUses,
-      errors: acc.errors + bucket.errors,
-      fastMode: acc.fastMode + bucket.fastMode,
-      priority: acc.priority + bucket.priority,
-      standard: acc.standard + bucket.standard,
-    }), {
+  for (const entry of recentLogs) {
+    const seriesBucket = bucketAgg.get(bucketStart(entry.timestamp, bucketMs)) ?? {
       requests: 0,
       tokens: 0,
       promptTokens: 0,
@@ -773,96 +907,374 @@ async function buildUsageOverview(
       fastMode: 0,
       priority: 0,
       standard: 0,
-    });
-
-    const earliestEntryAtMs = allLogs.reduce<number | null>((current, entry) => current === null ? entry.timestamp : Math.min(current, entry.timestamp), null);
-    return {
-      window,
-      generatedAt: new Date(now).toISOString(),
-      coverage: {
-        requestedWindowStart: new Date(bucketWindowStart).toISOString(),
-        coverageStart: earliestEntryAtMs !== null ? new Date(earliestEntryAtMs).toISOString() : null,
-        hasFullWindowCoverage: earliestEntryAtMs !== null && earliestEntryAtMs <= bucketWindowStart,
-        retainedEntryCount: allLogs.length,
-        maxRetainedEntries: requestLogStore.getCoverage().maxEntries,
-      },
-      summary: {
-        requests24h: totals.requests,
-        tokens24h: totals.tokens,
-        promptTokens24h: totals.promptTokens,
-        completionTokens24h: totals.completionTokens,
-        cachedPromptTokens24h: totals.cachedPromptTokens,
-        imageCount24h: totals.imageCount,
-        imageCostUsd24h: totals.imageCostUsd,
-        costUsd24h: totals.costUsd,
-        energyJoules24h: totals.energyJoules,
-        waterEvaporatedMl24h: totals.waterEvaporatedMl,
-        cacheKeyUses24h: totals.cacheKeyUses,
-        cacheHitRate24h: totals.cacheKeyUses > 0 ? percentage(totals.cacheHits, totals.cacheKeyUses) : 0,
-        errorRate24h: percentage(totals.errors, totals.requests),
-        topModel: [...modelTotals.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? null,
-        topProvider: [...providerTotals.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? null,
-        activeAccounts: accountStats.filter((account) => account.requestCount > 0).length,
-        serviceTierRequests24h: {
-          fastMode: totals.fastMode,
-          priority: totals.priority,
-          standard: totals.standard,
-        },
-      },
-      trends: {
-        requests: bucketSeries.map((point) => ({ t: point.t, v: point.requests })),
-        tokens: bucketSeries.map((point) => ({ t: point.t, v: point.tokens })),
-        errors: bucketSeries.map((point) => ({ t: point.t, v: point.errors })),
-      },
-      accounts: [...accountStats].sort((a, b) => {
-        const sortKey = (sort ?? "health").trim().toLowerCase();
-        const byTokens = (): number => {
-          if (b.totalTokens !== a.totalTokens) return b.totalTokens - a.totalTokens;
-          if (b.requestCount !== a.requestCount) return b.requestCount - a.requestCount;
-          return a.displayName.localeCompare(b.displayName);
-        };
-
-        switch (sortKey) {
-          case "tokens":
-            return byTokens();
-          case "requests":
-            if (b.requestCount !== a.requestCount) return b.requestCount - a.requestCount;
-            return byTokens();
-          case "ttft": {
-            const leftValue = a.avgTtftMs ?? Number.POSITIVE_INFINITY;
-            const rightValue = b.avgTtftMs ?? Number.POSITIVE_INFINITY;
-            if (leftValue !== rightValue) return leftValue - rightValue;
-            return byTokens();
-          }
-          case "tps": {
-            const leftValue = a.avgTps ?? Number.NEGATIVE_INFINITY;
-            const rightValue = b.avgTps ?? Number.NEGATIVE_INFINITY;
-            if (leftValue !== rightValue) return rightValue - leftValue;
-            return byTokens();
-          }
-          case "health":
-          default: {
-            const leftValue = a.healthScore ?? -1;
-            const rightValue = b.healthScore ?? -1;
-            if (leftValue !== rightValue) return rightValue - leftValue;
-            return byTokens();
-          }
-        }
-      }),
     };
+    seriesBucket.requests += 1;
+    seriesBucket.tokens += usageCount(entry.totalTokens);
+    seriesBucket.promptTokens += usageCount(entry.promptTokens);
+    seriesBucket.completionTokens += usageCount(entry.completionTokens);
+    seriesBucket.cachedPromptTokens += usageCount(entry.cachedPromptTokens);
+    seriesBucket.imageCount += usageCount(entry.imageCount);
+    seriesBucket.imageCostUsd += usageCount(entry.imageCostUsd);
+    seriesBucket.costUsd += usageCount(entry.costUsd);
+    seriesBucket.energyJoules += usageCount(entry.energyJoules);
+    seriesBucket.waterEvaporatedMl += usageCount(entry.waterEvaporatedMl);
+    if (entry.cacheHit) {
+      seriesBucket.cacheHits += 1;
+    }
+    if (entry.promptCacheKeyUsed) {
+      seriesBucket.cacheKeyUses += 1;
+    }
+    if (entry.status >= 400 || typeof entry.error === "string") {
+      seriesBucket.errors += 1;
+    }
+    if (entry.serviceTierSource === "fast_mode") {
+      seriesBucket.fastMode += 1;
+    } else if (entry.serviceTier === "priority") {
+      seriesBucket.priority += 1;
+    } else {
+      seriesBucket.standard += 1;
+    }
+    bucketAgg.set(bucketStart(entry.timestamp, bucketMs), seriesBucket);
+
+    modelTotals.set(entry.model, (modelTotals.get(entry.model) ?? 0) + usageCount(entry.totalTokens));
+    providerTotals.set(entry.providerId, (providerTotals.get(entry.providerId) ?? 0) + usageCount(entry.totalTokens));
+
+    const accountKey = `${entry.providerId}\0${entry.accountId}`;
+    const account = accountAgg.get(accountKey) ?? {
+      accountId: entry.accountId,
+      providerId: entry.providerId,
+      authType: entry.authType,
+      requestCount: 0,
+      totalTokens: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedPromptTokens: 0,
+      imageCount: 0,
+      imageCostUsd: 0,
+      costUsd: 0,
+      energyJoules: 0,
+      waterEvaporatedMl: 0,
+      cacheHitCount: 0,
+      cacheKeyUseCount: 0,
+      ttftSum: 0,
+      ttftCount: 0,
+      tpsSum: 0,
+      tpsCount: 0,
+      lastUsedAtMs: 0,
+    };
+    account.requestCount += 1;
+    account.totalTokens += usageCount(entry.totalTokens);
+    account.promptTokens += usageCount(entry.promptTokens);
+    account.completionTokens += usageCount(entry.completionTokens);
+    account.cachedPromptTokens += usageCount(entry.cachedPromptTokens);
+    account.imageCount += usageCount(entry.imageCount);
+    account.imageCostUsd += usageCount(entry.imageCostUsd);
+    account.costUsd += usageCount(entry.costUsd);
+    account.energyJoules += usageCount(entry.energyJoules);
+    account.waterEvaporatedMl += usageCount(entry.waterEvaporatedMl);
+    if (entry.cacheHit) {
+      account.cacheHitCount += 1;
+    }
+    if (entry.promptCacheKeyUsed) {
+      account.cacheKeyUseCount += 1;
+    }
+    if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) {
+      account.ttftSum += entry.ttftMs;
+      account.ttftCount += 1;
+    }
+    if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) {
+      account.tpsSum += entry.tps;
+      account.tpsCount += 1;
+    }
+    account.lastUsedAtMs = Math.max(account.lastUsedAtMs, entry.timestamp);
+    accountAgg.set(accountKey, account);
+
+    if (entry.timestamp >= now - shortWindowMs) {
+      const short = shortAgg.get(accountKey) ?? { ttftSum: 0, ttftCount: 0, tpsSum: 0, tpsCount: 0 };
+      if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) {
+        short.ttftSum += entry.ttftMs;
+        short.ttftCount += 1;
+      }
+      if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) {
+        short.tpsSum += entry.tps;
+        short.tpsCount += 1;
+      }
+      shortAgg.set(accountKey, short);
+    }
+  }
+
+  const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+  const healthScoreFor = (account: {
+    providerId: string;
+    accountId: string;
+    requestCount: number;
+    totalTokens: number;
+    ttftSum: number;
+    ttftCount: number;
+    tpsSum: number;
+    tpsCount: number;
+  }, status: "healthy" | "cooldown" | "idle") => {
+    if (status === "cooldown") {
+      return { score: 0, debuff: 1, avgTtftMs: null, avgTps: null };
+    }
+
+    const avgTtftMs = account.ttftCount > 0 ? account.ttftSum / account.ttftCount : null;
+    const avgTps = account.tpsCount > 0 ? account.tpsSum / account.tpsCount : null;
+    const recent = shortAgg.get(`${account.providerId}\0${account.accountId}`);
+    const recentTtft = recent && recent.ttftCount > 0 ? recent.ttftSum / recent.ttftCount : null;
+    const recentTps = recent && recent.tpsCount > 0 ? recent.tpsSum / recent.tpsCount : null;
+
+    let debuff = 0;
+    if (avgTtftMs !== null && recentTtft !== null && recentTtft > avgTtftMs * 1.3) {
+      debuff = Math.max(debuff, clamp01((recentTtft / avgTtftMs - 1) * 0.6));
+    }
+    if (avgTps !== null && recentTps !== null && recentTps < avgTps * 0.7) {
+      debuff = Math.max(debuff, clamp01((avgTps / Math.max(1e-9, recentTps) - 1) * 0.25));
+    }
+
+    const ttftScore = avgTtftMs !== null ? 1 / (1 + avgTtftMs / 800) : 0.5;
+    const tpsScore = avgTps !== null ? clamp01(avgTps / 50) : 0.5;
+    const usageScore = clamp01(Math.log10(1 + account.totalTokens) / 6);
+    return {
+      score: clamp01(0.65 * ttftScore + 0.25 * tpsScore + 0.10 * usageScore - debuff * 0.35),
+      debuff,
+      avgTtftMs,
+      avgTps,
+    };
+  };
+
+  // Ensure all configured provider accounts appear in accountAgg, even if idle (zero requests).
+  for (const provider of credentialProviders) {
+    for (const providerAccount of provider.accounts) {
+      const accountKey = `${provider.id}\0${providerAccount.id}`;
+      if (!accountAgg.has(accountKey)) {
+        accountAgg.set(accountKey, {
+          accountId: providerAccount.id,
+          providerId: provider.id,
+          authType: providerAccount.authType,
+          requestCount: 0,
+          totalTokens: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          cachedPromptTokens: 0,
+          imageCount: 0,
+          imageCostUsd: 0,
+          costUsd: 0,
+          energyJoules: 0,
+          waterEvaporatedMl: 0,
+          cacheHitCount: 0,
+          cacheKeyUseCount: 0,
+          ttftSum: 0,
+          ttftCount: 0,
+          tpsSum: 0,
+          tpsCount: 0,
+          lastUsedAtMs: 0,
+        });
+      }
+    }
+  }
+
+  const accountStats = [...accountAgg.values()].map((account) => {
+    const provider = providerById.get(account.providerId);
+    const providerAccount = provider?.accounts.find((candidate) => candidate.id === account.accountId);
+    const accountStatus = (allAccountStatuses[account.providerId] ?? []).find((candidate) => candidate.accountId === account.accountId);
+    const status = accountStatus && !accountStatus.available
+      ? "cooldown"
+      : account.requestCount > 0
+        ? "healthy"
+        : "idle";
+    const health = healthScoreFor(account, status);
+
+    return {
+      accountId: account.accountId,
+      displayName: `${account.providerId}/${account.accountId}`,
+      providerId: account.providerId,
+      authType: providerAccount?.authType ?? account.authType,
+      planType: providerAccount?.planType,
+      status,
+      requestCount: account.requestCount,
+      totalTokens: account.totalTokens,
+      promptTokens: account.promptTokens,
+      completionTokens: account.completionTokens,
+      cachedPromptTokens: account.cachedPromptTokens,
+      imageCount: account.imageCount,
+      imageCostUsd: account.imageCostUsd,
+      costUsd: account.costUsd,
+      energyJoules: account.energyJoules,
+      waterEvaporatedMl: account.waterEvaporatedMl,
+      cacheHitCount: account.cacheHitCount,
+      cacheKeyUseCount: account.cacheKeyUseCount,
+      avgTtftMs: health.avgTtftMs,
+      avgTps: health.avgTps,
+      healthScore: health.score,
+      transientDebuff: health.debuff,
+      lastUsedAt: isoFromTimestamp(account.lastUsedAtMs),
+    } satisfies UsageAccountSummary;
+  });
+
+  const bucketSeries = Array.from({ length: bucketCount }, (_, index) => {
+    const timestamp = bucketStart(now - (bucketCount - index - 1) * bucketMs, bucketMs);
+    const bucket = bucketAgg.get(timestamp);
+    return {
+      t: new Date(timestamp).toISOString(),
+      requests: bucket?.requests ?? 0,
+      tokens: bucket?.tokens ?? 0,
+      errors: bucket?.errors ?? 0,
+    };
+  });
+
+  const totals = [...bucketAgg.values()].reduce((acc, bucket) => ({
+    requests: acc.requests + bucket.requests,
+    tokens: acc.tokens + bucket.tokens,
+    promptTokens: acc.promptTokens + bucket.promptTokens,
+    completionTokens: acc.completionTokens + bucket.completionTokens,
+    cachedPromptTokens: acc.cachedPromptTokens + bucket.cachedPromptTokens,
+    imageCount: acc.imageCount + bucket.imageCount,
+    imageCostUsd: acc.imageCostUsd + bucket.imageCostUsd,
+    costUsd: acc.costUsd + bucket.costUsd,
+    energyJoules: acc.energyJoules + bucket.energyJoules,
+    waterEvaporatedMl: acc.waterEvaporatedMl + bucket.waterEvaporatedMl,
+    cacheHits: acc.cacheHits + bucket.cacheHits,
+    cacheKeyUses: acc.cacheKeyUses + bucket.cacheKeyUses,
+    errors: acc.errors + bucket.errors,
+    fastMode: acc.fastMode + bucket.fastMode,
+    priority: acc.priority + bucket.priority,
+    standard: acc.standard + bucket.standard,
+  }), {
+    requests: 0,
+    tokens: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cachedPromptTokens: 0,
+    imageCount: 0,
+    imageCostUsd: 0,
+    costUsd: 0,
+    energyJoules: 0,
+    waterEvaporatedMl: 0,
+    cacheHits: 0,
+    cacheKeyUses: 0,
+    errors: 0,
+    fastMode: 0,
+    priority: 0,
+    standard: 0,
+  });
+
+  return {
+    window,
+    generatedAt: new Date(now).toISOString(),
+    coverage: {
+      requestedWindowStart: new Date(bucketWindowStart).toISOString(),
+      coverageStart: coverage.coverageStartMs !== null ? new Date(coverage.coverageStartMs).toISOString() : null,
+      hasFullWindowCoverage: coverage.coverageStartMs !== null && coverage.coverageStartMs <= bucketWindowStart,
+      retainedEntryCount: coverage.retainedEntryCount,
+      maxRetainedEntries: coverage.maxRetainedEntries,
+    },
+    summary: {
+      requests24h: totals.requests,
+      tokens24h: totals.tokens,
+      promptTokens24h: totals.promptTokens,
+      completionTokens24h: totals.completionTokens,
+      cachedPromptTokens24h: totals.cachedPromptTokens,
+      imageCount24h: totals.imageCount,
+      imageCostUsd24h: totals.imageCostUsd,
+      costUsd24h: totals.costUsd,
+      energyJoules24h: totals.energyJoules,
+      waterEvaporatedMl24h: totals.waterEvaporatedMl,
+      cacheKeyUses24h: totals.cacheKeyUses,
+      cacheHitRate24h: totals.cacheKeyUses > 0 ? percentage(totals.cacheHits, totals.cacheKeyUses) : 0,
+      errorRate24h: percentage(totals.errors, totals.requests),
+      topModel: [...modelTotals.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? null,
+      topProvider: [...providerTotals.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? null,
+      activeAccounts: accountStats.filter((account) => account.requestCount > 0).length,
+      serviceTierRequests24h: {
+        fastMode: totals.fastMode,
+        priority: totals.priority,
+        standard: totals.standard,
+      },
+    },
+    trends: {
+      requests: bucketSeries.map((point) => ({ t: point.t, v: point.requests })),
+      tokens: bucketSeries.map((point) => ({ t: point.t, v: point.tokens })),
+      errors: bucketSeries.map((point) => ({ t: point.t, v: point.errors })),
+    },
+    accounts: [...accountStats].sort((a, b) => {
+      const sortKey = (sort ?? "health").trim().toLowerCase();
+      const byTokens = (): number => {
+        if (b.totalTokens !== a.totalTokens) return b.totalTokens - a.totalTokens;
+        if (b.requestCount !== a.requestCount) return b.requestCount - a.requestCount;
+        return a.displayName.localeCompare(b.displayName);
+      };
+
+      switch (sortKey) {
+        case "tokens":
+          return byTokens();
+        case "requests":
+          if (b.requestCount !== a.requestCount) return b.requestCount - a.requestCount;
+          return byTokens();
+        case "ttft": {
+          const leftValue = a.avgTtftMs ?? Number.POSITIVE_INFINITY;
+          const rightValue = b.avgTtftMs ?? Number.POSITIVE_INFINITY;
+          if (leftValue !== rightValue) return leftValue - rightValue;
+          return byTokens();
+        }
+        case "tps": {
+          const leftValue = a.avgTps ?? Number.NEGATIVE_INFINITY;
+          const rightValue = b.avgTps ?? Number.NEGATIVE_INFINITY;
+          if (leftValue !== rightValue) return rightValue - leftValue;
+          return byTokens();
+        }
+        case "health":
+        default: {
+          const leftValue = a.healthScore ?? -1;
+          const rightValue = b.healthScore ?? -1;
+          if (leftValue !== rightValue) return rightValue - leftValue;
+          return byTokens();
+        }
+      }
+    }),
+  };
+}
+
+async function buildUsageOverview(
+  requestLogStore: RequestLogStore,
+  keyPool: KeyPool,
+  credentialStore: CredentialStoreLike,
+  sort?: string,
+  window: UsageWindow = "daily",
+  scope?: UsageScope,
+  sqlRequestUsageStore?: SqlRequestUsageStore,
+): Promise<UsageOverviewResponse> {
+  const now = Date.now();
+  const { bucketWindowStart: sharedBucketWindowStart } = resolveUsageWindowConfig(window, now);
+
+  if (sqlRequestUsageStore) {
+    const [entries, coverage] = await Promise.all([
+      sqlRequestUsageStore.listEntriesSince(sharedBucketWindowStart, scope),
+      sqlRequestUsageStore.getCoverage(scope),
+    ]);
+
+    return buildUsageOverviewFromEntries(entries, keyPool, credentialStore, sort, window, now, {
+      coverageStartMs: coverage.earliestEntryAtMs,
+      retainedEntryCount: coverage.retainedEntryCount,
+      maxRetainedEntries: coverage.maxRetainedEntries,
+    });
+  }
+
+  if (hasUsageScope(scope)) {
+    const allLogs = requestLogStore.snapshot().filter((entry) => entryMatchesUsageScope(entry, scope));
+    return buildUsageOverviewFromEntries(allLogs, keyPool, credentialStore, sort, window, now, {
+      coverageStartMs: allLogs.reduce<number | null>((current, entry) => current === null ? entry.timestamp : Math.min(current, entry.timestamp), null),
+      retainedEntryCount: allLogs.length,
+      maxRetainedEntries: requestLogStore.getCoverage().maxEntries,
+    });
   }
 
   const allLogs = requestLogStore.snapshot();
-  const allStatuses: Record<string, Awaited<ReturnType<KeyPool["getStatus"]>>> = await keyPool.getAllStatuses().catch(() => ({}));
+  const _allStatuses: Record<string, Awaited<ReturnType<KeyPool["getStatus"]>>> = await keyPool.getAllStatuses().catch(() => ({}));
   const allAccountStatuses: Record<string, readonly KeyPoolAccountStatus[]> = await keyPool.getAllAccountStatuses().catch(() => ({}));
   const credentialProviders = await credentialStore.listProviders(false).catch(() => []);
   const providerById = new Map(credentialProviders.map((provider) => [provider.id, provider]));
-
-  const now = Date.now();
-
-  const bucketMs = window === "daily" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-  const bucketCount = window === "monthly" ? 30 : window === "weekly" ? 7 : 24;
-  const bucketWindowStart = bucketStart(now - (bucketCount - 1) * bucketMs, bucketMs);
+  const { bucketMs, bucketCount, bucketWindowStart } = resolveUsageWindowConfig(window, now);
 
   const recentLogs = allLogs.filter((entry) => entry.timestamp >= bucketWindowStart);
   const recentModelBuckets = requestLogStore.snapshotDailyModelBuckets(bucketWindowStart);
@@ -1358,207 +1770,233 @@ function sortAnalyticsRows(rows: readonly AnalyticsRowResponse[], sort: string |
   return nextRows;
 }
 
+function buildProviderModelAnalyticsFromEntries(
+  entries: readonly RequestLogEntry[],
+  window: UsageWindow,
+  sort: string | undefined,
+  now: number,
+  coverage: {
+    readonly coverageStartMs: number | null;
+    readonly retainedEntryCount: number;
+    readonly maxRetainedEntries: number;
+  },
+): ProviderModelAnalyticsResponse {
+  const { bucketWindowStart } = resolveUsageWindowConfig(window, now);
+  const relevantEntries = entries.filter((entry) => entry.timestamp >= bucketWindowStart);
+  const pairAgg = new Map<string, MutableAnalyticsAgg>();
+
+  const upsertPair = (providerId: string, model: string): MutableAnalyticsAgg => {
+    const key = `${providerId}\0${model}`;
+    const existing = pairAgg.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const created: MutableAnalyticsAgg = {
+      providerId,
+      model,
+      requestCount: 0,
+      errorCount: 0,
+      totalTokens: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedPromptTokens: 0,
+      cacheHitCount: 0,
+      cacheKeyUseCount: 0,
+      ttftSum: 0,
+      ttftCount: 0,
+      tpsSum: 0,
+      tpsCount: 0,
+      costUsd: 0,
+      energyJoules: 0,
+      waterEvaporatedMl: 0,
+      firstSeenAtMs: null,
+      lastSeenAtMs: null,
+    };
+    pairAgg.set(key, created);
+    return created;
+  };
+
+  for (const entry of relevantEntries) {
+    const agg = upsertPair(entry.providerId, entry.model);
+    agg.requestCount += 1;
+    if (entry.status >= 400 || typeof entry.error === "string") {
+      agg.errorCount += 1;
+    }
+    agg.totalTokens += usageCount(entry.totalTokens);
+    agg.promptTokens += usageCount(entry.promptTokens);
+    agg.completionTokens += usageCount(entry.completionTokens);
+    agg.cachedPromptTokens += usageCount(entry.cachedPromptTokens);
+    if (entry.cacheHit) {
+      agg.cacheHitCount += 1;
+    }
+    if (entry.promptCacheKeyUsed) {
+      agg.cacheKeyUseCount += 1;
+    }
+    if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) {
+      agg.ttftSum += entry.ttftMs;
+      agg.ttftCount += 1;
+    }
+    if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) {
+      agg.tpsSum += entry.tps;
+      agg.tpsCount += 1;
+    }
+    agg.costUsd += usageCount(entry.costUsd);
+    agg.energyJoules += usageCount(entry.energyJoules);
+    agg.waterEvaporatedMl += usageCount(entry.waterEvaporatedMl);
+    agg.firstSeenAtMs = agg.firstSeenAtMs === null ? entry.timestamp : Math.min(agg.firstSeenAtMs, entry.timestamp);
+    agg.lastSeenAtMs = agg.lastSeenAtMs === null ? entry.timestamp : Math.max(agg.lastSeenAtMs, entry.timestamp);
+  }
+
+  const pairRows = [...pairAgg.values()];
+  const modelAgg = new Map<string, MutableAnalyticsAgg>();
+  const modelProviderCoverage = new Map<string, Set<string>>();
+  const providerAgg = new Map<string, MutableAnalyticsAgg>();
+  const providerModelCoverage = new Map<string, Set<string>>();
+
+  for (const pair of pairRows) {
+    const modelId = pair.model ?? "unknown";
+    const providerId = pair.providerId ?? "unknown";
+
+    const modelRow = modelAgg.get(modelId) ?? {
+      model: modelId,
+      requestCount: 0,
+      errorCount: 0,
+      totalTokens: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedPromptTokens: 0,
+      cacheHitCount: 0,
+      cacheKeyUseCount: 0,
+      ttftSum: 0,
+      ttftCount: 0,
+      tpsSum: 0,
+      tpsCount: 0,
+      costUsd: 0,
+      energyJoules: 0,
+      waterEvaporatedMl: 0,
+      firstSeenAtMs: null,
+      lastSeenAtMs: null,
+    } as MutableAnalyticsAgg;
+    modelRow.requestCount += pair.requestCount;
+    modelRow.errorCount += pair.errorCount;
+    modelRow.totalTokens += pair.totalTokens;
+    modelRow.promptTokens += pair.promptTokens;
+    modelRow.completionTokens += pair.completionTokens;
+    modelRow.cachedPromptTokens += pair.cachedPromptTokens;
+    modelRow.cacheHitCount += pair.cacheHitCount;
+    modelRow.cacheKeyUseCount += pair.cacheKeyUseCount;
+    modelRow.ttftSum += pair.ttftSum;
+    modelRow.ttftCount += pair.ttftCount;
+    modelRow.tpsSum += pair.tpsSum;
+    modelRow.tpsCount += pair.tpsCount;
+    modelRow.costUsd += pair.costUsd;
+    modelRow.energyJoules += pair.energyJoules;
+    modelRow.waterEvaporatedMl += pair.waterEvaporatedMl;
+    modelRow.firstSeenAtMs = modelRow.firstSeenAtMs === null ? pair.firstSeenAtMs : Math.min(modelRow.firstSeenAtMs, pair.firstSeenAtMs ?? modelRow.firstSeenAtMs);
+    modelRow.lastSeenAtMs = modelRow.lastSeenAtMs === null ? pair.lastSeenAtMs : Math.max(modelRow.lastSeenAtMs, pair.lastSeenAtMs ?? modelRow.lastSeenAtMs);
+    modelAgg.set(modelId, modelRow);
+    const providerSet = modelProviderCoverage.get(modelId) ?? new Set<string>();
+    providerSet.add(providerId);
+    modelProviderCoverage.set(modelId, providerSet);
+
+    const providerRow = providerAgg.get(providerId) ?? {
+      providerId,
+      requestCount: 0,
+      errorCount: 0,
+      totalTokens: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedPromptTokens: 0,
+      cacheHitCount: 0,
+      cacheKeyUseCount: 0,
+      ttftSum: 0,
+      ttftCount: 0,
+      tpsSum: 0,
+      tpsCount: 0,
+      costUsd: 0,
+      energyJoules: 0,
+      waterEvaporatedMl: 0,
+      firstSeenAtMs: null,
+      lastSeenAtMs: null,
+    } as MutableAnalyticsAgg;
+    providerRow.requestCount += pair.requestCount;
+    providerRow.errorCount += pair.errorCount;
+    providerRow.totalTokens += pair.totalTokens;
+    providerRow.promptTokens += pair.promptTokens;
+    providerRow.completionTokens += pair.completionTokens;
+    providerRow.cachedPromptTokens += pair.cachedPromptTokens;
+    providerRow.cacheHitCount += pair.cacheHitCount;
+    providerRow.cacheKeyUseCount += pair.cacheKeyUseCount;
+    providerRow.ttftSum += pair.ttftSum;
+    providerRow.ttftCount += pair.ttftCount;
+    providerRow.tpsSum += pair.tpsSum;
+    providerRow.tpsCount += pair.tpsCount;
+    providerRow.costUsd += pair.costUsd;
+    providerRow.energyJoules += pair.energyJoules;
+    providerRow.waterEvaporatedMl += pair.waterEvaporatedMl;
+    providerRow.firstSeenAtMs = providerRow.firstSeenAtMs === null ? pair.firstSeenAtMs : Math.min(providerRow.firstSeenAtMs, pair.firstSeenAtMs ?? providerRow.firstSeenAtMs);
+    providerRow.lastSeenAtMs = providerRow.lastSeenAtMs === null ? pair.lastSeenAtMs : Math.max(providerRow.lastSeenAtMs, pair.lastSeenAtMs ?? providerRow.lastSeenAtMs);
+    providerAgg.set(providerId, providerRow);
+    const modelSet = providerModelCoverage.get(providerId) ?? new Set<string>();
+    modelSet.add(modelId);
+    providerModelCoverage.set(providerId, modelSet);
+  }
+
+  return {
+    window,
+    generatedAt: new Date(now).toISOString(),
+    coverage: {
+      requestedWindowStart: new Date(bucketWindowStart).toISOString(),
+      coverageStart: coverage.coverageStartMs !== null ? new Date(coverage.coverageStartMs).toISOString() : null,
+      hasFullWindowCoverage: coverage.coverageStartMs !== null && coverage.coverageStartMs <= bucketWindowStart,
+      retainedEntryCount: coverage.retainedEntryCount,
+      maxRetainedEntries: coverage.maxRetainedEntries,
+    },
+    models: sortAnalyticsRows(
+      [...modelAgg.entries()].map(([modelId, agg]) => toAnalyticsRow(agg, { providerCoverageCount: modelProviderCoverage.get(modelId)?.size ?? 0 })),
+      sort,
+    ),
+    providers: sortAnalyticsRows(
+      [...providerAgg.entries()].map(([providerId, agg]) => toAnalyticsRow(agg, { modelCoverageCount: providerModelCoverage.get(providerId)?.size ?? 0 })),
+      sort,
+    ),
+    providerModels: sortAnalyticsRows(pairRows.map((agg) => toAnalyticsRow(agg)), sort),
+  };
+}
+
 async function buildProviderModelAnalytics(
   requestLogStore: RequestLogStore,
   window: UsageWindow = "weekly",
   sort?: string,
   scope?: UsageScope,
+  sqlRequestUsageStore?: SqlRequestUsageStore,
 ): Promise<ProviderModelAnalyticsResponse> {
-  if (hasUsageScope(scope)) {
-    const now = Date.now();
-    const bucketMs = window === "daily" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-    const bucketCount = window === "monthly" ? 30 : window === "weekly" ? 7 : 24;
-    const bucketWindowStart = bucketStart(now - (bucketCount - 1) * bucketMs, bucketMs);
-    const relevantEntries = requestLogStore.snapshot()
-      .filter((entry) => entry.timestamp >= bucketWindowStart)
-      .filter((entry) => entryMatchesUsageScope(entry, scope));
-    const pairAgg = new Map<string, MutableAnalyticsAgg>();
+  const now = Date.now();
+  const { bucketWindowStart } = resolveUsageWindowConfig(window, now);
 
-    const upsertPair = (providerId: string, model: string): MutableAnalyticsAgg => {
-      const key = `${providerId}\0${model}`;
-      const existing = pairAgg.get(key);
-      if (existing) {
-        return existing;
-      }
-
-      const created: MutableAnalyticsAgg = {
-        providerId,
-        model,
-        requestCount: 0,
-        errorCount: 0,
-        totalTokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        cachedPromptTokens: 0,
-        cacheHitCount: 0,
-        cacheKeyUseCount: 0,
-        ttftSum: 0,
-        ttftCount: 0,
-        tpsSum: 0,
-        tpsCount: 0,
-        costUsd: 0,
-        energyJoules: 0,
-        waterEvaporatedMl: 0,
-        firstSeenAtMs: null,
-        lastSeenAtMs: null,
-      };
-      pairAgg.set(key, created);
-      return created;
-    };
-
-    for (const entry of relevantEntries) {
-      const agg = upsertPair(entry.providerId, entry.model);
-      agg.requestCount += 1;
-      if (entry.status >= 400 || typeof entry.error === "string") {
-        agg.errorCount += 1;
-      }
-      agg.totalTokens += usageCount(entry.totalTokens);
-      agg.promptTokens += usageCount(entry.promptTokens);
-      agg.completionTokens += usageCount(entry.completionTokens);
-      agg.cachedPromptTokens += usageCount(entry.cachedPromptTokens);
-      if (entry.cacheHit) {
-        agg.cacheHitCount += 1;
-      }
-      if (entry.promptCacheKeyUsed) {
-        agg.cacheKeyUseCount += 1;
-      }
-      if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) {
-        agg.ttftSum += entry.ttftMs;
-        agg.ttftCount += 1;
-      }
-      if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) {
-        agg.tpsSum += entry.tps;
-        agg.tpsCount += 1;
-      }
-      agg.costUsd += usageCount(entry.costUsd);
-      agg.energyJoules += usageCount(entry.energyJoules);
-      agg.waterEvaporatedMl += usageCount(entry.waterEvaporatedMl);
-      agg.firstSeenAtMs = agg.firstSeenAtMs === null ? entry.timestamp : Math.min(agg.firstSeenAtMs, entry.timestamp);
-      agg.lastSeenAtMs = agg.lastSeenAtMs === null ? entry.timestamp : Math.max(agg.lastSeenAtMs, entry.timestamp);
-    }
-
-    const pairRows = [...pairAgg.values()];
-    const modelAgg = new Map<string, MutableAnalyticsAgg>();
-    const modelProviderCoverage = new Map<string, Set<string>>();
-    const providerAgg = new Map<string, MutableAnalyticsAgg>();
-    const providerModelCoverage = new Map<string, Set<string>>();
-
-    for (const pair of pairRows) {
-      const modelId = pair.model ?? "unknown";
-      const providerId = pair.providerId ?? "unknown";
-
-      const modelRow = modelAgg.get(modelId) ?? {
-        model: modelId,
-        requestCount: 0,
-        errorCount: 0,
-        totalTokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        cachedPromptTokens: 0,
-        cacheHitCount: 0,
-        cacheKeyUseCount: 0,
-        ttftSum: 0,
-        ttftCount: 0,
-        tpsSum: 0,
-        tpsCount: 0,
-        costUsd: 0,
-        energyJoules: 0,
-        waterEvaporatedMl: 0,
-        firstSeenAtMs: null,
-        lastSeenAtMs: null,
-      } as MutableAnalyticsAgg;
-      modelRow.requestCount += pair.requestCount;
-      modelRow.errorCount += pair.errorCount;
-      modelRow.totalTokens += pair.totalTokens;
-      modelRow.promptTokens += pair.promptTokens;
-      modelRow.completionTokens += pair.completionTokens;
-      modelRow.cachedPromptTokens += pair.cachedPromptTokens;
-      modelRow.cacheHitCount += pair.cacheHitCount;
-      modelRow.cacheKeyUseCount += pair.cacheKeyUseCount;
-      modelRow.ttftSum += pair.ttftSum;
-      modelRow.ttftCount += pair.ttftCount;
-      modelRow.tpsSum += pair.tpsSum;
-      modelRow.tpsCount += pair.tpsCount;
-      modelRow.costUsd += pair.costUsd;
-      modelRow.energyJoules += pair.energyJoules;
-      modelRow.waterEvaporatedMl += pair.waterEvaporatedMl;
-      modelRow.firstSeenAtMs = modelRow.firstSeenAtMs === null ? pair.firstSeenAtMs : Math.min(modelRow.firstSeenAtMs, pair.firstSeenAtMs ?? modelRow.firstSeenAtMs);
-      modelRow.lastSeenAtMs = modelRow.lastSeenAtMs === null ? pair.lastSeenAtMs : Math.max(modelRow.lastSeenAtMs, pair.lastSeenAtMs ?? modelRow.lastSeenAtMs);
-      modelAgg.set(modelId, modelRow);
-      const providerSet = modelProviderCoverage.get(modelId) ?? new Set<string>();
-      providerSet.add(providerId);
-      modelProviderCoverage.set(modelId, providerSet);
-
-      const providerRow = providerAgg.get(providerId) ?? {
-        providerId,
-        requestCount: 0,
-        errorCount: 0,
-        totalTokens: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        cachedPromptTokens: 0,
-        cacheHitCount: 0,
-        cacheKeyUseCount: 0,
-        ttftSum: 0,
-        ttftCount: 0,
-        tpsSum: 0,
-        tpsCount: 0,
-        costUsd: 0,
-        energyJoules: 0,
-        waterEvaporatedMl: 0,
-        firstSeenAtMs: null,
-        lastSeenAtMs: null,
-      } as MutableAnalyticsAgg;
-      providerRow.requestCount += pair.requestCount;
-      providerRow.errorCount += pair.errorCount;
-      providerRow.totalTokens += pair.totalTokens;
-      providerRow.promptTokens += pair.promptTokens;
-      providerRow.completionTokens += pair.completionTokens;
-      providerRow.cachedPromptTokens += pair.cachedPromptTokens;
-      providerRow.cacheHitCount += pair.cacheHitCount;
-      providerRow.cacheKeyUseCount += pair.cacheKeyUseCount;
-      providerRow.ttftSum += pair.ttftSum;
-      providerRow.ttftCount += pair.ttftCount;
-      providerRow.tpsSum += pair.tpsSum;
-      providerRow.tpsCount += pair.tpsCount;
-      providerRow.costUsd += pair.costUsd;
-      providerRow.energyJoules += pair.energyJoules;
-      providerRow.waterEvaporatedMl += pair.waterEvaporatedMl;
-      providerRow.firstSeenAtMs = providerRow.firstSeenAtMs === null ? pair.firstSeenAtMs : Math.min(providerRow.firstSeenAtMs, pair.firstSeenAtMs ?? providerRow.firstSeenAtMs);
-      providerRow.lastSeenAtMs = providerRow.lastSeenAtMs === null ? pair.lastSeenAtMs : Math.max(providerRow.lastSeenAtMs, pair.lastSeenAtMs ?? providerRow.lastSeenAtMs);
-      providerAgg.set(providerId, providerRow);
-      const modelSet = providerModelCoverage.get(providerId) ?? new Set<string>();
-      modelSet.add(modelId);
-      providerModelCoverage.set(providerId, modelSet);
-    }
-
-    const earliestEntryAtMs = relevantEntries.reduce<number | null>((current, entry) => current === null ? entry.timestamp : Math.min(current, entry.timestamp), null);
-    return {
-      window,
-      generatedAt: new Date(now).toISOString(),
-      coverage: {
-        requestedWindowStart: new Date(bucketWindowStart).toISOString(),
-        coverageStart: earliestEntryAtMs !== null ? new Date(earliestEntryAtMs).toISOString() : null,
-        hasFullWindowCoverage: earliestEntryAtMs !== null && earliestEntryAtMs <= bucketWindowStart,
-        retainedEntryCount: relevantEntries.length,
-        maxRetainedEntries: requestLogStore.getCoverage().maxEntries,
-      },
-      models: sortAnalyticsRows(
-        [...modelAgg.entries()].map(([modelId, agg]) => toAnalyticsRow(agg, { providerCoverageCount: modelProviderCoverage.get(modelId)?.size ?? 0 })),
-        sort,
-      ),
-      providers: sortAnalyticsRows(
-        [...providerAgg.entries()].map(([providerId, agg]) => toAnalyticsRow(agg, { modelCoverageCount: providerModelCoverage.get(providerId)?.size ?? 0 })),
-        sort,
-      ),
-      providerModels: sortAnalyticsRows(pairRows.map((agg) => toAnalyticsRow(agg)), sort),
-    };
+  if (sqlRequestUsageStore) {
+    const [entries, coverage] = await Promise.all([
+      sqlRequestUsageStore.listEntriesSince(bucketWindowStart, scope),
+      sqlRequestUsageStore.getCoverage(scope),
+    ]);
+    return buildProviderModelAnalyticsFromEntries(entries, window, sort, now, {
+      coverageStartMs: coverage.earliestEntryAtMs,
+      retainedEntryCount: coverage.retainedEntryCount,
+      maxRetainedEntries: coverage.maxRetainedEntries,
+    });
   }
 
-  const now = Date.now();
-  const bucketMs = window === "daily" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-  const bucketCount = window === "monthly" ? 30 : window === "weekly" ? 7 : 24;
-  const bucketWindowStart = bucketStart(now - (bucketCount - 1) * bucketMs, bucketMs);
+  if (hasUsageScope(scope)) {
+    const relevantEntries = requestLogStore.snapshot().filter((entry) => entryMatchesUsageScope(entry, scope));
+    return buildProviderModelAnalyticsFromEntries(relevantEntries, window, sort, now, {
+      coverageStartMs: relevantEntries.reduce<number | null>((current, entry) => current === null ? entry.timestamp : Math.min(current, entry.timestamp), null),
+      retainedEntryCount: relevantEntries.length,
+      maxRetainedEntries: requestLogStore.getCoverage().maxEntries,
+    });
+  }
+
+  const { bucketWindowStart: optimizedBucketWindowStart } = resolveUsageWindowConfig(window, now);
   const pairAgg = new Map<string, MutableAnalyticsAgg>();
 
   const upsertPair = (providerId: string, model: string): MutableAnalyticsAgg => {
@@ -1595,7 +2033,7 @@ async function buildProviderModelAnalytics(
   };
 
   if (window === "daily") {
-    for (const entry of requestLogStore.snapshot().filter((item) => item.timestamp >= bucketWindowStart)) {
+    for (const entry of requestLogStore.snapshot().filter((item) => item.timestamp >= optimizedBucketWindowStart)) {
       const agg = upsertPair(entry.providerId, entry.model);
       agg.requestCount += 1;
       if (entry.status >= 400 || typeof entry.error === "string") {
@@ -1626,7 +2064,7 @@ async function buildProviderModelAnalytics(
       agg.lastSeenAtMs = agg.lastSeenAtMs === null ? entry.timestamp : Math.max(agg.lastSeenAtMs, entry.timestamp);
     }
   } else {
-    for (const bucket of requestLogStore.snapshotDailyModelBuckets(bucketWindowStart)) {
+    for (const bucket of requestLogStore.snapshotDailyModelBuckets(optimizedBucketWindowStart)) {
       const agg = upsertPair(bucket.providerId, bucket.model);
       agg.requestCount += bucket.requestCount;
       agg.errorCount += bucket.errorCount;
@@ -1850,7 +2288,7 @@ function inferBaseUrl(request: {
   return `${protocol}://${host}`;
 }
 
-export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDependencies): Promise<void> {
+export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDependencies): Promise<FederationBridgeRelay> {
   const sessionStore = new SessionStore(resolve(process.cwd(), "data/sessions.json"));
   const sessionIndex = new ChromaSessionIndex({
     url: process.env.CHROMA_URL ?? "http://127.0.0.1:8000",
@@ -1894,6 +2332,102 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
   };
 
   let mcpSeedCache: { readonly loadedAt: number; readonly seeds: Awaited<ReturnType<typeof loadMcpSeeds>> } | undefined;
+  const hostDashboardTargets = loadHostDashboardTargetsFromEnv(process.env);
+  const hostDashboardDockerSocketPath = process.env.HOST_DASHBOARD_DOCKER_SOCKET_PATH?.trim() || undefined;
+  const hostDashboardRuntimeRoot = process.env.HOST_DASHBOARD_RUNTIME_ROOT?.trim() || undefined;
+  const hostDashboardRequestTimeoutMs = toSafeLimit(process.env.HOST_DASHBOARD_REQUEST_TIMEOUT_MS, 5000, 60_000);
+  const federationRequestTimeoutMs = toSafeLimit(process.env.FEDERATION_REQUEST_TIMEOUT_MS, 5000, 60_000);
+  const bridgeRelay = createFederationBridgeRelay();
+
+  const readHeaderValue = (value: string | readonly string[] | undefined): string | undefined => {
+    if (typeof value === "string") {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value[0];
+    }
+    return undefined;
+  };
+
+  const resolveBridgeUpgradeAuth = async (request: IncomingMessage): Promise<ResolvedRequestAuth | undefined> => {
+    const authorization = readHeaderValue(request.headers.authorization);
+    const cookieHeader = readHeaderValue(request.headers.cookie);
+    return resolveRequestAuth({
+      allowUnauthenticated: false,
+      proxyAuthToken: deps.config.proxyAuthToken,
+      authorization,
+      cookieToken: readCookieValue(cookieHeader, "open_hax_proxy_auth_token"),
+      oauthAccessToken: readCookieValue(cookieHeader, "proxy_auth"),
+      resolveTenantApiKey: deps.sqlCredentialStore
+        ? async (token) => deps.sqlCredentialStore!.resolveTenantApiKey(token, deps.config.proxyTokenPepper)
+        : undefined,
+      resolveUiSession: deps.sqlCredentialStore && deps.authPersistence
+        ? async (token) => {
+            const accessToken = await deps.authPersistence!.getAccessToken(token);
+            if (!accessToken) {
+              return undefined;
+            }
+
+            const activeTenantId = typeof accessToken.extra?.activeTenantId === "string"
+              ? accessToken.extra.activeTenantId
+              : undefined;
+            return deps.sqlCredentialStore!.resolveUiSession(accessToken.subject, activeTenantId);
+          }
+        : undefined,
+    });
+  };
+
+  const bridgeUpgradeHandler = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    if (pathname !== "/api/ui/federation/bridge/ws") {
+      bridgeRelay.rejectUpgrade(socket, 404, { error: "not_found" });
+      return;
+    }
+
+    void (async () => {
+      // CSRF protection: reject cross-origin WebSocket upgrades
+      const origin = request.headers.origin;
+      const forwardedHost = request.headers["x-forwarded-host"] ?? request.headers.host ?? "localhost";
+      const allowedOrigins = new Set([
+        `http://localhost`,
+        `http://127.0.0.1`,
+        `http://${forwardedHost}`,
+        `https://${forwardedHost}`,
+      ]);
+      if (origin && !allowedOrigins.has(origin) && !origin.startsWith("http://localhost:") && !origin.startsWith("http://127.0.0.1:")) {
+        bridgeRelay.rejectUpgrade(socket, 403, { error: "invalid_origin" });
+        return;
+      }
+
+      const auth = await resolveBridgeUpgradeAuth(request);
+      if (!auth) {
+        bridgeRelay.rejectUpgrade(socket, 401, { error: "unauthorized" });
+        return;
+      }
+      if (!authCanManageFederation(auth)) {
+        bridgeRelay.rejectUpgrade(socket, 403, { error: "forbidden" });
+        return;
+      }
+
+      bridgeRelay.handleAuthorizedUpgrade(request, socket, head, {
+        authKind: auth.kind === "legacy_admin" ? "legacy_admin" : "ui_session",
+        subject: auth.subject,
+        tenantId: auth.tenantId,
+      });
+    })().catch((error) => {
+      app.log.warn(
+        { error: error instanceof Error ? error.message : String(error) },
+        "failed to authorize federation bridge upgrade",
+      );
+      bridgeRelay.rejectUpgrade(socket, 401, { error: "unauthorized" });
+    });
+  };
+
+  app.server.on("upgrade", bridgeUpgradeHandler);
+  app.addHook("onClose", async () => {
+    app.server.off("upgrade", bridgeUpgradeHandler);
+    await bridgeRelay.close();
+  });
 
   const loadCachedMcpSeeds = async () => {
     const now = Date.now();
@@ -2296,6 +2830,745 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
   });
 
   app.get<{
+    Querystring: { readonly ownerSubject?: string };
+  }>("/api/ui/federation/peers", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    if (!deps.sqlFederationStore) {
+      reply.code(503).send({ error: "federation_store_not_supported" });
+      return;
+    }
+
+    const ownerSubject = typeof request.query.ownerSubject === "string" && request.query.ownerSubject.trim().length > 0
+      ? request.query.ownerSubject.trim()
+      : undefined;
+    const peers = await deps.sqlFederationStore.listPeers(ownerSubject);
+    reply.send({ peers });
+  });
+
+  app.get("/api/ui/federation/self", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    const peerCount = deps.sqlFederationStore
+      ? (await deps.sqlFederationStore.listPeers()).length
+      : 0;
+
+    reply.send({
+      nodeId: process.env.FEDERATION_SELF_NODE_ID ?? null,
+      groupId: process.env.FEDERATION_SELF_GROUP_ID ?? null,
+      clusterId: process.env.FEDERATION_SELF_CLUSTER_ID ?? null,
+      peerDid: process.env.FEDERATION_SELF_PEER_DID ?? null,
+      publicBaseUrl: process.env.FEDERATION_SELF_PUBLIC_BASE_URL ?? null,
+      peerCount,
+    });
+  });
+
+  app.get("/api/ui/federation/bridge/ws", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    reply.code(426).header("upgrade", "websocket").send({ error: "websocket_upgrade_required" });
+  });
+
+  app.get("/api/ui/federation/bridges", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    // Scope bridge sessions to the authenticated tenant for non-global admins.
+    // legacy_admin has global visibility; ui_session users see only their tenant's sessions.
+    const isGlobalAdmin = auth?.kind === "legacy_admin";
+    const allSessions = bridgeRelay.listSessions();
+    const sessions = isGlobalAdmin
+      ? allSessions
+      : allSessions.filter((session) => session.tenantId === auth?.tenantId);
+
+    reply.send({ sessions });
+  });
+
+  app.get<{ Params: { readonly sessionId: string } }>("/api/ui/federation/bridges/:sessionId", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    const session = bridgeRelay.getSession(request.params.sessionId);
+    if (!session) {
+      reply.code(404).send({ error: "bridge_session_not_found" });
+      return;
+    }
+
+    // Scope single session access to authenticated tenant
+    const isGlobalAdmin = auth?.kind === "legacy_admin";
+    if (!isGlobalAdmin && session.tenantId !== auth?.tenantId) {
+      reply.code(404).send({ error: "bridge_session_not_found" });
+      return;
+    }
+
+    reply.send({ session });
+  });
+
+  app.post<{
+    Body: {
+      readonly id?: string;
+      readonly ownerCredential?: string;
+      readonly peerDid?: string;
+      readonly label?: string;
+      readonly baseUrl?: string;
+      readonly controlBaseUrl?: string;
+      readonly auth?: Record<string, unknown>;
+      readonly capabilities?: Record<string, unknown>;
+      readonly status?: string;
+    };
+  }>("/api/ui/federation/peers", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    if (!deps.sqlFederationStore) {
+      reply.code(503).send({ error: "federation_store_not_supported" });
+      return;
+    }
+
+    const ownerCredential = typeof request.body?.ownerCredential === "string" ? request.body.ownerCredential.trim() : "";
+    const label = typeof request.body?.label === "string" ? request.body.label.trim() : "";
+    const baseUrl = typeof request.body?.baseUrl === "string" ? request.body.baseUrl.trim() : "";
+
+    if (!ownerCredential || !label || !baseUrl) {
+      reply.code(400).send({ error: "owner_credential_label_and_base_url_required" });
+      return;
+    }
+
+    const peer = await deps.sqlFederationStore.upsertPeer({
+      id: request.body?.id,
+      ownerCredential,
+      peerDid: request.body?.peerDid,
+      label,
+      baseUrl,
+      controlBaseUrl: request.body?.controlBaseUrl,
+      auth: request.body?.auth,
+      capabilities: request.body?.capabilities,
+      status: request.body?.status,
+    });
+    await deps.sqlFederationStore.appendDiffEvent({
+      ownerSubject: peer.ownerSubject,
+      entityType: "peer",
+      entityKey: peer.id,
+      op: "upsert",
+      payload: {
+        peerDid: peer.peerDid,
+        label: peer.label,
+        baseUrl: peer.baseUrl,
+        controlBaseUrl: peer.controlBaseUrl,
+        authMode: peer.authMode,
+        status: peer.status,
+      },
+    });
+
+    reply.code(201).send({ peer });
+  });
+
+  app.get<{
+    Querystring: { readonly ownerSubject?: string; readonly afterSeq?: string; readonly limit?: string };
+  }>("/api/ui/federation/diff-events", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    if (!deps.sqlFederationStore) {
+      reply.code(503).send({ error: "federation_store_not_supported" });
+      return;
+    }
+
+    const ownerSubject = typeof request.query.ownerSubject === "string" ? request.query.ownerSubject.trim() : "";
+    if (!ownerSubject) {
+      reply.code(400).send({ error: "owner_subject_required" });
+      return;
+    }
+
+    const afterSeq = typeof request.query.afterSeq === "string" ? Number.parseInt(request.query.afterSeq, 10) : undefined;
+    const limit = toSafeLimit(request.query.limit, 200, 500);
+    const events = await deps.sqlFederationStore.listDiffEvents({ ownerSubject, afterSeq, limit });
+    reply.send({ ownerSubject, events });
+  });
+
+  app.get<{
+    Querystring: { readonly ownerSubject?: string };
+  }>("/api/ui/federation/accounts", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    if (!deps.sqlFederationStore) {
+      reply.code(503).send({ error: "federation_store_not_supported" });
+      return;
+    }
+
+    const ownerSubject = typeof request.query.ownerSubject === "string" && request.query.ownerSubject.trim().length > 0
+      ? request.query.ownerSubject.trim()
+      : undefined;
+    const projectedAccounts = await deps.sqlFederationStore.listProjectedAccounts(ownerSubject);
+    const { localAccounts, knownAccounts } = await buildFederationAccountKnowledge(credentialStore, projectedAccounts, {
+      ownerSubject,
+      defaultOwnerSubject: process.env.FEDERATION_DEFAULT_OWNER_SUBJECT,
+    });
+
+    reply.send({
+      ownerSubject: ownerSubject ?? null,
+      localAccounts,
+      projectedAccounts,
+      knownAccounts,
+    });
+  });
+
+  app.post<{
+    Body: { readonly providerId?: string; readonly accountId?: string };
+  }>("/api/ui/federation/accounts/export", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    const providerId = typeof request.body?.providerId === "string" ? request.body.providerId.trim() : "";
+    const accountId = typeof request.body?.accountId === "string" ? request.body.accountId.trim() : "";
+    if (!providerId || !accountId) {
+      reply.code(400).send({ error: "provider_id_and_account_id_required" });
+      return;
+    }
+
+    const account = await findCredentialForFederationExport(credentialStore, providerId, accountId);
+    if (!account) {
+      reply.code(404).send({ error: "credential_account_not_found" });
+      return;
+    }
+
+    reply.send({ account });
+  });
+
+  app.post<{
+    Body: {
+      readonly accounts?: ReadonlyArray<{
+        readonly sourcePeerId?: string;
+        readonly ownerSubject?: string;
+        readonly providerId?: string;
+        readonly accountId?: string;
+        readonly accountSubject?: string;
+        readonly chatgptAccountId?: string;
+        readonly email?: string;
+        readonly planType?: string;
+        readonly availabilityState?: "descriptor" | "remote_route" | "imported";
+        readonly metadata?: Record<string, unknown>;
+      }>;
+    };
+  }>("/api/ui/federation/projected-accounts/import", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    if (!deps.sqlFederationStore) {
+      reply.code(503).send({ error: "federation_store_not_supported" });
+      return;
+    }
+
+    const accounts = Array.isArray(request.body?.accounts) ? request.body.accounts : [];
+    if (accounts.length === 0) {
+      reply.code(400).send({ error: "accounts_required" });
+      return;
+    }
+
+    const imported = [] as Awaited<ReturnType<typeof deps.sqlFederationStore.upsertProjectedAccount>>[];
+    for (const account of accounts) {
+      const sourcePeerId = typeof account?.sourcePeerId === "string" ? account.sourcePeerId.trim() : "";
+      const ownerSubject = typeof account?.ownerSubject === "string" ? account.ownerSubject.trim() : "";
+      const providerId = typeof account?.providerId === "string" ? account.providerId.trim() : "";
+      const accountId = typeof account?.accountId === "string" ? account.accountId.trim() : "";
+      if (!sourcePeerId || !ownerSubject || !providerId || !accountId) {
+        reply.code(400).send({ error: "source_peer_id_owner_subject_provider_id_and_account_id_required" });
+        return;
+      }
+
+      const record = await deps.sqlFederationStore.upsertProjectedAccount({
+        sourcePeerId,
+        ownerSubject,
+        providerId,
+        accountId,
+        accountSubject: typeof account?.accountSubject === "string" ? account.accountSubject : undefined,
+        chatgptAccountId: typeof account?.chatgptAccountId === "string" ? account.chatgptAccountId : undefined,
+        email: typeof account?.email === "string" ? account.email : undefined,
+        planType: typeof account?.planType === "string" ? account.planType : undefined,
+        availabilityState: account?.availabilityState,
+        metadata: account?.metadata,
+      });
+      imported.push(record);
+      await deps.sqlFederationStore.appendDiffEvent({
+        ownerSubject: record.ownerSubject,
+        entityType: "projected_account",
+        entityKey: `${record.sourcePeerId}:${record.providerId}:${record.accountId}`,
+        op: "upsert",
+        payload: {
+          providerId: record.providerId,
+          accountId: record.accountId,
+          availabilityState: record.availabilityState,
+          sourcePeerId: record.sourcePeerId,
+          email: record.email,
+          chatgptAccountId: record.chatgptAccountId,
+        },
+      });
+    }
+
+    reply.code(201).send({ accounts: imported });
+  });
+
+  app.post<{
+    Body: { readonly sourcePeerId?: string; readonly providerId?: string; readonly accountId?: string };
+  }>("/api/ui/federation/projected-accounts/routed", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    if (!deps.sqlFederationStore) {
+      reply.code(503).send({ error: "federation_store_not_supported" });
+      return;
+    }
+    const sqlFederationStore = deps.sqlFederationStore;
+
+    const sourcePeerId = typeof request.body?.sourcePeerId === "string" ? request.body.sourcePeerId.trim() : "";
+    const providerId = typeof request.body?.providerId === "string" ? request.body.providerId.trim() : "";
+    const accountId = typeof request.body?.accountId === "string" ? request.body.accountId.trim() : "";
+    if (!sourcePeerId || !providerId || !accountId) {
+      reply.code(400).send({ error: "source_peer_id_provider_id_and_account_id_required" });
+      return;
+    }
+
+    let account = await sqlFederationStore.noteProjectedAccountRouted({ sourcePeerId, providerId, accountId });
+    if (!account) {
+      reply.code(404).send({ error: "projected_account_not_found" });
+      return;
+    }
+
+    let importedCredential = false;
+    if (shouldWarmImportProjectedAccount(account.warmRequestCount)) {
+      const importResult = await sqlFederationStore.withProjectedAccountImportLock({ sourcePeerId, providerId, accountId }, async (tx) => {
+        const latest = await sqlFederationStore.getProjectedAccount({ sourcePeerId, providerId, accountId }, tx);
+        if (!latest) {
+          return undefined;
+        }
+        if (latest.availabilityState === "imported") {
+          return { account: latest, importedCredential: false };
+        }
+
+        const peer = await sqlFederationStore.getPeer(sourcePeerId, tx);
+        const credential = peer ? extractPeerCredential(peer.auth) : undefined;
+        if (!peer || !credential) {
+          return { account: latest, importedCredential: false };
+        }
+
+        try {
+          const remoteExport = await fetchFederationJson<{ readonly account: FederationCredentialExport }>({
+            url: `${peer.controlBaseUrl ?? peer.baseUrl}/api/ui/federation/accounts/export`,
+            credential,
+            timeoutMs: federationRequestTimeoutMs,
+            method: "POST",
+            body: {
+              providerId: latest.providerId,
+              accountId: latest.accountId,
+            },
+          });
+
+          if (remoteExport.account.authType === "oauth_bearer") {
+            await credentialStore.upsertOAuthAccount(
+              remoteExport.account.providerId,
+              remoteExport.account.accountId,
+              remoteExport.account.secret,
+              remoteExport.account.refreshToken,
+              remoteExport.account.expiresAt,
+              remoteExport.account.chatgptAccountId,
+              remoteExport.account.email,
+              remoteExport.account.subject,
+              remoteExport.account.planType,
+            );
+          } else {
+            await credentialStore.upsertApiKeyAccount(
+              remoteExport.account.providerId,
+              remoteExport.account.accountId,
+              remoteExport.account.secret,
+            );
+          }
+
+          const imported = await sqlFederationStore.markProjectedAccountImported({ sourcePeerId, providerId, accountId }, tx);
+          return { account: imported ?? latest, importedCredential: true };
+        } catch (error) {
+          app.log.warn({ error: error instanceof Error ? error.message : String(error), sourcePeerId, providerId, accountId }, "failed warm federation credential import");
+          return { account: latest, importedCredential: false };
+        }
+      });
+
+      if (importResult) {
+        account = importResult.account;
+        importedCredential = importResult.importedCredential;
+      } else {
+        const latest = await sqlFederationStore.getProjectedAccount({ sourcePeerId, providerId, accountId });
+        if (latest) {
+          account = latest;
+          importedCredential = latest.availabilityState === "imported";
+        }
+      }
+    }
+
+    await sqlFederationStore.appendDiffEvent({
+      ownerSubject: account.ownerSubject,
+      entityType: "projected_account",
+      entityKey: `${account.sourcePeerId}:${account.providerId}:${account.accountId}`,
+      op: "note_routed",
+      payload: {
+        providerId: account.providerId,
+        accountId: account.accountId,
+        availabilityState: account.availabilityState,
+        warmRequestCount: account.warmRequestCount,
+        importedCredential,
+      },
+    });
+
+    reply.send({ account, importedCredential });
+  });
+
+  app.post<{
+    Body: { readonly sourcePeerId?: string; readonly providerId?: string; readonly accountId?: string };
+  }>("/api/ui/federation/projected-accounts/imported", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    if (!deps.sqlFederationStore) {
+      reply.code(503).send({ error: "federation_store_not_supported" });
+      return;
+    }
+
+    const sourcePeerId = typeof request.body?.sourcePeerId === "string" ? request.body.sourcePeerId.trim() : "";
+    const providerId = typeof request.body?.providerId === "string" ? request.body.providerId.trim() : "";
+    const accountId = typeof request.body?.accountId === "string" ? request.body.accountId.trim() : "";
+    if (!sourcePeerId || !providerId || !accountId) {
+      reply.code(400).send({ error: "source_peer_id_provider_id_and_account_id_required" });
+      return;
+    }
+
+    const account = await deps.sqlFederationStore.markProjectedAccountImported({ sourcePeerId, providerId, accountId });
+    if (!account) {
+      reply.code(404).send({ error: "projected_account_not_found" });
+      return;
+    }
+
+    await deps.sqlFederationStore.appendDiffEvent({
+      ownerSubject: account.ownerSubject,
+      entityType: "projected_account",
+      entityKey: `${account.sourcePeerId}:${account.providerId}:${account.accountId}`,
+      op: "mark_imported",
+      payload: {
+        providerId: account.providerId,
+        accountId: account.accountId,
+        availabilityState: account.availabilityState,
+        importedAt: account.importedAt,
+      },
+    });
+
+    reply.send({ account });
+  });
+
+  app.get<{
+    Querystring: { readonly sinceMs?: string; readonly limit?: string; readonly afterTimestampMs?: string; readonly afterId?: string };
+  }>("/api/ui/federation/usage-export", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    const sinceMs = typeof request.query.sinceMs === "string" ? Number.parseInt(request.query.sinceMs, 10) : 0;
+    const limit = toSafeLimit(request.query.limit, 500, 5000);
+    const afterTimestampMs = typeof request.query.afterTimestampMs === "string" ? Number.parseInt(request.query.afterTimestampMs, 10) : undefined;
+    const afterId = typeof request.query.afterId === "string" && request.query.afterId.trim().length > 0
+      ? request.query.afterId.trim()
+      : undefined;
+
+    const safeSinceMs = Number.isFinite(sinceMs) ? sinceMs : 0;
+    const after = afterId && typeof afterTimestampMs === "number" && Number.isFinite(afterTimestampMs)
+      ? { timestampMs: afterTimestampMs, id: afterId }
+      : undefined;
+    const entries = deps.sqlRequestUsageStore
+      ? await deps.sqlRequestUsageStore.listEntriesSince(safeSinceMs, {}, limit, after)
+      : deps.requestLogStore.snapshotSinceWithLimit(safeSinceMs, limit, after);
+
+    reply.send({ entries });
+  });
+
+  app.post<{
+    Body: { readonly entries?: readonly unknown[] };
+  }>("/api/ui/federation/usage-import", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    if (!deps.sqlRequestUsageStore) {
+      reply.code(503).send({ error: "request_usage_store_not_supported" });
+      return;
+    }
+
+    const rawEntries = Array.isArray(request.body?.entries) ? request.body.entries : [];
+    if (rawEntries.length === 0) {
+      reply.code(400).send({ error: "entries_required" });
+      return;
+    }
+
+    let importedCount = 0;
+    for (const candidate of rawEntries) {
+      const entry = sanitizeFederationUsageEntry(candidate);
+      if (!entry) {
+        continue;
+      }
+      await deps.sqlRequestUsageStore.upsertEntry(entry);
+      importedCount += 1;
+    }
+
+    reply.send({ importedCount });
+  });
+
+  app.post<{
+    Body: { readonly peerId?: string; readonly ownerSubject?: string; readonly sinceMs?: number; readonly pullUsage?: boolean };
+  }>("/api/ui/federation/sync/pull", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanManageFederation(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    if (!deps.sqlFederationStore) {
+      reply.code(503).send({ error: "federation_store_not_supported" });
+      return;
+    }
+
+    const peerId = typeof request.body?.peerId === "string" ? request.body.peerId.trim() : "";
+    if (!peerId) {
+      reply.code(400).send({ error: "peer_id_required" });
+      return;
+    }
+
+    const peer = await deps.sqlFederationStore.getPeer(peerId);
+    if (!peer) {
+      reply.code(404).send({ error: "peer_not_found" });
+      return;
+    }
+
+    const ownerSubject = typeof request.body?.ownerSubject === "string" && request.body.ownerSubject.trim().length > 0
+      ? request.body.ownerSubject.trim()
+      : peer.ownerSubject;
+    const credential = extractPeerCredential(peer.auth);
+    if (!credential) {
+      await deps.sqlFederationStore.upsertSyncState({ peerId, lastError: "peer auth credential missing" });
+      reply.code(400).send({ error: "peer_auth_credential_missing" });
+      return;
+    }
+
+    const controlBaseUrl = peer.controlBaseUrl ?? peer.baseUrl;
+    const syncState = await deps.sqlFederationStore.getSyncState(peerId);
+    const afterSeq = syncState?.lastPulledSeq ?? 0;
+    const requestedSinceMs = typeof request.body?.sinceMs === "number" && Number.isFinite(request.body.sinceMs)
+      ? request.body.sinceMs
+      : syncState?.lastPullAt
+        ? Date.parse(syncState.lastPullAt)
+        : 0;
+
+    try {
+      const [remoteDiff, remoteAccounts] = await Promise.all([
+        fetchFederationJson<{ readonly ownerSubject: string; readonly events: readonly { readonly seq: number }[] }>({
+          url: `${controlBaseUrl}/api/ui/federation/diff-events?ownerSubject=${encodeURIComponent(ownerSubject)}&afterSeq=${afterSeq}&limit=500`,
+          credential,
+          timeoutMs: federationRequestTimeoutMs,
+        }),
+        fetchFederationJson<FederationAccountsResponse>({
+          url: `${controlBaseUrl}/api/ui/federation/accounts?ownerSubject=${encodeURIComponent(ownerSubject)}`,
+          credential,
+          timeoutMs: federationRequestTimeoutMs,
+        }),
+      ]);
+
+      const importedProjectedAccounts = [] as Awaited<ReturnType<typeof deps.sqlFederationStore.upsertProjectedAccount>>[];
+      for (const account of remoteAccounts.localAccounts) {
+        const record = await deps.sqlFederationStore.upsertProjectedAccount({
+          sourcePeerId: peer.id,
+          ownerSubject,
+          providerId: account.providerId,
+          accountId: account.accountId,
+          accountSubject: account.subject,
+          chatgptAccountId: account.chatgptAccountId,
+          email: account.email,
+          planType: account.planType,
+          availabilityState: "descriptor",
+          metadata: {
+            hasCredentials: account.hasCredentials,
+            knowledgeSources: account.knowledgeSources,
+          },
+        });
+        importedProjectedAccounts.push(record);
+      }
+
+      let importedUsageCount = 0;
+      const usagePageSize = 5000;
+      if (request.body?.pullUsage !== false && deps.sqlRequestUsageStore) {
+        let cursor: { readonly timestampMs: number; readonly id: string } | undefined;
+        while (true) {
+          const query = new URLSearchParams({
+            sinceMs: String(Number.isFinite(requestedSinceMs) ? requestedSinceMs : 0),
+            limit: String(usagePageSize),
+          });
+          if (cursor) {
+            query.set("afterTimestampMs", String(cursor.timestampMs));
+            query.set("afterId", cursor.id);
+          }
+
+          const remoteUsage = await fetchFederationJson<{ readonly entries: readonly unknown[] }>({
+            url: `${controlBaseUrl}/api/ui/federation/usage-export?${query.toString()}`,
+            credential,
+            timeoutMs: federationRequestTimeoutMs,
+          });
+
+          let lastEntry: RequestLogEntry | undefined;
+          for (const candidate of remoteUsage.entries) {
+            const entry = sanitizeFederationUsageEntry(candidate);
+            if (!entry) {
+              continue;
+            }
+            await deps.sqlRequestUsageStore.upsertEntry(entry);
+            importedUsageCount += 1;
+            lastEntry = entry;
+          }
+
+          if (remoteUsage.entries.length < usagePageSize || !lastEntry) {
+            break;
+          }
+
+          cursor = { timestampMs: lastEntry.timestamp, id: lastEntry.id };
+        }
+      }
+
+      const highestSeq = remoteDiff.events.reduce((current, event) => Math.max(current, event.seq), afterSeq);
+      const nextSyncState = await deps.sqlFederationStore.upsertSyncState({
+        peerId,
+        lastPulledSeq: highestSeq,
+        lastPullAt: true,
+        lastError: null,
+      });
+
+      reply.send({
+        peer,
+        ownerSubject,
+        importedProjectedAccountsCount: importedProjectedAccounts.length,
+        importedUsageCount,
+        remoteDiffCount: remoteDiff.events.length,
+        syncState: nextSyncState,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await deps.sqlFederationStore.upsertSyncState({ peerId, lastError: detail });
+      reply.code(502).send({ error: "federation_pull_failed", detail });
+    }
+  });
+
+  app.get("/api/ui/hosts/self", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanAccessHostDashboard(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    const requestBaseUrl = inferBaseUrl(request);
+    const selfTargetId = inferSelfHostDashboardTargetId({
+      targets: hostDashboardTargets,
+      explicitSelfId: process.env.HOST_DASHBOARD_SELF_ID,
+      requestBaseUrl,
+      requestHost: typeof request.headers.host === "string" ? request.headers.host : undefined,
+    });
+    const selfTarget = hostDashboardTargets.find((target) => target.id === selfTargetId) ?? hostDashboardTargets[0];
+    if (!selfTarget) {
+      reply.code(500).send({ error: "host_dashboard_targets_not_configured" });
+      return;
+    }
+
+    const snapshot = await collectLocalHostDashboardSnapshot({
+      target: selfTarget,
+      dockerSocketPath: hostDashboardDockerSocketPath,
+      runtimeRoot: hostDashboardRuntimeRoot,
+    });
+    reply.send(snapshot);
+  });
+
+  app.get("/api/ui/hosts/overview", async (request, reply) => {
+    const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
+    if (!authCanAccessHostDashboard(auth)) {
+      reply.code(auth ? 403 : 401).send({ error: auth ? "forbidden" : "unauthorized" });
+      return;
+    }
+
+    const requestBaseUrl = inferBaseUrl(request);
+    const selfTargetId = inferSelfHostDashboardTargetId({
+      targets: hostDashboardTargets,
+      explicitSelfId: process.env.HOST_DASHBOARD_SELF_ID,
+      requestBaseUrl,
+      requestHost: typeof request.headers.host === "string" ? request.headers.host : undefined,
+    });
+
+    const hosts = await Promise.all(hostDashboardTargets.map(async (target) => {
+      if (selfTargetId && target.id === selfTargetId) {
+        return collectLocalHostDashboardSnapshot({
+          target,
+          dockerSocketPath: hostDashboardDockerSocketPath,
+          runtimeRoot: hostDashboardRuntimeRoot,
+        });
+      }
+
+      return fetchRemoteHostDashboardSnapshot({
+        target,
+        authToken: resolveHostDashboardTargetToken(target, process.env),
+        timeoutMs: hostDashboardRequestTimeoutMs,
+      });
+    }));
+
+    reply.send({
+      generatedAt: new Date().toISOString(),
+      selfTargetId: selfTargetId ?? null,
+      hosts,
+    });
+  });
+
+  app.get<{
     Querystring: { readonly sort?: string; readonly window?: string; readonly tenantId?: string; readonly issuer?: string; readonly keyId?: string };
   }>("/api/ui/dashboard/overview", async (request, reply) => {
     const auth = getResolvedAuth(request as { readonly openHaxAuth?: unknown });
@@ -2317,7 +3590,7 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
 
     const sort = typeof request.query.sort === "string" ? request.query.sort : undefined;
     const window = toUsageWindow(request.query.window);
-    const overview = await buildUsageOverview(deps.requestLogStore, deps.keyPool, credentialStore, sort, window, scope);
+    const overview = await buildUsageOverview(deps.requestLogStore, deps.keyPool, credentialStore, sort, window, scope, deps.sqlRequestUsageStore);
     reply.send(overview);
   });
 
@@ -2343,7 +3616,7 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
 
     const sort = typeof request.query.sort === "string" ? request.query.sort : undefined;
     const window = toUsageWindow(request.query.window);
-    const analytics = await buildProviderModelAnalytics(deps.requestLogStore, window, sort, scope);
+    const analytics = await buildProviderModelAnalytics(deps.requestLogStore, window, sort, scope, deps.sqlRequestUsageStore);
     reply.send(analytics);
   });
 
@@ -2691,7 +3964,7 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
       }
     }
 
-    const entries = deps.requestLogStore.list({
+    const entryFilters = {
       providerId: request.query.providerId,
       accountId: request.query.accountId,
       tenantId,
@@ -2703,7 +3976,11 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
       before: typeof request.query.before === "string" && request.query.before.length > 0
         ? request.query.before
         : undefined,
-    });
+    };
+
+    const entries = deps.sqlRequestUsageStore
+      ? await deps.sqlRequestUsageStore.listEntries(entryFilters)
+      : deps.requestLogStore.list(entryFilters);
 
     reply.send({ entries });
   });
@@ -2757,7 +4034,7 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
     reply.send(html);
   };
 
-  for (const path of ["/", "/chat", "/images", "/credentials", "/tools"] as const) {
+  for (const path of ["/", "/chat", "/images", "/credentials", "/tools", "/hosts"] as const) {
     app.get(path, async (_request, reply) => {
       await sendUiIndex(reply);
     });
@@ -2856,4 +4133,6 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
     await deps.eventStore.removeTag(request.params.id, tag);
     reply.send({ ok: true });
   });
+
+  return bridgeRelay;
 }

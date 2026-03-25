@@ -7,11 +7,13 @@
 #   ./scripts/e2e-test.sh              # defaults to http://127.0.0.1:8790
 #   DEV_PROXY_URL=http://host:port ./scripts/e2e-test.sh
 #   DEV_PROXY_AUTH_TOKEN=token ./scripts/e2e-test.sh
+#   E2E_REQUIRE_FACTORY=1 ./scripts/e2e-test.sh
 #   LOAD_TEST_CONCURRENCY=16 LOAD_TEST_REQUESTS=16 ./scripts/e2e-test.sh
 #
 set -euo pipefail
 
 BASE="${DEV_PROXY_URL:-http://127.0.0.1:8795}"
+E2E_REQUIRE_FACTORY="${E2E_REQUIRE_FACTORY:-0}"
 PASS=0
 FAIL=0
 SKIP=0
@@ -82,6 +84,108 @@ except Exception as e:
   else
     fail "$label" "expected '$expected', got '$value'"
   fi
+}
+
+json_field_or_empty() {
+  local json="$1" field="$2"
+  printf '%s' "$json" | python3 -c '
+import json
+import sys
+
+field = sys.argv[1]
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+try:
+    for key in field.split("."):
+        if isinstance(data, list):
+            data = data[int(key)]
+        else:
+            data = data[key]
+except Exception:
+    sys.exit(0)
+
+if data is None:
+    sys.exit(0)
+
+if isinstance(data, (dict, list)):
+    print(json.dumps(data))
+else:
+    print(data)
+' "$field"
+}
+
+json_error_summary() {
+  local json="$1"
+  printf '%s' "$json" | python3 -c '
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+parts = []
+error = data.get("error") if isinstance(data, dict) else None
+if isinstance(error, dict):
+    for key in ("code", "type", "message"):
+        value = error.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{key}={value.strip()}")
+
+if isinstance(data, dict):
+    for key in ("detail", "message"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{key}={value.strip()}")
+
+if parts:
+    print("; ".join(parts)[:400])
+'
+}
+
+json_provider_metric_or_zero() {
+  local json="$1" provider_id="$2" field="$3"
+  printf '%s' "$json" | python3 -c '
+import json
+import sys
+
+provider_id = sys.argv[1]
+field = sys.argv[2]
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print(0)
+    sys.exit(0)
+
+if field == "accountCount":
+    providers = data.get("providers", []) if isinstance(data, dict) else []
+    for provider in providers:
+        if isinstance(provider, dict) and provider.get("id") == provider_id:
+            value = provider.get("accountCount")
+            print(value if isinstance(value, int) else 0)
+            sys.exit(0)
+    print(0)
+    sys.exit(0)
+
+if field == "availableAccounts":
+    statuses = data.get("keyPoolStatuses", {}) if isinstance(data, dict) else {}
+    if isinstance(statuses, dict):
+        provider = statuses.get(provider_id)
+        if isinstance(provider, dict):
+            value = provider.get("availableAccounts")
+            print(value if isinstance(value, int) else 0)
+            sys.exit(0)
+    print(0)
+    sys.exit(0)
+
+print(0)
+' "$provider_id" "$field"
 }
 
 chat_completion() {
@@ -168,11 +272,21 @@ if [[ -n "${DEV_PROXY_AUTH_TOKEN:-}" ]]; then
     TENANT_KEY_TOKEN=$(echo "$TENANT_KEY_PAYLOAD" | python3 -c 'import sys, json; print(json.load(sys.stdin)["token"])' 2>/dev/null || true)
 
     if [[ -n "$TENANT_KEY_ID" && -n "$TENANT_KEY_TOKEN" ]]; then
-      RESPONSE=$(chat_completion_with_token "$TENANT_KEY_TOKEN" "openai/gpt-5.2-codex" "Reply with exactly one word: OK" 2>/dev/null) || RESPONSE=""
+      # Retry once on first tenant key request to handle cold-start connection delays
+      RESPONSE=""
+      for attempt in 1 2; do
+        RESPONSE=$(chat_completion_with_token "$TENANT_KEY_TOKEN" "openai/gpt-5.2-codex" "Reply with exactly one word: OK" 2>/dev/null) || RESPONSE=""
+        if [[ -n "$RESPONSE" ]]; then
+          break
+        fi
+        if [[ "$attempt" -eq 1 ]]; then
+          sleep 2
+        fi
+      done
       if [[ -n "$RESPONSE" ]]; then
         pass "tenant API key can access /v1/chat/completions"
       else
-        fail "tenant API key chat completion" "no response"
+        fail "tenant API key chat completion" "no response after retry"
       fi
 
       TENANT_KEYS=$(curl_json "${BASE}/api/ui/tenants/default/api-keys" 2>/dev/null) || TENANT_KEYS=""
@@ -323,12 +437,53 @@ fi
 bold ""
 bold "── 9. Factory Prefix Routing ──"
 
-RESPONSE=$(chat_completion "factory/claude-opus-4-6" "Reply with one word: OK" 2>/dev/null) || RESPONSE=""
-if [[ -n "$RESPONSE" ]]; then
-  assert_json_field "factory/claude-opus-4-6 returns chat.completion" "object" "chat.completion"
-  pass "factory/ prefix routing round-trip"
+FACTORY_CREDENTIALS_JSON=$(curl_json "${BASE}/api/ui/credentials" 2>/dev/null) || FACTORY_CREDENTIALS_JSON=""
+if [[ -n "$FACTORY_CREDENTIALS_JSON" ]]; then
+  FACTORY_ACCOUNT_COUNT=$(json_provider_metric_or_zero "$FACTORY_CREDENTIALS_JSON" "factory" "accountCount")
+  FACTORY_AVAILABLE_COUNT=$(json_provider_metric_or_zero "$FACTORY_CREDENTIALS_JSON" "factory" "availableAccounts")
 else
-  skip "factory/ prefix routing" "factory provider may not be configured"
+  FACTORY_ACCOUNT_COUNT=0
+  FACTORY_AVAILABLE_COUNT=0
+fi
+
+if [[ "$FACTORY_ACCOUNT_COUNT" -eq 0 ]]; then
+  if [[ "$E2E_REQUIRE_FACTORY" == "1" ]]; then
+    fail "factory/ prefix routing" "factory provider has no configured live accounts"
+  else
+    skip "factory/ prefix routing" "factory provider has no configured live accounts"
+  fi
+else
+  if [[ "$FACTORY_AVAILABLE_COUNT" -eq 0 ]]; then
+    if [[ "$E2E_REQUIRE_FACTORY" == "1" ]]; then
+      fail "factory/ prefix routing" "factory provider has no currently available accounts"
+    else
+      skip "factory/ prefix routing" "factory provider has no currently available accounts"
+    fi
+  else
+    RESPONSE=$(chat_completion "factory/claude-opus-4-6" "Reply with one word: OK" 2>/dev/null) || RESPONSE=""
+    if [[ -n "$RESPONSE" ]]; then
+      FACTORY_OBJECT=$(json_field_or_empty "$RESPONSE" "object")
+      if [[ "$FACTORY_OBJECT" == "chat.completion" ]]; then
+        assert_json_field "factory/claude-opus-4-6 returns chat.completion" "object" "chat.completion"
+        pass "factory/ prefix routing round-trip"
+      else
+        FACTORY_ERROR=$(json_error_summary "$RESPONSE")
+        if [[ -n "$FACTORY_ERROR" && "$E2E_REQUIRE_FACTORY" != "1" ]]; then
+          skip "factory/ prefix routing" "live factory account unavailable or invalid (${FACTORY_ERROR})"
+        elif [[ -n "$FACTORY_ERROR" ]]; then
+          fail "factory/ prefix routing" "$FACTORY_ERROR"
+        else
+          fail "factory/ prefix routing" "unexpected non-chat response shape"
+        fi
+      fi
+    else
+      if [[ "$E2E_REQUIRE_FACTORY" == "1" ]]; then
+        fail "factory/ prefix routing" "no response from live factory-backed request"
+      else
+        skip "factory/ prefix routing" "live factory request failed; valid factory account not currently available"
+      fi
+    fi
+  fi
 fi
 
 # ── 10. Concurrent load smoke test ──

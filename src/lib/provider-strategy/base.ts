@@ -8,6 +8,7 @@ import {
   chatCompletionHasReasoningContent,
   responseIndicatesMissingModel,
   responseIndicatesModelNotSupportedForAccount,
+  stripSseCommentLines,
   streamPayloadHasReasoningTrace,
   streamPayloadHasSubstantiveChunks,
   streamPayloadIndicatesQuotaError,
@@ -134,7 +135,7 @@ export abstract class BaseProviderStrategy implements ProviderStrategy {
   protected async handleStandardLocalAttempt(
     reply: FastifyReply,
     upstreamResponse: Response,
-    context: LocalAttemptContext
+    _context: LocalAttemptContext
   ): Promise<void> {
     if (!upstreamResponse.ok) {
       reply.code(upstreamResponse.status);
@@ -224,7 +225,7 @@ export abstract class BaseProviderStrategy implements ProviderStrategy {
         };
       }
 
-      const streamText = await upstreamResponse.text();
+      const streamText = stripSseCommentLines(await upstreamResponse.text());
       if (streamPayloadIndicatesQuotaError(streamText) && context.hasMoreCandidates) {
         return {
           kind: "continue",
@@ -339,4 +340,3 @@ export abstract class TransformedJsonProviderStrategy extends BaseProviderStrate
     return { kind: "handled" };
   }
 }
-
