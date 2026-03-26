@@ -6297,7 +6297,7 @@ test("maps none reasoning effort to ollama think false", async () => {
   );
 });
 
-test("returns synthetic chat-completion SSE for ollama stream requests", async () => {
+test("returns true streaming chat-completion SSE for ollama stream requests", async () => {
   let observedBody: unknown;
 
   await withProxyApp(
@@ -6309,20 +6309,12 @@ test("returns synthetic chat-completion SSE for ollama stream requests", async (
         return {
           status: 200,
           headers: {
-            "content-type": "application/json"
+            "content-type": "application/x-ndjson"
           },
-          body: JSON.stringify({
-            model: "llama3.2:latest",
-            created_at: "2026-03-03T00:00:00.000Z",
-            message: {
-              role: "assistant",
-              content: "ollama-stream-ok"
-            },
-            done: true,
-            done_reason: "stop",
-            prompt_eval_count: 3,
-            eval_count: 2
-          })
+          body:
+            '{"model":"llama3.2:latest","created_at":"2026-03-03T00:00:00.000Z","message":{"role":"assistant","content":"ollama-"},"done":false}\n' +
+            '{"model":"llama3.2:latest","created_at":"2026-03-03T00:00:00.000Z","message":{"role":"assistant","content":"stream-ok"},"done":false}\n' +
+            '{"model":"llama3.2:latest","created_at":"2026-03-03T00:00:00.000Z","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":3,"eval_count":2}\n'
         };
       }
     },
@@ -6345,11 +6337,13 @@ test("returns synthetic chat-completion SSE for ollama stream requests", async (
       assert.equal(response.headers["content-type"], "text/event-stream; charset=utf-8");
 
       assert.ok(isRecord(observedBody));
+      assert.equal(observedBody.stream, true);
       assert.ok(isRecord(observedBody.options));
       assert.equal(observedBody.options.num_ctx, 4096);
 
       assert.ok(response.body.includes("chat.completion.chunk"));
-      assert.ok(response.body.includes("ollama-stream-ok"));
+      assert.ok(response.body.includes("ollama-"));
+      assert.ok(response.body.includes("stream-ok"));
       assert.ok(response.body.includes("data: [DONE]"));
     }
   );
