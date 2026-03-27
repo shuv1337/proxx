@@ -757,10 +757,8 @@ export function CredentialsPage(): JSX.Element {
     const workspaceCopyKey = `${providerId}:${account.id}:workspace`;
     const internalCopyKey = `${providerId}:${account.id}:internal`;
     const shouldShowQuota = ((providerId === "openai" || providerId === "anthropic") && account.authType === "oauth_bearer") || Boolean(quota);
-    const visibleName = revealSecrets
-      ? account.displayName
-      : (account.chatgptAccountId ?? account.id);
-    const visibleEmail = revealSecrets ? account.email : undefined;
+    const visibleName = account.displayName;
+    const visibleEmail = account.email;
 
     return (
       <article key={`${providerId}:${account.id}`} className="credentials-account-tile">

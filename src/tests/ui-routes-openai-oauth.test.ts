@@ -286,3 +286,48 @@ test("OpenAI device OAuth polling persists email metadata", async () => {
     },
   );
 });
+
+test("credential list exposes OpenAI emails without reveal mode", async () => {
+  const accessToken = makeJwt({
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "workspace-visible",
+      chatgpt_plan_type: "team",
+    },
+    "https://api.openai.com/profile": {
+      email: "visible@example.com",
+    },
+    sub: "user-visible",
+  });
+
+  await withUiApp({
+    providers: {
+      openai: {
+        auth: "oauth_bearer",
+        accounts: [
+          {
+            id: "openai-visible",
+            access_token: accessToken,
+            refresh_token: "refresh-visible",
+            expires_at: Date.now() + 3_600_000,
+          },
+        ],
+      },
+    },
+  }, async ({ app }) => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/ui/credentials",
+    });
+
+    assert.equal(response.statusCode, 200);
+    const payload: unknown = response.json();
+    assert.ok(isRecord(payload));
+    assert.ok(Array.isArray(payload.providers));
+    assert.ok(isRecord(payload.providers[0]));
+    assert.ok(Array.isArray(payload.providers[0].accounts));
+    assert.ok(isRecord(payload.providers[0].accounts[0]));
+    assert.equal(payload.providers[0].accounts[0].displayName, "visible@example.com");
+    assert.equal(payload.providers[0].accounts[0].email, "visible@example.com");
+    assert.equal(payload.providers[0].accounts[0].chatgptAccountId, "workspace-visible");
+  });
+});
