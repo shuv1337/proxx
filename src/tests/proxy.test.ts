@@ -7446,10 +7446,60 @@ test("returns true streaming chat-completion SSE for ollama stream requests", as
       assert.ok(isRecord(observedBody.options));
       assert.equal(observedBody.options.num_ctx, 4096);
 
-      assert.ok(response.body.includes("chat.completion.chunk"));
-      assert.ok(response.body.includes("ollama-"));
-      assert.ok(response.body.includes("stream-ok"));
-      assert.ok(response.body.includes("data: [DONE]"));
+      const sseLines = response.body.split(/\r?\n/).filter((line) => line.length > 0);
+      assert.deepEqual(sseLines.map((line) => line.startsWith("data: ")), [true, true, true, true]);
+      assert.equal(sseLines.at(-1), "data: [DONE]");
+
+      const firstChunk = JSON.parse(sseLines[0]!.slice("data: ".length));
+      const secondChunk = JSON.parse(sseLines[1]!.slice("data: ".length));
+      const finalChunk = JSON.parse(sseLines[2]!.slice("data: ".length));
+
+      assert.equal(firstChunk.object, "chat.completion.chunk");
+      assert.equal(firstChunk.choices[0].delta.role, "assistant");
+      assert.equal(firstChunk.choices[0].delta.content, "ollama-");
+      assert.equal(secondChunk.object, "chat.completion.chunk");
+      assert.equal(secondChunk.choices[0].delta.content, "stream-ok");
+      assert.equal(finalChunk.object, "chat.completion.chunk");
+      assert.deepEqual(finalChunk.choices[0].delta, {});
+      assert.equal(finalChunk.choices[0].finish_reason, "stop");
+      assert.equal(firstChunk.id, secondChunk.id);
+      assert.equal(secondChunk.id, finalChunk.id);
+    }
+  );
+});
+
+test("preserves ollama stream content when tool calls are present", async () => {
+  await withProxyApp(
+    {
+      keys: [],
+      upstreamHandler: async () => ({
+        status: 200,
+        headers: {
+          "content-type": "application/x-ndjson"
+        },
+        body:
+          '{"model":"llama3.2:latest","created_at":"2026-03-03T00:00:00.000Z","message":{"role":"assistant","content":"tool-call-transcript","tool_calls":[{"function":{"name":"bash","arguments":{"command":"pwd"}}}]},"done":false}\n' +
+          '{"model":"llama3.2:latest","created_at":"2026-03-03T00:00:00.000Z","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"bash","arguments":{"command":"pwd"}}}]},"done":true,"done_reason":"stop"}\n'
+      })
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "ollama:llama3.2:latest",
+          messages: [{ role: "user", content: "hello" }],
+          stream: true
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.ok(response.body.includes("\"tool_calls\""));
+      assert.ok(response.body.includes("\"content\":\"tool-call-transcript\""));
+      assert.ok(response.body.includes("\"content\":null"));
     }
   );
 });

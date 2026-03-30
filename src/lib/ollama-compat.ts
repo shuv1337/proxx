@@ -443,6 +443,7 @@ function ollamaStreamDeltaPayload(
 
   if (toolCalls.length > 0) {
     delta["tool_calls"] = toolCalls;
+    delta["content"] = content.length > 0 ? content : null;
   } else if (content.length > 0) {
     delta["content"] = content;
   }

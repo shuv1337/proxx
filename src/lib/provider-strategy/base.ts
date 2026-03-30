@@ -325,6 +325,23 @@ export abstract class BaseProviderStrategy implements ProviderStrategy {
           return outcome;
         }
       }
+    } catch (error) {
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore cleanup errors
+      }
+
+      const destroyableResponse = rawResponse as (FastifyReply["raw"] & {
+        readonly writableEnded?: boolean;
+        readonly destroyed?: boolean;
+        destroy?: (error?: Error) => void;
+      }) | null;
+      if (destroyableResponse && destroyableResponse.writableEnded !== true && destroyableResponse.destroyed !== true) {
+        destroyableResponse.destroy?.(error instanceof Error ? error : undefined);
+      }
+
+      throw error;
     } finally {
       reader.releaseLock();
     }
