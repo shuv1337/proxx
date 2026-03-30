@@ -95,6 +95,10 @@ function buildTestAccount(providerId: string, token = "test-token"): ProviderCre
 }
 
 test("getCatalog completes within timeout when a route endpoint is unresponsive", async () => {
+  // Regression: a dead federation peer at federation.big.ussy.promethean.rest caused
+  // getCatalog() to block all /v1/chat/completions and /v1/responses requests for
+  // ~38 minutes (45s per-account timeout × 51 ollama-cloud accounts).
+  // Each test here intentionally hangs a server, so expect ~15s per test (CATALOG_ROUTE_TIMEOUT_MS).
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "catalog-test-"));
 
   const modelsPath = path.join(tempDir, "models.json");
