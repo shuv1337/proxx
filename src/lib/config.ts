@@ -100,6 +100,9 @@ export interface ProxyConfig {
   /** OAuth client secret used for OpenAI token exchange/refresh (optional). */
   readonly openaiOauthClientSecret?: string;
 
+  /** Preserve non-loopback OpenAI browser OAuth callbacks instead of forcing localhost callback topology. */
+  readonly openaiOauthAllowHostRoutedCallbacks?: boolean;
+
   /** Max concurrent OAuth refreshes allowed during background/manual refresh work. */
   readonly oauthRefreshMaxConcurrency: number;
 
@@ -112,6 +115,8 @@ export interface ProxyConfig {
 
 export const DEFAULT_MODELS: readonly string[] = [
   "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
   "gpt-5.2-codex",
   "gpt-5.1-codex",
   "gpt-5.1-codex-max",
@@ -131,7 +136,15 @@ export const DEFAULT_MODELS: readonly string[] = [
   "Kimi-K2.5",
   "gemini-3.1-pro-preview",
   "qwen3.5:4b-q8_0",
-  "qwen3.5:2b-bf16"
+  "qwen3.5:2b-bf16",
+  "auto:cheapest",
+  "auto:fastest",
+  "auto:smartest",
+  "auto:healthiest",
+  "auto:cephalon",
+  "auto:cephalon:cheapest",
+  "auto:cephalon:fastest",
+  "auto:cephalon:smartest",
 ];
 
 function numberFromEnvAliases(names: readonly string[], fallback: number): number {
@@ -317,6 +330,8 @@ function defaultProviderBaseUrl(providerId: string): string {
       return (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
     case "requesty":
       return (process.env.REQUESTY_BASE_URL ?? "https://router.requesty.ai/v1").replace(/\/+$/, "");
+    case "zen":
+      return (process.env.ZEN_BASE_URL ?? process.env.ZENMUX_BASE_URL ?? "https://opencode.ai/zen/v1").replace(/\/+$/, "");
     case "gemini":
       return (process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta").replace(/\/+$/, "");
     case "zai":
@@ -325,6 +340,10 @@ function defaultProviderBaseUrl(providerId: string): string {
       return (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/+$/, "");
     case "ollama-cloud":
       return "https://ollama.com";
+    case "ollama-stealth":
+      return (process.env.OLLAMA_STEALTH_BASE_URL ?? process.env.OLLAMA_LAPTOP_BASE_URL ?? "http://127.0.0.1:11434").replace(/\/+$/, "");
+    case "ollama-big-ussy":
+      return (process.env.OLLAMA_BIG_USSY_BASE_URL ?? "http://10.0.0.2:11434").replace(/\/+$/, "");
     case "vivgrid":
     default:
       return "https://api.vivgrid.com";
@@ -360,10 +379,13 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     ob1: defaultProviderBaseUrl("ob1"),
     openrouter: defaultProviderBaseUrl("openrouter"),
     requesty: defaultProviderBaseUrl("requesty"),
+    zen: defaultProviderBaseUrl("zen"),
     gemini: defaultProviderBaseUrl("gemini"),
     zai: defaultProviderBaseUrl("zai"),
     mistral: defaultProviderBaseUrl("mistral"),
     factory: defaultProviderBaseUrl("factory"),
+    "ollama-stealth": defaultProviderBaseUrl("ollama-stealth"),
+    "ollama-big-ussy": defaultProviderBaseUrl("ollama-big-ussy"),
   });
   upstreamProviderBaseUrls[upstreamProviderId] = upstreamBaseUrl;
   const openaiProviderId = (process.env.OPENAI_PROVIDER_ID ?? "openai").trim();
@@ -458,6 +480,7 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
   const openaiOauthClientSecret = openaiOauthClientSecretRaw.length > 0
     ? openaiOauthClientSecretRaw
     : undefined;
+  const openaiOauthAllowHostRoutedCallbacks = booleanFromEnvAliases(["OPENAI_OAUTH_ALLOW_HOST_ROUTED_CALLBACKS"], false);
 
   const oauthRefreshMaxConcurrency = numberFromEnvAliases(["OAUTH_REFRESH_MAX_CONCURRENCY"], 32);
   const oauthRefreshBackgroundIntervalMs = numberFromEnvAliases(["OAUTH_REFRESH_BACKGROUND_INTERVAL_MS"], 15_000);
@@ -507,7 +530,7 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     promptAffinityFlushMs: nonNegativeNumberFromEnvAliases(["PROXY_PROMPT_AFFINITY_FLUSH_MS"], 250),
     settingsFilePath: filePathFromEnvAliases(["PROXY_SETTINGS_FILE"], "./data/proxy-settings.json", cwd),
     keyReloadMs: numberFromEnvAliases(["PROXY_KEY_RELOAD_MS", "VIVGRID_KEY_RELOAD_MS"], 5000),
-    keyCooldownMs: numberFromEnvAliases(["PROXY_KEY_COOLDOWN_MS", "VIVGRID_KEY_RELOAD_MS"], 30000),
+    keyCooldownMs: numberFromEnvAliases(["PROXY_KEY_COOLDOWN_MS", "VIVGRID_KEY_COOLDOWN_MS"], 300_000),
     requestTimeoutMs: numberFromEnvAliases(["UPSTREAM_REQUEST_TIMEOUT_MS"], 180000),
     streamBootstrapTimeoutMs: numberFromEnvAliases(["UPSTREAM_STREAM_BOOTSTRAP_TIMEOUT_MS"], 8000),
     upstreamTransientRetryCount: nonNegativeNumberFromEnvAliases(["UPSTREAM_TRANSIENT_RETRY_COUNT"], 2),
@@ -527,6 +550,7 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     openaiOauthClientId,
     openaiOauthIssuer,
     openaiOauthClientSecret,
+    openaiOauthAllowHostRoutedCallbacks,
     oauthRefreshMaxConcurrency,
     oauthRefreshBackgroundIntervalMs,
     oauthRefreshProactiveWindowMs,

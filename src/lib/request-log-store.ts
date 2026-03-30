@@ -7,10 +7,12 @@ import { estimateRequestCost } from "./model-pricing.js";
 
 export type RequestAuthType = "api_key" | "oauth_bearer" | "local" | "none";
 export type RequestServiceTierSource = "fast_mode" | "explicit" | "none";
+export type RequestRouteKind = "local" | "federated" | "bridge";
 
 export interface Factory4xxDiagnostics {
   readonly promptCacheKeyHash?: string;
   readonly requestFormat: "responses" | "messages" | "chat_completions" | "unknown";
+  readonly shapeFingerprint?: string;
   readonly messageCount?: number;
   readonly inputItemCount?: number;
   readonly systemMessageCount?: number;
@@ -39,6 +41,10 @@ export interface RequestLogEntry {
   readonly tenantId?: string;
   readonly issuer?: string;
   readonly keyId?: string;
+  readonly routeKind: RequestRouteKind;
+  readonly federationOwnerSubject?: string;
+  readonly routedPeerId?: string;
+  readonly routedPeerLabel?: string;
   readonly providerId: string;
   readonly accountId: string;
   readonly authType: RequestAuthType;
@@ -55,10 +61,12 @@ export interface RequestLogEntry {
   readonly cachedPromptTokens?: number;
   readonly imageCount?: number;
   readonly imageCostUsd?: number;
+  readonly promptCacheKeyHash?: string;
   readonly promptCacheKeyUsed?: boolean;
   readonly cacheHit?: boolean;
   readonly ttftMs?: number;
   readonly tps?: number;
+  readonly endToEndTps?: number;
   readonly error?: string;
   readonly upstreamErrorCode?: string;
   readonly upstreamErrorType?: string;
@@ -68,6 +76,10 @@ export interface RequestLogEntry {
   readonly energyJoules?: number;
   readonly waterEvaporatedMl?: number;
 }
+
+export type RequestLogEvent =
+  | { readonly type: "record"; readonly entry: RequestLogEntry }
+  | { readonly type: "update"; readonly entry: RequestLogEntry };
 
 export interface RequestLogFilters {
   readonly providerId?: string;
@@ -83,6 +95,10 @@ export interface RequestLogRecordInput {
   readonly tenantId?: string;
   readonly issuer?: string;
   readonly keyId?: string;
+  readonly routeKind?: RequestRouteKind;
+  readonly federationOwnerSubject?: string;
+  readonly routedPeerId?: string;
+  readonly routedPeerLabel?: string;
   readonly providerId: string;
   readonly accountId: string;
   readonly authType: RequestAuthType;
@@ -99,10 +115,12 @@ export interface RequestLogRecordInput {
   readonly cachedPromptTokens?: number;
   readonly imageCount?: number;
   readonly imageCostUsd?: number;
+  readonly promptCacheKeyHash?: string;
   readonly promptCacheKeyUsed?: boolean;
   readonly cacheHit?: boolean;
   readonly ttftMs?: number;
   readonly tps?: number;
+  readonly endToEndTps?: number;
   readonly error?: string;
   readonly upstreamErrorCode?: string;
   readonly upstreamErrorType?: string;
@@ -175,6 +193,8 @@ export interface RequestLogDailyModelBucket {
   readonly ttftCount: number;
   readonly tpsSum: number;
   readonly tpsCount: number;
+  readonly endToEndTpsSum: number;
+  readonly endToEndTpsCount: number;
   readonly lastUsedAtMs: number;
   readonly costUsd: number;
   readonly energyJoules: number;
@@ -206,6 +226,8 @@ export interface RequestLogDailyAccountBucket {
   readonly ttftCount: number;
   readonly tpsSum: number;
   readonly tpsCount: number;
+  readonly endToEndTpsSum: number;
+  readonly endToEndTpsCount: number;
   readonly lastUsedAtMs: number;
   readonly costUsd: number;
   readonly energyJoules: number;
@@ -242,6 +264,8 @@ export interface AccountUsageAccumulator {
   readonly ttftCount: number;
   readonly tpsSum: number;
   readonly tpsCount: number;
+  readonly endToEndTpsSum: number;
+  readonly endToEndTpsCount: number;
   readonly lastUsedAtMs: number;
   readonly costUsd: number;
   readonly energyJoules: number;
@@ -256,6 +280,7 @@ export interface RequestLogPerfSummary {
   readonly sampleCount: number;
   readonly ewmaTtftMs: number;
   readonly ewmaTps: number | null;
+  readonly ewmaEndToEndTps: number | null;
   readonly updatedAt: number;
 }
 
@@ -338,6 +363,8 @@ type DailyModelBucket = {
   ttftCount: number;
   tpsSum: number;
   tpsCount: number;
+  endToEndTpsSum: number;
+  endToEndTpsCount: number;
   lastUsedAtMs: number;
   costUsd: number;
   energyJoules: number;
@@ -369,6 +396,8 @@ type DailyAccountBucket = {
   ttftCount: number;
   tpsSum: number;
   tpsCount: number;
+  endToEndTpsSum: number;
+  endToEndTpsCount: number;
   lastUsedAtMs: number;
   costUsd: number;
   energyJoules: number;
@@ -383,6 +412,7 @@ type PerfIndexEntry = {
   sampleCount: number;
   ewmaTtftMs: number;
   ewmaTps: number | null;
+  ewmaEndToEndTps: number | null;
   updatedAt: number;
 };
 
@@ -448,6 +478,7 @@ function hydrateFactoryDiagnostics(raw: unknown): Factory4xxDiagnostics | undefi
   const diagnostics: Factory4xxDiagnostics = {
     requestFormat,
     promptCacheKeyHash: sanitizeOptionalShortString(raw.promptCacheKeyHash, 80),
+    shapeFingerprint: sanitizeOptionalShortString(raw.shapeFingerprint, 80),
     messageCount: sanitizeOptionalCount(asNumber(raw.messageCount)),
     inputItemCount: sanitizeOptionalCount(asNumber(raw.inputItemCount)),
     systemMessageCount: sanitizeOptionalCount(asNumber(raw.systemMessageCount)),
@@ -471,6 +502,7 @@ function hydrateFactoryDiagnostics(raw: unknown): Factory4xxDiagnostics | undefi
   };
 
   const hasSignal = diagnostics.promptCacheKeyHash !== undefined
+    || diagnostics.shapeFingerprint !== undefined
     || diagnostics.messageCount !== undefined
     || diagnostics.inputItemCount !== undefined
     || diagnostics.systemMessageCount !== undefined
@@ -577,6 +609,10 @@ function hydrateEntry(raw: unknown): RequestLogEntry | null {
     tenantId: sanitizeOptionalShortString(raw.tenantId, 120),
     issuer: sanitizeOptionalShortString(raw.issuer, 240),
     keyId: sanitizeOptionalShortString(raw.keyId, 160),
+    routeKind: raw.routeKind === "federated" || raw.routeKind === "bridge" ? raw.routeKind : "local",
+    federationOwnerSubject: sanitizeOptionalShortString(raw.federationOwnerSubject, 240),
+    routedPeerId: sanitizeOptionalShortString(raw.routedPeerId, 160),
+    routedPeerLabel: sanitizeOptionalShortString(raw.routedPeerLabel, 240),
     providerId,
     accountId,
     authType: normalizedAuthType,
@@ -593,10 +629,12 @@ function hydrateEntry(raw: unknown): RequestLogEntry | null {
     cachedPromptTokens: sanitizeOptionalCount(asNumber(raw.cachedPromptTokens)),
     imageCount: sanitizeOptionalCount(asNumber(raw.imageCount)),
     imageCostUsd: sanitizeOptionalCost(asNumber(raw.imageCostUsd)),
+    promptCacheKeyHash: sanitizeOptionalShortString(raw.promptCacheKeyHash, 80),
     promptCacheKeyUsed: raw.promptCacheKeyUsed === true,
     cacheHit: raw.cacheHit === true,
     ttftMs: sanitizeOptionalCount(asNumber(raw.ttftMs)),
     tps: asNumber(raw.tps),
+    endToEndTps: asNumber(raw.endToEndTps),
     error: asString(raw.error),
     upstreamErrorCode: sanitizeOptionalShortString(raw.upstreamErrorCode, 80),
     upstreamErrorType: sanitizeOptionalShortString(raw.upstreamErrorType, 80),
@@ -704,6 +742,8 @@ function hydrateDailyModelBucket(raw: unknown): RequestLogDailyModelBucket | nul
     ttftCount: asNumber(raw.ttftCount) ?? 0,
     tpsSum: asNumber(raw.tpsSum) ?? 0,
     tpsCount: asNumber(raw.tpsCount) ?? 0,
+    endToEndTpsSum: asNumber(raw.endToEndTpsSum) ?? 0,
+    endToEndTpsCount: asNumber(raw.endToEndTpsCount) ?? 0,
     lastUsedAtMs: asNumber(raw.lastUsedAtMs) ?? 0,
     costUsd: asNumber(raw.costUsd) ?? 0,
     energyJoules: asNumber(raw.energyJoules) ?? 0,
@@ -755,6 +795,8 @@ function hydrateDailyAccountBucket(raw: unknown): RequestLogDailyAccountBucket |
     ttftCount: asNumber(raw.ttftCount) ?? 0,
     tpsSum: asNumber(raw.tpsSum) ?? 0,
     tpsCount: asNumber(raw.tpsCount) ?? 0,
+    endToEndTpsSum: asNumber(raw.endToEndTpsSum) ?? 0,
+    endToEndTpsCount: asNumber(raw.endToEndTpsCount) ?? 0,
     lastUsedAtMs: asNumber(raw.lastUsedAtMs) ?? 0,
     costUsd: asNumber(raw.costUsd) ?? 0,
     energyJoules: asNumber(raw.energyJoules) ?? 0,
@@ -867,6 +909,8 @@ type MutableAccountAccumulator = {
   ttftCount: number;
   tpsSum: number;
   tpsCount: number;
+  endToEndTpsSum: number;
+  endToEndTpsCount: number;
   lastUsedAtMs: number;
   costUsd: number;
   energyJoules: number;
@@ -886,6 +930,7 @@ function dailyAccountBucketKey(startMs: number, providerId: string, accountId: s
 }
 
 export class RequestLogStore {
+  private readonly subscribers = new Set<(event: RequestLogEvent) => void>();
   private readonly entries: RequestLogEntry[] = [];
   private readonly hourlyBuckets = new Map<number, HourlyBucket>();
   private readonly dailyBuckets = new Map<number, DailyBucket>();
@@ -922,6 +967,27 @@ export class RequestLogStore {
     await this.warmupPromise;
   }
 
+  public subscribe(listener: (event: RequestLogEvent) => void): () => void {
+    this.subscribers.add(listener);
+    return () => {
+      this.subscribers.delete(listener);
+    };
+  }
+
+  private emit(event: RequestLogEvent): void {
+    if (this.subscribers.size === 0) {
+      return;
+    }
+
+    for (const listener of this.subscribers) {
+      try {
+        listener(event);
+      } catch {
+        // Ignore subscriber failures so observability can never take down logging.
+      }
+    }
+  }
+
   public record(input: RequestLogRecordInput): RequestLogEntry {
     if (this.closed) {
       throw new Error("request log store is closed");
@@ -933,6 +999,10 @@ export class RequestLogStore {
       tenantId: sanitizeOptionalShortString(input.tenantId, 120),
       issuer: sanitizeOptionalShortString(input.issuer, 240),
       keyId: sanitizeOptionalShortString(input.keyId, 160),
+      routeKind: input.routeKind ?? "local",
+      federationOwnerSubject: sanitizeOptionalShortString(input.federationOwnerSubject, 240),
+      routedPeerId: sanitizeOptionalShortString(input.routedPeerId, 160),
+      routedPeerLabel: sanitizeOptionalShortString(input.routedPeerLabel, 240),
       providerId: input.providerId,
       accountId: input.accountId,
       authType: input.authType,
@@ -949,19 +1019,21 @@ export class RequestLogStore {
       cachedPromptTokens: sanitizeOptionalCount(input.cachedPromptTokens),
       imageCount: sanitizeOptionalCount(input.imageCount),
       imageCostUsd: sanitizeOptionalCost(input.imageCostUsd),
+      promptCacheKeyHash: sanitizeOptionalShortString(input.promptCacheKeyHash, 80),
       promptCacheKeyUsed: input.promptCacheKeyUsed === true,
-    cacheHit: input.cacheHit === true,
-    ttftMs: sanitizeOptionalCount(input.ttftMs),
-    tps: input.tps,
-    error: input.error,
-    upstreamErrorCode: sanitizeOptionalShortString(input.upstreamErrorCode, 80),
-    upstreamErrorType: sanitizeOptionalShortString(input.upstreamErrorType, 80),
-    upstreamErrorMessage: sanitizeOptionalShortString(input.upstreamErrorMessage),
-    factoryDiagnostics: hydrateFactoryDiagnostics(input.factoryDiagnostics),
-    costUsd: sanitizeOptionalCost(input.costUsd),
-    energyJoules: sanitizeOptionalCost(input.energyJoules),
-    waterEvaporatedMl: sanitizeOptionalCost(input.waterEvaporatedMl),
-  };
+      cacheHit: input.cacheHit === true,
+      ttftMs: sanitizeOptionalCount(input.ttftMs),
+      tps: input.tps,
+      endToEndTps: input.endToEndTps,
+      error: input.error,
+      upstreamErrorCode: sanitizeOptionalShortString(input.upstreamErrorCode, 80),
+      upstreamErrorType: sanitizeOptionalShortString(input.upstreamErrorType, 80),
+      upstreamErrorMessage: sanitizeOptionalShortString(input.upstreamErrorMessage),
+      factoryDiagnostics: hydrateFactoryDiagnostics(input.factoryDiagnostics),
+      costUsd: sanitizeOptionalCost(input.costUsd),
+      energyJoules: sanitizeOptionalCost(input.energyJoules),
+      waterEvaporatedMl: sanitizeOptionalCost(input.waterEvaporatedMl),
+    };
 
     this.entries.push(entry);
     const overflow = this.entries.length - this.maxEntries;
@@ -980,6 +1052,8 @@ export class RequestLogStore {
     this.schedulePersist();
     this.queueMirror(entry);
 
+    this.emit({ type: "record", entry });
+
     return entry;
   }
 
@@ -992,10 +1066,12 @@ export class RequestLogStore {
       readonly cachedPromptTokens?: number;
       readonly imageCount?: number;
       readonly imageCostUsd?: number;
+      readonly promptCacheKeyHash?: string;
       readonly promptCacheKeyUsed?: boolean;
       readonly cacheHit?: boolean;
       readonly ttftMs?: number;
       readonly tps?: number;
+      readonly endToEndTps?: number;
       readonly error?: string;
       readonly upstreamErrorCode?: string;
       readonly upstreamErrorType?: string;
@@ -1028,10 +1104,12 @@ export class RequestLogStore {
       cachedPromptTokens: sanitizeOptionalCount(patch.cachedPromptTokens) ?? current.cachedPromptTokens,
       imageCount: sanitizeOptionalCount(patch.imageCount) ?? current.imageCount,
       imageCostUsd: sanitizeOptionalCost(patch.imageCostUsd) ?? current.imageCostUsd,
+      promptCacheKeyHash: sanitizeOptionalShortString(patch.promptCacheKeyHash, 80) ?? current.promptCacheKeyHash,
       promptCacheKeyUsed: patch.promptCacheKeyUsed ?? current.promptCacheKeyUsed,
       cacheHit: patch.cacheHit ?? current.cacheHit,
       ttftMs: sanitizeOptionalCount(patch.ttftMs) ?? current.ttftMs,
       tps: typeof patch.tps === "number" && Number.isFinite(patch.tps) ? patch.tps : current.tps,
+      endToEndTps: typeof patch.endToEndTps === "number" && Number.isFinite(patch.endToEndTps) ? patch.endToEndTps : current.endToEndTps,
       error: patch.error ?? current.error,
       upstreamErrorCode: sanitizeOptionalShortString(patch.upstreamErrorCode, 80) ?? current.upstreamErrorCode,
       upstreamErrorType: sanitizeOptionalShortString(patch.upstreamErrorType, 80) ?? current.upstreamErrorType,
@@ -1052,6 +1130,8 @@ export class RequestLogStore {
     this.pendingJournalEntries.push(next);
     this.schedulePersist();
     this.queueMirror(next);
+
+    this.emit({ type: "update", entry: next });
     return next;
   }
 
@@ -1185,6 +1265,58 @@ export class RequestLogStore {
     const key = `${providerId}\0${accountId}\0${model}\0${upstreamMode}`;
     const entry = this.perfIndex.get(key);
     return entry ? { ...entry } : undefined;
+  }
+
+  public getModelPerfSummary(
+    providerId: string,
+    model: string,
+    upstreamMode: string,
+  ): RequestLogPerfSummary | undefined {
+    const matchingEntries = [...this.perfIndex.values()]
+      .filter((entry) => entry.providerId === providerId)
+      .filter((entry) => entry.model === model)
+      .filter((entry) => entry.upstreamMode === upstreamMode);
+
+    if (matchingEntries.length === 0) {
+      return undefined;
+    }
+
+    const totalSamples = matchingEntries.reduce((sum, entry) => sum + Math.max(entry.sampleCount, 1), 0);
+    const weightedAverage = (selector: (entry: RequestLogPerfSummary) => number): number => {
+      const weightedTotal = matchingEntries.reduce(
+        (sum, entry) => sum + selector(entry) * Math.max(entry.sampleCount, 1),
+        0,
+      );
+      return weightedTotal / totalSamples;
+    };
+    const weightedNullableAverage = (selector: (entry: RequestLogPerfSummary) => number | null): number | null => {
+      const candidates = matchingEntries
+        .map((entry) => ({
+          weight: Math.max(entry.sampleCount, 1),
+          value: selector(entry),
+        }))
+        .filter((entry): entry is { readonly weight: number; readonly value: number } => entry.value !== null);
+
+      if (candidates.length === 0) {
+        return null;
+      }
+
+      const totalWeight = candidates.reduce((sum, entry) => sum + entry.weight, 0);
+      const weightedTotal = candidates.reduce((sum, entry) => sum + entry.value * entry.weight, 0);
+      return weightedTotal / totalWeight;
+    };
+
+    return {
+      providerId,
+      accountId: "*",
+      model,
+      upstreamMode,
+      sampleCount: totalSamples,
+      ewmaTtftMs: weightedAverage((entry) => entry.ewmaTtftMs),
+      ewmaTps: weightedNullableAverage((entry) => entry.ewmaTps),
+      ewmaEndToEndTps: weightedNullableAverage((entry) => entry.ewmaEndToEndTps),
+      updatedAt: matchingEntries.reduce((max, entry) => Math.max(max, entry.updatedAt), 0),
+    };
   }
 
   public async close(): Promise<void> {
@@ -1396,6 +1528,8 @@ export class RequestLogStore {
       ttftCount: 0,
       tpsSum: 0,
       tpsCount: 0,
+      endToEndTpsSum: 0,
+      endToEndTpsCount: 0,
       lastUsedAtMs: 0,
       costUsd: 0,
       energyJoules: 0,
@@ -1446,6 +1580,8 @@ export class RequestLogStore {
       ttftCount: 0,
       tpsSum: 0,
       tpsCount: 0,
+      endToEndTpsSum: 0,
+      endToEndTpsCount: 0,
       lastUsedAtMs: 0,
       costUsd: 0,
       energyJoules: 0,
@@ -1505,7 +1641,7 @@ export class RequestLogStore {
       authType: entry.authType,
       requestCount: 0, totalTokens: 0, promptTokens: 0, completionTokens: 0,
       cachedPromptTokens: 0, imageCount: 0, imageCostUsd: 0, cacheHitCount: 0, cacheKeyUseCount: 0,
-      ttftSum: 0, ttftCount: 0, tpsSum: 0, tpsCount: 0, lastUsedAtMs: 0,
+      ttftSum: 0, ttftCount: 0, tpsSum: 0, tpsCount: 0, endToEndTpsSum: 0, endToEndTpsCount: 0, lastUsedAtMs: 0,
       costUsd: 0, energyJoules: 0, waterEvaporatedMl: 0,
     };
     acc.requestCount += 1;
@@ -1522,6 +1658,7 @@ export class RequestLogStore {
     if (entry.promptCacheKeyUsed) acc.cacheKeyUseCount += 1;
     if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) { acc.ttftSum += entry.ttftMs; acc.ttftCount += 1; }
     if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) { acc.tpsSum += entry.tps; acc.tpsCount += 1; }
+    if (typeof entry.endToEndTps === "number" && Number.isFinite(entry.endToEndTps)) { acc.endToEndTpsSum += entry.endToEndTps; acc.endToEndTpsCount += 1; }
     acc.lastUsedAtMs = Math.max(acc.lastUsedAtMs, entry.timestamp);
     this.accountAccumulators.set(key, acc);
   }
@@ -1546,6 +1683,9 @@ export class RequestLogStore {
     }
     if (typeof next.tps === "number" && Number.isFinite(next.tps) && (prev.tps === undefined || prev.tps === null)) {
       acc.tpsSum += next.tps; acc.tpsCount += 1;
+    }
+    if (typeof next.endToEndTps === "number" && Number.isFinite(next.endToEndTps) && (prev.endToEndTps === undefined || prev.endToEndTps === null)) {
+      acc.endToEndTpsSum += next.endToEndTps; acc.endToEndTpsCount += 1;
     }
   }
 
@@ -1680,6 +1820,11 @@ export class RequestLogStore {
       bucket.tpsCount += 1;
     }
 
+    if (typeof entry.endToEndTps === "number" && Number.isFinite(entry.endToEndTps)) {
+      bucket.endToEndTpsSum += entry.endToEndTps;
+      bucket.endToEndTpsCount += 1;
+    }
+
     bucket.lastUsedAtMs = Math.max(bucket.lastUsedAtMs, entry.timestamp);
 
     this.pruneDailyModelBuckets(entry.timestamp);
@@ -1738,6 +1883,11 @@ export class RequestLogStore {
     if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) {
       bucket.tpsSum += entry.tps;
       bucket.tpsCount += 1;
+    }
+
+    if (typeof entry.endToEndTps === "number" && Number.isFinite(entry.endToEndTps)) {
+      bucket.endToEndTpsSum += entry.endToEndTps;
+      bucket.endToEndTpsCount += 1;
     }
 
     bucket.lastUsedAtMs = Math.max(bucket.lastUsedAtMs, entry.timestamp);
@@ -1828,6 +1978,11 @@ export class RequestLogStore {
       bucket.tpsCount += 1;
     }
 
+    if (typeof entry.endToEndTps === "number" && Number.isFinite(entry.endToEndTps) && (previous.endToEndTps === undefined || previous.endToEndTps === null)) {
+      bucket.endToEndTpsSum += entry.endToEndTps;
+      bucket.endToEndTpsCount += 1;
+    }
+
     bucket.lastUsedAtMs = Math.max(bucket.lastUsedAtMs, entry.timestamp);
 
     this.pruneDailyModelBuckets(entry.timestamp);
@@ -1873,6 +2028,11 @@ export class RequestLogStore {
       bucket.tpsCount += 1;
     }
 
+    if (typeof entry.endToEndTps === "number" && Number.isFinite(entry.endToEndTps) && (previous.endToEndTps === undefined || previous.endToEndTps === null)) {
+      bucket.endToEndTpsSum += entry.endToEndTps;
+      bucket.endToEndTpsCount += 1;
+    }
+
     bucket.lastUsedAtMs = Math.max(bucket.lastUsedAtMs, entry.timestamp);
     this.pruneDailyAccountBuckets(entry.timestamp);
   }
@@ -1894,6 +2054,12 @@ export class RequestLogStore {
 
     const alpha = 0.20;
     const existing = this.perfIndex.get(key);
+    const derivedEndToEndTps =
+      typeof entry.endToEndTps === "number" && Number.isFinite(entry.endToEndTps)
+        ? entry.endToEndTps
+        : typeof entry.completionTokens === "number" && Number.isFinite(entry.completionTokens) && entry.latencyMs > 0
+          ? entry.completionTokens / (entry.latencyMs / 1000)
+          : null;
     if (!existing) {
       this.perfIndex.set(key, {
         providerId: entry.providerId,
@@ -1903,6 +2069,7 @@ export class RequestLogStore {
         sampleCount: 1,
         ewmaTtftMs: ttftMs,
         ewmaTps: derivedTps,
+        ewmaEndToEndTps: derivedEndToEndTps,
         updatedAt: entry.timestamp,
       });
       return;
@@ -1915,6 +2082,12 @@ export class RequestLogStore {
 
     if (derivedTps !== null) {
       existing.ewmaTps = existing.ewmaTps === null ? derivedTps : existing.ewmaTps * (1 - alpha) + derivedTps * alpha;
+    }
+
+    if (derivedEndToEndTps !== null) {
+      existing.ewmaEndToEndTps = existing.ewmaEndToEndTps === null
+        ? derivedEndToEndTps
+        : existing.ewmaEndToEndTps * (1 - alpha) + derivedEndToEndTps * alpha;
     }
 
     existing.updatedAt = Math.max(existing.updatedAt, entry.timestamp);
@@ -2070,6 +2243,8 @@ export class RequestLogStore {
             ttftCount: asNumber(acc.ttftCount) ?? 0,
             tpsSum: asNumber(acc.tpsSum) ?? 0,
             tpsCount: asNumber(acc.tpsCount) ?? 0,
+            endToEndTpsSum: asNumber(acc.endToEndTpsSum) ?? 0,
+            endToEndTpsCount: asNumber(acc.endToEndTpsCount) ?? 0,
             lastUsedAtMs: asNumber(acc.lastUsedAtMs) ?? 0,
             costUsd: asNumber(acc.costUsd) ?? 0,
             energyJoules: asNumber(acc.energyJoules) ?? 0,

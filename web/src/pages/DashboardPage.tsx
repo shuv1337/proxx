@@ -9,7 +9,7 @@ import {
   type UsageAccountSummary,
   type UsageOverview,
 } from "../lib/api";
-import { formatAuthType } from "../lib/format";
+import { formatAuthType, formatRequestOrigin } from "../lib/format";
 import { useStoredState } from "../lib/use-stored-state";
 
 const ALL_PROVIDERS_FILTER = "__all_providers__";
@@ -33,7 +33,7 @@ function validateAccountSort(value: unknown): string | undefined {
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === "health" || normalized === "ttft" || normalized === "tps" || normalized === "tokens" || normalized === "requests") {
+  if (normalized === "health" || normalized === "ttft" || normalized === "tps" || normalized === "decode-tps" || normalized === "e2e-tps" || normalized === "tokens" || normalized === "requests") {
     return normalized;
   }
 
@@ -97,6 +97,23 @@ function formatServiceTier(entry: RequestLogEntry): string {
   }
 
   return entry.serviceTier.replace(/[_-]+/g, " ");
+}
+
+function formatRouteLabel(entry: RequestLogEntry): string {
+  if (entry.routeKind === "local") {
+    return "local";
+  }
+
+  const peer = entry.routedPeerLabel ?? entry.routedPeerId ?? "unknown-peer";
+  return `${entry.routeKind} → ${peer}`;
+}
+
+function formatProviderRouteCell(entry: RequestLogEntry): string {
+  const base = `${entry.providerId}/${entry.accountId}`;
+  const routePart = entry.routeKind === "local" ? "" : ` · ${formatRouteLabel(entry)}`;
+  const origin = formatRequestOrigin(entry);
+  const originPart = origin !== "unknown" && origin !== "local" ? ` · from ${origin}` : "";
+  return `${base}${routePart}${originPart}`;
 }
 
 function metricTone(value: number, inverse = false): string {
@@ -238,7 +255,7 @@ export function DashboardPage(): JSX.Element {
     if (accountProviderFilter !== ALL_PROVIDERS_FILTER && !accountProviderOptions.includes(accountProviderFilter)) {
       setAccountProviderFilter(ALL_PROVIDERS_FILTER);
     }
-  }, [accountProviderFilter, accountProviderOptions]);
+  }, [accountProviderFilter, accountProviderOptions, setAccountProviderFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -324,8 +341,6 @@ export function DashboardPage(): JSX.Element {
     return () => observer.disconnect();
   }, [loadMoreHealth]);
 
-  useEffect(() => { setHealthVisible(50); }, [overview, accountProviderFilter]);
-
   return (
     <div className="dashboard-layout">
       <section className="dashboard-hero panel-sheen">
@@ -385,6 +400,17 @@ export function DashboardPage(): JSX.Element {
           <strong>{loading ? "..." : formatCompactNumber(overview?.summary.activeAccounts ?? 0)}</strong>
           <small>
             Top model {overview?.summary.topModel ?? "-"} · Top provider {overview?.summary.topProvider ?? "-"}
+          </small>
+        </article>
+        <article className={`dashboard-metric-card ${metricTone((overview?.summary.routingRequests24h.federated ?? 0) + (overview?.summary.routingRequests24h.bridge ?? 0))}`}>
+          <span>Projected / {windowLabel}</span>
+          <strong>{loading ? "..." : formatCompactNumber((overview?.summary.routingRequests24h.federated ?? 0) + (overview?.summary.routingRequests24h.bridge ?? 0))}</strong>
+          <small>
+            Federated {formatCompactNumber(overview?.summary.routingRequests24h.federated ?? 0)}
+            {" · "}
+            Bridge {formatCompactNumber(overview?.summary.routingRequests24h.bridge ?? 0)}
+            {" · "}
+            Top peer {overview?.summary.routingRequests24h.topPeer ?? "-"}
           </small>
         </article>
         <article className={`dashboard-metric-card ${metricTone(overview?.summary.costUsd24h ?? 0)}`}>
@@ -512,7 +538,7 @@ export function DashboardPage(): JSX.Element {
           <div className="dashboard-log-table">
             <div className="dashboard-log-header">
               <span>When</span>
-              <span>Provider</span>
+              <span>Provider / Route</span>
               <span>Model</span>
               <span>Tier</span>
               <span>Status</span>
@@ -523,7 +549,7 @@ export function DashboardPage(): JSX.Element {
             ) : requestLogs.map((entry) => (
               <div key={entry.id} className="dashboard-log-row">
                 <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
-                <span>{entry.providerId}/{entry.accountId}</span>
+                <span>{formatProviderRouteCell(entry)}</span>
                 <span>{entry.model}</span>
                 <span className={`dashboard-status-pill dashboard-tier-pill dashboard-tier-${entry.serviceTierSource}`}>
                   {formatServiceTier(entry)}
@@ -543,7 +569,7 @@ export function DashboardPage(): JSX.Element {
         <header className="dashboard-panel-header">
           <div>
             <h3>Account Health</h3>
-            <p>Ordered by health by default; filter to a provider or sort by tokens/requests/TTFT/TPS.</p>
+            <p>Ordered by health by default; filter to a provider or sort by tokens, requests, TTFT, decode TPS, or end-to-end TPS.</p>
           </div>
           <div className="dashboard-panel-controls">
             <label>
@@ -551,14 +577,18 @@ export function DashboardPage(): JSX.Element {
               <select value={accountSort} onChange={(event) => setAccountSort(event.target.value)}>
                 <option value="health">Health</option>
                 <option value="ttft">TTFT</option>
-                <option value="tps">TPS</option>
+                <option value="tps">Decode TPS</option>
+                <option value="e2e-tps">End-to-end TPS</option>
                 <option value="tokens">Tokens</option>
                 <option value="requests">Requests</option>
               </select>
             </label>
             <label>
               Provider&nbsp;
-              <select value={accountProviderFilter} onChange={(event) => setAccountProviderFilter(event.target.value)}>
+              <select value={accountProviderFilter} onChange={(event) => {
+                setAccountProviderFilter(event.target.value);
+                setHealthVisible(50);
+              }}>
                 <option value={ALL_PROVIDERS_FILTER}>All providers</option>
                 {accountProviderOptions.map((providerId) => (
                   <option key={providerId} value={providerId}>{providerId}</option>
@@ -574,7 +604,8 @@ export function DashboardPage(): JSX.Element {
               <span>Status</span>
               <span>Health</span>
               <span>TTFT</span>
-              <span>TPS</span>
+              <span>Decode TPS</span>
+              <span>End-to-End TPS</span>
               <span>Cache</span>
               <span>Requests</span>
               <span>Tokens</span>
@@ -596,7 +627,8 @@ export function DashboardPage(): JSX.Element {
                   <span className={`dashboard-status-pill dashboard-status-${account.status}`}>{account.status}</span>
                   <span>{formatMaybeScore(account.healthScore)}</span>
                   <span>{formatMaybeMs(account.avgTtftMs)}</span>
-                  <span>{formatMaybeTps(account.avgTps)}</span>
+                  <span>{formatMaybeTps(account.avgDecodeTps)}</span>
+                  <span>{formatMaybeTps(account.avgEndToEndTps)}</span>
                   <span>
                     {account.cacheKeyUseCount > 0
                       ? `${formatPercent((account.cacheHitCount / account.cacheKeyUseCount) * 100)} (${account.cacheHitCount}/${account.cacheKeyUseCount})`
