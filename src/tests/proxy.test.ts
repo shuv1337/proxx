@@ -11,6 +11,10 @@ import type { FastifyInstance } from "fastify";
 
 import { createApp } from "../app.js";
 import type { ProxyConfig } from "../lib/config.js";
+import {
+  chatCompletionEventStreamToResponsesEventStream,
+  chatCompletionToSse,
+} from "../lib/responses-compat.js";
 
 interface TestContext {
   readonly app: FastifyInstance;
@@ -8709,6 +8713,41 @@ test("maps additional responses reasoning delta event variants into chat reasoni
       assert.ok(response.body.includes("data: [DONE]"));
     }
   );
+});
+
+test("maps function-call SSE events to canonical response output ids", () => {
+  const stream = [
+    "data: {\"id\":\"chatcmpl_gap\",\"object\":\"chat.completion.chunk\",\"created\":1772516815,\"model\":\"gpt-5.3-codex\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":1,\"id\":\"call_gap\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chatcmpl_gap\",\"object\":\"chat.completion.chunk\",\"created\":1772516815,\"model\":\"gpt-5.3-codex\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: [DONE]\n\n"
+  ].join("");
+
+  const responsesStream = chatCompletionEventStreamToResponsesEventStream(stream, "gpt-5.3-codex");
+  assert.ok(responsesStream.includes("\"id\":\"fc_chatcmpl_gap_0\""));
+  assert.ok(!responsesStream.includes("\"id\":\"fc_chatcmpl_gap_1\""));
+  assert.ok(responsesStream.includes("\"call_id\":\"call_gap\""));
+});
+
+test("preserves structured assistant content in chatCompletionToSse", () => {
+  const stream = chatCompletionToSse({
+    id: "chatcmpl_structured_content",
+    object: "chat.completion",
+    created: 1772516815,
+    model: "gpt-5.3-codex",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: [{ type: "output_text", text: "hello-structured" }]
+        },
+        finish_reason: "stop"
+      }
+    ]
+  });
+
+  assert.ok(stream.includes("\"content\":[{\"type\":\"output_text\",\"text\":\"hello-structured\"}]"));
+  assert.ok(!stream.includes("\"content\":\"\""));
 });
 
 test("fails over stream accounts when an upstream stream returns only [DONE]", async () => {

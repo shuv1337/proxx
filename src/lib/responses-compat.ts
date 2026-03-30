@@ -1439,6 +1439,7 @@ export function chatCompletionEventStreamToResponsesEventStream(streamText: stri
   const events: string[] = [];
   const responseOutput = Array.isArray(response["output"]) ? response["output"] : [];
   const outputIndexById = new Map<string, number>();
+  const functionCallOutputByCallId = new Map<string, { readonly itemId: string; readonly outputIndex: number }>();
   for (const [index, item] of responseOutput.entries()) {
     if (!isRecord(item)) {
       continue;
@@ -1447,6 +1448,13 @@ export function chatCompletionEventStreamToResponsesEventStream(streamText: stri
     const itemId = asString(item["id"]);
     if (itemId) {
       outputIndexById.set(itemId, index);
+
+      if (asString(item["type"]) === "function_call") {
+        const callId = asString(item["call_id"]);
+        if (callId) {
+          functionCallOutputByCallId.set(callId, { itemId, outputIndex: index });
+        }
+      }
     }
   }
 
@@ -1552,11 +1560,12 @@ export function chatCompletionEventStreamToResponsesEventStream(streamText: stri
       let state = toolCallState.get(toolCallIndex);
       if (!state) {
         const callId = asString(entry["id"]) ?? `call_${toolCallIndex}`;
-        const itemId = `fc_${responseId}_${toolCallIndex}`;
+        const mappedOutput = functionCallOutputByCallId.get(callId);
+        const itemId = mappedOutput?.itemId ?? `fc_${responseId}_${toolCallIndex}`;
         state = {
           itemId,
           callId,
-          outputIndex: outputIndexById.get(itemId) ?? 0
+          outputIndex: mappedOutput?.outputIndex ?? outputIndexById.get(itemId) ?? 0
         };
         toolCallState.set(toolCallIndex, state);
         emitEvent("response.output_item.added", {
@@ -1654,7 +1663,19 @@ function completionToStreamDelta(completion: Record<string, unknown>): {
 
   if (toolCalls.length === 0 || typeof message["content"] === "string") {
     const content = message["content"];
-    delta["content"] = typeof content === "string" && content.length > 0 ? content : "";
+    if (typeof content === "string") {
+      delta["content"] = content.length > 0 ? content : "";
+    } else if (Array.isArray(content)) {
+      if (content.length > 0) {
+        delta["content"] = content;
+      }
+    } else if (isRecord(content)) {
+      if (Object.keys(content).length > 0) {
+        delta["content"] = content;
+      }
+    } else if (toolCalls.length === 0) {
+      delta["content"] = "";
+    }
   }
 
   return {
