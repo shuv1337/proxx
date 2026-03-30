@@ -25,6 +25,18 @@ import {
   type UpstreamMode,
 } from "./shared.js";
 
+function appendUpstreamIdentityHeaders(reply: FastifyReply, context: ProviderAttemptContext): void {
+  reply.header("x-open-hax-upstream-provider", context.providerId);
+
+  // Only expose the selected account identity to legacy admin callers.
+  // This keeps tenant traffic from learning internal account IDs while still
+  // enabling federation/bridge observability between trusted nodes.
+  if (context.requestAuth?.kind === "legacy_admin") {
+    reply.header("x-open-hax-upstream-account", context.account.accountId);
+    reply.header("x-open-hax-upstream-auth-type", context.account.authType);
+  }
+}
+
 export abstract class BaseProviderStrategy implements ProviderStrategy {
   public abstract readonly mode: UpstreamMode;
   public abstract readonly isLocal: boolean;
@@ -57,6 +69,27 @@ export abstract class BaseProviderStrategy implements ProviderStrategy {
     context: ProviderAttemptContext
   ): Promise<ProviderAttemptOutcome> {
     if (upstreamResponse.ok) {
+      const contentType = upstreamResponse.headers.get("content-type") ?? "";
+      const isEventStream = contentType.toLowerCase().includes("text/event-stream");
+
+      if (!isEventStream) {
+        try {
+          const bodyText = await upstreamResponse.clone().text();
+          if (bodyText.length === 0) {
+            return { kind: "continue", requestError: true };
+          }
+          const parsed = JSON.parse(bodyText);
+          if (
+            typeof parsed !== "object" || parsed === null
+            || (!("choices" in parsed) && !("object" in parsed) && !("id" in parsed))
+          ) {
+            return { kind: "continue", requestError: true };
+          }
+        } catch {
+          return { kind: "continue", requestError: true };
+        }
+      }
+
       return this.handleSuccessfulProviderAttempt(reply, upstreamResponse, context);
     }
 
@@ -344,7 +377,7 @@ export abstract class BaseProviderStrategy implements ProviderStrategy {
         };
       }
 
-      reply.header("x-open-hax-upstream-provider", context.providerId);
+      appendUpstreamIdentityHeaders(reply, context);
       reply.code(upstreamResponse.status);
       copyUpstreamHeaders(reply, upstreamResponse.headers);
       reply.header("content-type", "application/json");
@@ -389,7 +422,7 @@ export abstract class BaseProviderStrategy implements ProviderStrategy {
         };
       }
 
-      reply.header("x-open-hax-upstream-provider", context.providerId);
+      appendUpstreamIdentityHeaders(reply, context);
       reply.code(upstreamResponse.status);
       copyUpstreamHeaders(reply, upstreamResponse.headers);
       reply.removeHeader("content-length");
@@ -410,7 +443,7 @@ export abstract class BaseProviderStrategy implements ProviderStrategy {
       return { kind: "handled" };
     }
 
-    reply.header("x-open-hax-upstream-provider", context.providerId);
+    appendUpstreamIdentityHeaders(reply, context);
     reply.code(upstreamResponse.status);
     copyUpstreamHeaders(reply, upstreamResponse.headers);
 
@@ -466,7 +499,7 @@ export abstract class TransformedJsonProviderStrategy extends BaseProviderStrate
       };
     }
 
-    reply.header("x-open-hax-upstream-provider", context.providerId);
+    appendUpstreamIdentityHeaders(reply, context);
     if (context.clientWantsStream) {
       reply.code(200);
       reply.header("content-type", "text/event-stream; charset=utf-8");

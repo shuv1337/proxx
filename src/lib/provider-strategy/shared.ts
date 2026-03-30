@@ -9,6 +9,7 @@ import type { Factory4xxDiagnostics, RequestLogStore } from "../request-log-stor
 import type { ResolvedRequestAuth } from "../request-auth.js";
 import { estimateRequestCost } from "../model-pricing.js";
 import type { PolicyEngine } from "../policy/index.js";
+import type { AccountHealthStore } from "../db/account-health-store.js";
 import { orderAccountsByPolicy } from "../provider-policy.js";
 import {
   responsesEventStreamToChatCompletion,
@@ -83,10 +84,13 @@ function shouldCooldownCredentialOnAuthFailure(providerId: string, status: numbe
 }
 
 /**
- * For API-key providers (vivgrid, ollama-cloud, openrouter, requesty, etc.),
+ * For most API-key providers (vivgrid, ollama-cloud, openrouter, etc.),
  * a 402 or 403 means the key has been disabled or the account was suspended.
  * These should be treated as permanent failures — the key will not recover
  * without manual intervention.
+ *
+ * Requesty is an exception: 403 is also used for model/provider policy rejections,
+ * so it must not permanently disable the account on status alone.
  *
  * OAuth accounts are excluded: 402/403 may be transient (plan changes,
  * temporary holds) and the token can be refreshed.
@@ -97,28 +101,58 @@ function shouldPermanentlyDisableCredential(credential: ProviderCredential, stat
   if (credential.authType !== "api_key") {
     return false;
   }
-  return status === 402 || status === 403;
+
+  if (status === 402) {
+    return true;
+  }
+
+  if (status === 403) {
+    return credential.providerId !== "requesty";
+  }
+
+  return false;
 }
 
 function reorderCandidatesForAffinity<T extends { readonly providerId: string; readonly account: ProviderCredential }>(
   candidates: readonly T[],
   preferred: PreferredAffinity | undefined,
 ): T[] {
-  if (!preferred) {
+  return reorderCandidatesForAffinities(candidates, preferred ? [preferred] : []);
+}
+
+export function reorderCandidatesForAffinities<T extends { readonly providerId: string; readonly account: ProviderCredential }>(
+  candidates: readonly T[],
+  preferred: readonly { readonly providerId: string; readonly accountId: string }[],
+): T[] {
+  if (preferred.length === 0) {
     return [...candidates];
   }
 
-  const preferredCandidates = candidates.filter(
-    (candidate) => candidate.providerId === preferred.providerId && candidate.account.accountId === preferred.accountId,
-  );
-  if (preferredCandidates.length === 0) {
+  const used = new Set<string>();
+  const ordered: T[] = [];
+
+  for (const preference of preferred) {
+    for (const candidate of candidates) {
+      if (candidate.providerId !== preference.providerId || candidate.account.accountId !== preference.accountId) {
+        continue;
+      }
+
+      const key = `${candidate.providerId}\0${candidate.account.accountId}`;
+      if (used.has(key)) {
+        continue;
+      }
+
+      used.add(key);
+      ordered.push(candidate);
+    }
+  }
+
+  if (ordered.length === 0) {
     return [...candidates];
   }
 
-  const remaining = candidates.filter(
-    (candidate) => candidate.providerId !== preferred.providerId || candidate.account.accountId !== preferred.accountId,
-  );
-  return [...preferredCandidates, ...remaining];
+  const remaining = candidates.filter((candidate) => !used.has(`${candidate.providerId}\0${candidate.account.accountId}`));
+  return [...ordered, ...remaining];
 }
 
 type UpstreamMode =
@@ -321,13 +355,14 @@ function providerAccountsForRequestWithPolicy(
     localOllama: boolean;
     explicitOllama: boolean;
   },
+  healthStore?: AccountHealthStore,
 ): ProviderCredential[] {
-  return orderAccountsByPolicy(policy, providerId, accounts, routedModel, context);
+  return orderAccountsByPolicy(policy, providerId, accounts, routedModel, context, healthStore);
 }
 
 function providerUsesOpenAiChatCompletions(providerId: string): boolean {
   const normalized = providerId.trim().toLowerCase();
-  return normalized === "ob1" || normalized === "openrouter" || normalized === "requesty";
+  return normalized === "ob1" || normalized === "openrouter" || normalized === "requesty" || normalized === "zen";
 }
 
 function planCostTier(planType: string | undefined): number {
@@ -451,6 +486,34 @@ type MutableFactory4xxDiagnostics = {
   -readonly [K in keyof Factory4xxDiagnostics]: Factory4xxDiagnostics[K];
 };
 
+function buildRequestShapeFingerprint(diagnostics: {
+  readonly requestFormat: string;
+  readonly hasInstructions?: boolean;
+  readonly hasReasoning?: boolean;
+  readonly systemMessageCount?: number;
+  readonly userMessageCount?: number;
+  readonly assistantMessageCount?: number;
+  readonly toolMessageCount?: number;
+  readonly functionCallCount?: number;
+  readonly functionCallOutputCount?: number;
+  readonly imageInputCount?: number;
+}): string | undefined {
+  const shapeSummary = {
+    requestFormat: diagnostics.requestFormat,
+    hasInstructions: diagnostics.hasInstructions === true,
+    hasReasoning: diagnostics.hasReasoning === true,
+    hasSystemMessages: (diagnostics.systemMessageCount ?? 0) > 0,
+    hasUserMessages: (diagnostics.userMessageCount ?? 0) > 0,
+    hasAssistantMessages: (diagnostics.assistantMessageCount ?? 0) > 0,
+    hasToolMessages: (diagnostics.toolMessageCount ?? 0) > 0,
+    hasFunctionCalls: (diagnostics.functionCallCount ?? 0) > 0,
+    hasFunctionCallOutputs: (diagnostics.functionCallOutputCount ?? 0) > 0,
+    hasImageInputs: (diagnostics.imageInputCount ?? 0) > 0,
+  };
+
+  return shortHash(JSON.stringify(shapeSummary));
+}
+
 function normalizeDiagnosticText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -462,6 +525,11 @@ function shortHash(value: string): string | undefined {
   }
 
   return `sha256:${createHash("sha256").update(normalized).digest("hex").slice(0, 12)}`;
+}
+
+function promptCacheKeyHashFromRequestBody(requestBody: Record<string, unknown>): string | undefined {
+  const rawPromptCacheKey = asString(requestBody["prompt_cache_key"]) ?? asString(requestBody["promptCacheKey"]);
+  return rawPromptCacheKey ? shortHash(rawPromptCacheKey) : undefined;
 }
 
 function createFactoryDiagnosticAccumulator(): FactoryDiagnosticAccumulator {
@@ -549,7 +617,7 @@ function finalizeDiagnosticFingerprint(accumulator: FactoryDiagnosticAccumulator
   return `sha256:${accumulator.textHash.digest("hex").slice(0, 12)}`;
 }
 
-function buildFactory4xxDiagnostics(
+export function buildFactory4xxDiagnostics(
   upstreamPayload: Record<string, unknown>,
   promptCacheKey?: string,
 ): Factory4xxDiagnostics {
@@ -557,6 +625,7 @@ function buildFactory4xxDiagnostics(
   const diagnostics: MutableFactory4xxDiagnostics = {
     requestFormat: "unknown",
     promptCacheKeyHash: promptCacheKey ? shortHash(promptCacheKey) : undefined,
+    shapeFingerprint: undefined,
     messageCount: 0,
     inputItemCount: 0,
     systemMessageCount: 0,
@@ -688,6 +757,7 @@ function buildFactory4xxDiagnostics(
   diagnostics.hasOpencodeMarkers = accumulator.hasOpencodeMarkers;
   diagnostics.hasAgentProtocolMarkers = accumulator.hasAgentProtocolMarkers;
   diagnostics.textFingerprint = finalizeDiagnosticFingerprint(accumulator);
+  diagnostics.shapeFingerprint = buildRequestShapeFingerprint(diagnostics);
 
   return diagnostics;
 }
@@ -933,6 +1003,7 @@ function recordAttempt(
     readonly promptCacheKeyUsed?: boolean;
     readonly imageCount?: number;
     readonly imageCostUsd?: number;
+    readonly factoryDiagnostics?: Factory4xxDiagnostics;
     readonly error?: string;
   },
   mode: UpstreamMode
@@ -965,8 +1036,10 @@ function recordAttempt(
     totalTokens: values.totalTokens,
     imageCount: values.imageCount,
     imageCostUsd: values.imageCostUsd,
+    promptCacheKeyHash: promptCacheKeyHashFromRequestBody(context.requestBody),
     promptCacheKeyUsed: values.promptCacheKeyUsed,
     ttftMs: values.latencyMs,
+    factoryDiagnostics: values.factoryDiagnostics,
     error: values.error,
     costUsd: cost.costUsd,
     energyJoules: cost.energyJoules,
@@ -980,6 +1053,11 @@ function cachedPromptTokensFromUsage(usage: Record<string, unknown>): number | u
   const direct = asNumber(usage["cached_tokens"]);
   if (direct !== undefined) {
     return direct;
+  }
+
+  const cacheReadInputTokens = asNumber(usage["cache_read_input_tokens"]);
+  if (cacheReadInputTokens !== undefined) {
+    return cacheReadInputTokens;
   }
 
   const promptDetails = isRecord(usage["prompt_tokens_details"]) ? usage["prompt_tokens_details"] : null;
@@ -1289,6 +1367,7 @@ function extractUsageFromOpenAiChatSse(streamText: string): UsageCounts {
 function extractUsageFromAnthropicSse(streamText: string): UsageCounts {
   let inputTokens: number | undefined;
   let outputTokens: number | undefined;
+  let cachedPromptTokens: number | undefined;
 
   const chunks = streamText.split("\n\n");
   for (const chunk of chunks) {
@@ -1305,6 +1384,7 @@ function extractUsageFromAnthropicSse(streamText: string): UsageCounts {
         const usage = message && isRecord(message["usage"]) ? message["usage"] : null;
         if (usage) {
           inputTokens = asNumber(usage["input_tokens"]) ?? inputTokens;
+          cachedPromptTokens = asNumber(usage["cache_read_input_tokens"]) ?? cachedPromptTokens;
         }
       }
 
@@ -1327,7 +1407,12 @@ function extractUsageFromAnthropicSse(streamText: string): UsageCounts {
   const completionTokens = outputTokens ?? 0;
   const totalTokens = (promptTokens ?? 0) + completionTokens;
 
-  return { promptTokens, completionTokens, totalTokens };
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    ...(cachedPromptTokens !== undefined ? { cachedPromptTokens } : {}),
+  };
 }
 
 function extractUsageFromResponsesSse(streamText: string, routedModel: string): UsageCounts {
@@ -1401,29 +1486,105 @@ function responseLooksLikeEventStream(response: Response, mode: UpstreamMode): b
   return false;
 }
 
+function streamBufferLooksSubstantive(buffer: string): boolean {
+  return /(^|\n)data:\s*(?!\[DONE\])\S/imu.test(buffer);
+}
+
+async function readClonedResponseWithTiming(
+  response: Response,
+  mode: UpstreamMode,
+): Promise<{
+  readonly bodyText: string;
+  readonly completedAt: number;
+  readonly firstByteAt: number | null;
+  readonly firstContentAt: number | null;
+}> {
+  const clone = response.clone();
+  if (!clone.body) {
+    return {
+      bodyText: await clone.text(),
+      completedAt: Date.now(),
+      firstByteAt: null,
+      firstContentAt: null,
+    };
+  }
+
+  const eventStream = responseLooksLikeEventStream(response, mode);
+  const reader = clone.body.getReader();
+  const decoder = new TextDecoder();
+  let bodyText = "";
+  let firstByteAt: number | null = null;
+  let firstContentAt: number | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      bodyText += decoder.decode();
+      return {
+        bodyText,
+        completedAt: Date.now(),
+        firstByteAt,
+        firstContentAt,
+      };
+    }
+
+    if (!value || value.byteLength === 0) {
+      continue;
+    }
+
+    const now = Date.now();
+    if (firstByteAt === null) {
+      firstByteAt = now;
+    }
+
+    bodyText += decoder.decode(value, { stream: true });
+
+    if (firstContentAt === null) {
+      if (eventStream) {
+        if (streamBufferLooksSubstantive(bodyText)) {
+          firstContentAt = now;
+        }
+      } else if (bodyText.trim().length > 0) {
+        firstContentAt = now;
+      }
+    }
+  }
+}
+
 async function extractUsageCounts(
   response: Response,
   mode: UpstreamMode,
   routedModel: string,
-): Promise<UsageCounts> {
+): Promise<{
+  readonly usageCounts: UsageCounts;
+  readonly completedAt: number;
+  readonly firstByteAt: number | null;
+  readonly firstContentAt: number | null;
+}> {
   if (!response.ok) {
-    return {};
-  }
-
-  if (responseLooksLikeEventStream(response, mode)) {
-    try {
-      const streamText = await response.clone().text();
-      return extractUsageCountsFromSseText(streamText, mode, routedModel);
-    } catch {
-      return {};
-    }
+    return { usageCounts: {}, completedAt: Date.now(), firstByteAt: null, firstContentAt: null };
   }
 
   try {
-    const upstreamJson: unknown = await response.clone().json();
-    return usageCountsForMode(mode, upstreamJson, routedModel);
+    const readResult = await readClonedResponseWithTiming(response, mode);
+    if (responseLooksLikeEventStream(response, mode)) {
+      return {
+        usageCounts: extractUsageCountsFromSseText(readResult.bodyText, mode, routedModel),
+        completedAt: readResult.completedAt,
+        firstByteAt: readResult.firstByteAt,
+        firstContentAt: readResult.firstContentAt,
+      };
+    }
+
+    const upstreamJson: unknown = JSON.parse(readResult.bodyText);
+    return {
+      usageCounts: usageCountsForMode(mode, upstreamJson, routedModel),
+      completedAt: readResult.completedAt,
+      firstByteAt: readResult.firstByteAt,
+      firstContentAt: readResult.firstContentAt,
+    };
   } catch {
-    return {};
+    return { usageCounts: {}, completedAt: Date.now(), firstByteAt: null, firstContentAt: null };
   }
 }
 
@@ -1435,10 +1596,12 @@ async function updateUsageCountsFromResponse(
   routedModel: string,
   providerId: string,
   config: ProxyConfig,
+  attemptStartedAt: number,
 ): Promise<void> {
-  const readStartedAt = Date.now();
-  const usageCounts = await extractUsageCounts(response, mode, routedModel);
-  const readDurationMs = Math.max(0, Date.now() - readStartedAt);
+  const extraction = await extractUsageCounts(response, mode, routedModel);
+  const { usageCounts } = extraction;
+  const completedAt = extraction.completedAt;
+  const firstContentAt = extraction.firstContentAt ?? extraction.firstByteAt;
 
   const imageCount = typeof usageCounts.imageCount === "number" && Number.isFinite(usageCounts.imageCount)
     ? usageCounts.imageCount
@@ -1458,12 +1621,22 @@ async function updateUsageCountsFromResponse(
   }
 
   const isStream = responseLooksLikeEventStream(response, mode);
+  const decodeDurationMs = firstContentAt !== null ? Math.max(0, completedAt - firstContentAt) : 0;
+  const endToEndDurationMs = Math.max(0, completedAt - attemptStartedAt);
+  const ttftMs = firstContentAt !== null ? Math.max(0, firstContentAt - attemptStartedAt) : undefined;
   const tps = isStream
     && typeof usageCounts.completionTokens === "number"
     && Number.isFinite(usageCounts.completionTokens)
     && usageCounts.completionTokens > 0
-    && readDurationMs > 0
-      ? usageCounts.completionTokens / (readDurationMs / 1000)
+    && decodeDurationMs > 0
+      ? usageCounts.completionTokens / (decodeDurationMs / 1000)
+      : undefined;
+  const endToEndTps = isStream
+    && typeof usageCounts.completionTokens === "number"
+    && Number.isFinite(usageCounts.completionTokens)
+    && usageCounts.completionTokens > 0
+    && endToEndDurationMs > 0
+      ? usageCounts.completionTokens / (endToEndDurationMs / 1000)
       : undefined;
 
   const updatedCost = estimateRequestCost(
@@ -1478,7 +1651,9 @@ async function updateUsageCountsFromResponse(
     imageCount,
     imageCostUsd,
     cacheHit: typeof usageCounts.cachedPromptTokens === "number" && usageCounts.cachedPromptTokens > 0,
+    ttftMs,
     tps,
+    endToEndTps,
     costUsd: updatedCost.costUsd,
     energyJoules: updatedCost.energyJoules,
     waterEvaporatedMl: updatedCost.waterEvaporatedMl,
