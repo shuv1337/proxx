@@ -26,7 +26,6 @@ import { resolveFederationOwnerSubject } from "../lib/federation/federation-help
 import {
   buildProviderRoutesWithDynamicBaseUrls,
   filterResponsesApiRoutes,
-  resolveProviderRoutesForModel,
   minMsUntilAnyProviderKeyReady,
   type ProviderRoute,
 } from "../lib/provider-routing.js";
