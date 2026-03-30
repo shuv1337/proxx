@@ -76,7 +76,7 @@ import {
   buildProviderRoutesWithDynamicBaseUrls,
   createDynamicProviderBaseUrlGetter,
 } from "./lib/provider-routing.js";
-import { discoverDynamicOllamaRoutes } from "./lib/dynamic-ollama-routes.js";
+import { discoverDynamicOllamaRoutes, prependDynamicOllamaRoutes } from "./lib/dynamic-ollama-routes.js";
 import {
   buildResponsesPassthroughContext,
   buildImagesPassthroughContext,
@@ -680,9 +680,21 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   );
   quotaMonitor.start();
 
-  const ollamaCatalogRoutes = buildOllamaCatalogRoutes(config);
-  const providerCatalogRoutes = (await buildProviderRoutesWithDynamicBaseUrls(config, false, dynamicProviderBaseUrlGetter, true))
-    .filter((route) => route.providerId !== "factory" || !config.disabledProviderIds.includes("factory"));
+  const bootstrapOwnerSubject = process.env.FEDERATION_DEFAULT_OWNER_SUBJECT?.trim() || undefined;
+  const federatedDynamicOllamaRoutes = await discoverDynamicOllamaRoutes(
+    sqlCredentialStore,
+    sqlFederationStore,
+    bootstrapOwnerSubject,
+  );
+  const ollamaCatalogRoutes = prependDynamicOllamaRoutes(
+    buildOllamaCatalogRoutes(config),
+    federatedDynamicOllamaRoutes,
+  );
+  const providerCatalogRoutes = prependDynamicOllamaRoutes(
+    (await buildProviderRoutesWithDynamicBaseUrls(config, false, dynamicProviderBaseUrlGetter, true))
+      .filter((route) => route.providerId !== "factory" || !config.disabledProviderIds.includes("factory")),
+    federatedDynamicOllamaRoutes,
+  );
   const providerCatalogStore = new ProviderCatalogStore(
     config,
     keyPool,
@@ -1017,7 +1029,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     config,
     keyPool,
     requestLogStore,
-    credentialStore,
+    credentialStore: runtimeCredentialStore,
     sqlCredentialStore,
     sqlFederationStore,
     sqlTenantProviderPolicyStore,
@@ -1031,7 +1043,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     config,
     keyPool,
     requestLogStore,
-    credentialStore,
+    credentialStore: runtimeCredentialStore,
     sqlCredentialStore,
     sqlFederationStore,
     sqlTenantProviderPolicyStore,
@@ -1073,6 +1085,17 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         reply,
         404,
         `Unsupported endpoint: ${request.method} ${path}. Supported endpoints: ${SUPPORTED_V1_ENDPOINTS.join(", ")}`,
+        "invalid_request_error",
+        "unsupported_endpoint"
+      );
+      return;
+    }
+
+    if (path.startsWith("/api/v1/")) {
+      sendOpenAiError(
+        reply,
+        404,
+        `Unsupported endpoint: ${request.method} ${path}. Supported API v1 endpoints begin with /api/v1 and are routed through the canonical control surface.`,
         "invalid_request_error",
         "unsupported_endpoint"
       );

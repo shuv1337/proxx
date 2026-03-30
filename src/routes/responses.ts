@@ -21,6 +21,7 @@ import {
   executeProviderFallback,
   inspectProviderAvailability,
 } from "../lib/provider-strategy.js";
+import { resolveFederationOwnerSubject } from "../lib/federation/federation-helpers.js";
 import {
   buildProviderRoutesWithDynamicBaseUrls,
   filterResponsesApiRoutes,
@@ -28,6 +29,7 @@ import {
   minMsUntilAnyProviderKeyReady,
   type ProviderRoute,
 } from "../lib/provider-routing.js";
+import { discoverDynamicOllamaRoutes, prependDynamicOllamaRoutes } from "../lib/dynamic-ollama-routes.js";
 import { orderProviderRoutesByPolicy } from "../lib/provider-policy.js";
 import { sendOpenAiError, toErrorMessage } from "../lib/provider-utils.js";
 import { isAutoModel, rankAutoModels } from "../lib/auto-model-selector.js";
@@ -131,6 +133,12 @@ export function registerResponsesRoutes(deps: AppDeps, app: FastifyInstance): vo
         (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly tenantId?: string; readonly keyId?: string; readonly subject?: string } }).openHaxAuth,
       );
       reply.header("x-open-hax-upstream-mode", strategy.mode);
+      const requestAuth = (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly tenantId?: string; readonly keyId?: string; readonly subject?: string } }).openHaxAuth;
+      const federationOwnerSubject = resolveFederationOwnerSubject({
+        headers: request.headers as Record<string, unknown>,
+        requestAuth,
+        hopCount: 0,
+      });
 
       let providerRoutes: ProviderRoute[];
       if (context.factoryPrefixed) {
@@ -140,6 +148,15 @@ export function registerResponsesRoutes(deps: AppDeps, app: FastifyInstance): vo
           : [{ providerId: "factory", baseUrl: factoryBaseUrl }];
       } else {
         providerRoutes = await buildProviderRoutesWithDynamicBaseUrls(deps.config, context.openAiPrefixed, deps.dynamicProviderBaseUrlGetter, true);
+      }
+
+      const dynamicOllamaRoutes = await discoverDynamicOllamaRoutes(
+        deps.sqlCredentialStore,
+        deps.sqlFederationStore,
+        federationOwnerSubject,
+      );
+      if (dynamicOllamaRoutes.length > 0) {
+        providerRoutes = prependDynamicOllamaRoutes(providerRoutes, dynamicOllamaRoutes);
       }
 
       providerRoutes = filterProviderRoutesByModelSupport(deps.config, providerRoutes, context.routedModel);
