@@ -46,11 +46,22 @@ EOF
 
 fetch_remote_file_if_exists() {
   local remote="$1" remote_path="$2" local_path="$3"
-  if ssh "${SSH_OPTS[@]}" "$remote" test -f "$remote_path"; then
+  local status=0
+
+  ssh "${SSH_OPTS[@]}" "$remote" test -f "$remote_path"
+  status=$?
+
+  if [[ "$status" -eq 0 ]]; then
     fetch_remote_file "$remote" "$remote_path" "$local_path"
     return 0
   fi
-  return 1
+
+  if [[ "$status" -eq 1 ]]; then
+    return 1
+  fi
+
+  printf 'Failed to check remote file %s on %s (exit %s)\n' "$remote_path" "$remote" "$status" >&2
+  return "$status"
 }
 
 render_caddyfile() {
@@ -87,19 +98,20 @@ build_runtime_payloads() {
     : "${DEPLOY_SOURCE_HOST:?DEPLOY_SOURCE_HOST is required when DEPLOY_SYNC_RUNTIME_FROM_SOURCE=true}"
     : "${DEPLOY_SOURCE_PATH:?DEPLOY_SOURCE_PATH is required when DEPLOY_SYNC_RUNTIME_FROM_SOURCE=true}"
     fetch_remote_file "$SOURCE_REMOTE" "$DEPLOY_SOURCE_PATH/.env" "$TMP_DIR/.env"
-    fetch_remote_file "$SOURCE_REMOTE" "$DEPLOY_SOURCE_PATH/keys.json" "$TMP_DIR/keys.json"
     fetch_remote_file "$SOURCE_REMOTE" "$DEPLOY_SOURCE_PATH/models.json" "$TMP_DIR/models.json"
   fi
 
   if [[ -n "$DEPLOY_ENV_APPEND" && ! -f "$TMP_DIR/.env" ]]; then
-    fetch_remote_file_if_exists "$REMOTE" "$DEPLOY_PATH/.env" "$TMP_DIR/.env" || true
+    local env_fetch_status=0
+    fetch_remote_file_if_exists "$REMOTE" "$DEPLOY_PATH/.env" "$TMP_DIR/.env" || env_fetch_status=$?
+    if [[ "$env_fetch_status" -gt 1 ]]; then
+      printf 'Aborting deploy: unable to fetch existing remote .env from %s\n' "$REMOTE" >&2
+      return "$env_fetch_status"
+    fi
   fi
 
   if [[ -n "${DEPLOY_ENV_FILE:-}" ]]; then
     printf '%s' "$DEPLOY_ENV_FILE" > "$TMP_DIR/.env"
-  fi
-  if [[ -n "${DEPLOY_KEYS_JSON:-}" ]]; then
-    printf '%s' "$DEPLOY_KEYS_JSON" > "$TMP_DIR/keys.json"
   fi
   if [[ -n "${DEPLOY_MODELS_JSON:-}" ]]; then
     printf '%s' "$DEPLOY_MODELS_JSON" > "$TMP_DIR/models.json"
@@ -121,11 +133,11 @@ sync_repo_tree() {
   ssh "${SSH_OPTS[@]}" "$REMOTE" "mkdir -p '$DEPLOY_PATH' '$DEPLOY_PATH/data' '$DEPLOY_PATH/db-backups' '$DEPLOY_PATH/deploy'"
 
   rsync -az --delete \
+    --checksum \
     --exclude '/.git/' \
     --exclude '/node_modules/' \
     --exclude '/dist/' \
     --exclude '/.env' \
-    --exclude '/keys.json' \
     --exclude '/models.json' \
     --exclude '/data/' \
     --exclude '/db-backups/' \
@@ -133,9 +145,6 @@ sync_repo_tree() {
 
   if [[ -f "$TMP_DIR/.env" ]]; then
     rsync -az "$TMP_DIR/.env" "$REMOTE:$DEPLOY_PATH/.env"
-  fi
-  if [[ -f "$TMP_DIR/keys.json" ]]; then
-    rsync -az "$TMP_DIR/keys.json" "$REMOTE:$DEPLOY_PATH/keys.json"
   fi
   if [[ -f "$TMP_DIR/models.json" ]]; then
     rsync -az "$TMP_DIR/models.json" "$REMOTE:$DEPLOY_PATH/models.json"
@@ -164,6 +173,9 @@ fi
 cd "$DEPLOY_PATH"
 docker network create ai-infra >/dev/null 2>&1 || true
 compose_args=()
+if [[ -f .env ]]; then
+  compose_args+=(--env-file .env)
+fi
 if [[ -n "$DEPLOY_COMPOSE_PROJECT_NAME" ]]; then
   compose_args+=(--project-name "$DEPLOY_COMPOSE_PROJECT_NAME")
 fi
@@ -199,6 +211,9 @@ if [[ "$DEPLOY_SOURCE_COMPOSE_FILES" == "__EMPTY_COMPOSE_FILES__" ]]; then
 fi
 cd "$SOURCE_PATH"
 compose_args=()
+if [[ -f .env ]]; then
+  compose_args+=(--env-file .env)
+fi
 if [[ -n "$DEPLOY_SOURCE_COMPOSE_PROJECT_NAME" ]]; then
   compose_args+=(--project-name "$DEPLOY_SOURCE_COMPOSE_PROJECT_NAME")
 fi
@@ -240,6 +255,9 @@ if [[ "$DEPLOY_COMPOSE_FILES" == "__EMPTY_COMPOSE_FILES__" ]]; then
 fi
 cd "$DEPLOY_PATH"
 compose_args=()
+if [[ -f .env ]]; then
+  compose_args+=(--env-file .env)
+fi
 if [[ -n "$DEPLOY_COMPOSE_PROJECT_NAME" ]]; then
   compose_args+=(--project-name "$DEPLOY_COMPOSE_PROJECT_NAME")
 fi
@@ -271,6 +289,9 @@ if [[ "$DEPLOY_COMPOSE_FILES" == "__EMPTY_COMPOSE_FILES__" ]]; then
 fi
 cd "$DEPLOY_PATH"
 compose_args=()
+if [[ -f .env ]]; then
+  compose_args+=(--env-file .env)
+fi
 if [[ -n "$DEPLOY_COMPOSE_PROJECT_NAME" ]]; then
   compose_args+=(--project-name "$DEPLOY_COMPOSE_PROJECT_NAME")
 fi
@@ -301,6 +322,9 @@ if [[ "$DEPLOY_COMPOSE_FILES" == "__EMPTY_COMPOSE_FILES__" ]]; then
 fi
 cd "$DEPLOY_PATH"
 compose_args=()
+if [[ -f .env ]]; then
+  compose_args+=(--env-file .env)
+fi
 if [[ -n "$DEPLOY_COMPOSE_PROJECT_NAME" ]]; then
   compose_args+=(--project-name "$DEPLOY_COMPOSE_PROJECT_NAME")
 fi
@@ -339,6 +363,9 @@ if [[ "$DEPLOY_COMPOSE_FILES" == "__EMPTY_COMPOSE_FILES__" ]]; then
 fi
 cd "$DEPLOY_PATH"
 compose_args=()
+if [[ -f .env ]]; then
+  compose_args+=(--env-file .env)
+fi
 if [[ -n "$DEPLOY_COMPOSE_PROJECT_NAME" ]]; then
   compose_args+=(--project-name "$DEPLOY_COMPOSE_PROJECT_NAME")
 fi

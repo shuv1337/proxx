@@ -6,6 +6,7 @@ import type { ProviderCredential } from "../key-pool.js";
 import type { PolicyEngine } from "../policy/index.js";
 import type { PromptAffinityStore } from "../prompt-affinity-store.js";
 import type { RequestLogStore } from "../request-log-store.js";
+import type { QuotaMonitor } from "../quota-monitor.js";
 import { buildUpstreamHeadersForCredential, extractRateLimitCooldownMs, isRateLimitResponse } from "../proxy.js";
 import {
   responsesEventStreamToErrorPayload,
@@ -22,13 +23,14 @@ import { selectRemoteProviderStrategyForRoute } from "./registry.js";
 import {
   PERMANENT_DISABLE_COOLDOWN_MS,
   buildCodexResponsesImagesBody,
+  buildFactory4xxDiagnostics,
   extractImagesFromCodexEventStream,
   extractImagesFromCodexResponse,
   joinUrl,
   providerAccountsForRequest,
   providerAccountsForRequestWithPolicy,
   reorderAccountsForLatency,
-  reorderCandidatesForAffinity,
+  reorderCandidatesForAffinities,
   responseLooksLikeEventStream,
   shouldCooldownCredentialOnAuthFailure,
   shouldPermanentlyDisableCredential,
@@ -48,6 +50,14 @@ import {
   type StrategyRequestContext,
 } from "./shared.js";
 
+function shouldUseOpenAiCodexHeaderProfile(
+  providerId: string,
+  account: ProviderCredential,
+  openaiProviderId: string,
+): boolean {
+  return providerId === openaiProviderId && account.authType === "oauth_bearer";
+}
+
 const REQUESTY_MODEL_PREFIXES: ReadonlyArray<readonly [string, string]> = [
   ["gpt-", "openai"],
   ["o1", "openai"],
@@ -61,6 +71,8 @@ const REQUESTY_MODEL_PREFIXES: ReadonlyArray<readonly [string, string]> = [
   ["kimi-", "moonshotai"],
   ["qwen", "qwen"],
 ];
+
+const MAX_STICKY_TRANSPORT_FAILURE_CANDIDATES = 4;
 
 function requestyModelPrefix(model: string): string {
   const lower = model.toLowerCase();
@@ -107,6 +119,7 @@ export async function executeProviderFallback(
   policy?: PolicyEngine,
   healthStore?: AccountHealthStore,
   eventStore?: EventStore,
+  quotaMonitor?: QuotaMonitor,
 ): Promise<ProviderFallbackExecutionResult> {
   const accumulator: FallbackAccumulator = {
     sawRateLimit: false,
@@ -134,7 +147,7 @@ export async function executeProviderFallback(
             openAiPrefixed: context.openAiPrefixed,
             localOllama: context.localOllama,
             explicitOllama: context.explicitOllama,
-          })
+          }, healthStore)
         : providerAccountsForRequest(rawAccounts, route.providerId, context.routedModel);
     } catch {
       continue;
@@ -157,10 +170,14 @@ export async function executeProviderFallback(
     }
   }
 
-  const preferredAffinity = promptCacheKey
-    ? await promptAffinityStore.get(promptCacheKey).then((record) => record
-      ? { providerId: record.providerId, accountId: record.accountId }
-      : undefined)
+  const affinityRecord = promptCacheKey
+    ? await promptAffinityStore.get(promptCacheKey)
+    : undefined;
+  const preferredAffinity = affinityRecord
+    ? { providerId: affinityRecord.providerId, accountId: affinityRecord.accountId }
+    : undefined;
+  const provisionalAffinity = affinityRecord?.provisionalProviderId && affinityRecord?.provisionalAccountId
+    ? { providerId: affinityRecord.provisionalProviderId, accountId: affinityRecord.provisionalAccountId }
     : undefined;
 
   const allCandidates = providerRoutes.flatMap((route) => candidatesByProvider[route.providerId] ?? []);
@@ -196,7 +213,10 @@ export async function executeProviderFallback(
     return 0;
   });
 
-  const candidates = reorderCandidatesForAffinity(sortedCandidates, preferredAffinity);
+  const candidates = reorderCandidatesForAffinities(
+    sortedCandidates,
+    [preferredAffinity, provisionalAffinity].filter((value): value is { readonly providerId: string; readonly accountId: string } => Boolean(value)),
+  );
 
   if (candidates.length === 0) {
     return {
@@ -209,6 +229,9 @@ export async function executeProviderFallback(
   let preferredReassignmentAllowed = preferredAffinity === undefined || candidates.every(
     (candidate) => candidate.providerId !== preferredAffinity.providerId || candidate.account.accountId !== preferredAffinity.accountId,
   );
+  const hasStickyAffinity = Boolean(promptCacheKey && (preferredAffinity || provisionalAffinity));
+  let stickyTransportFailureCandidates = 0;
+  let abortRemainingCandidatesForStickyTransportFailure = false;
 
   for (const [candidateIndex, candidate] of candidates.entries()) {
     const candidateStrategy = selectRemoteProviderStrategyForRoute(context, candidate.providerId);
@@ -308,7 +331,13 @@ export async function executeProviderFallback(
         };
 
         const upstreamUrl = joinUrl(providerContext.baseUrl, upstreamPath);
-        const upstreamHeaders = buildUpstreamHeadersForCredential(context.clientHeaders, candidate.account);
+        const upstreamHeaders = buildUpstreamHeadersForCredential(context.clientHeaders, candidate.account, {
+          useOpenAiCodexHeaderProfile: shouldUseOpenAiCodexHeaderProfile(
+            candidate.providerId,
+            candidate.account,
+            context.config.openaiProviderId,
+          ),
+        });
         candidateStrategy.applyRequestHeaders(upstreamHeaders, providerContext, candidatePayload.upstreamPayload);
         const attemptStartedAt = Date.now();
 
@@ -376,6 +405,7 @@ export async function executeProviderFallback(
             latencyMs,
             serviceTier: candidatePayload.serviceTier,
             serviceTierSource: candidatePayload.serviceTierSource,
+            factoryDiagnostics: buildFactory4xxDiagnostics(candidatePayload.upstreamPayload, promptCacheKey),
             error: toErrorMessage(error)
           }, candidateStrategy.mode);
 
@@ -384,6 +414,12 @@ export async function executeProviderFallback(
               error: toErrorMessage(error),
               logEntryId,
             }, { latencyMs });
+          }
+          if (hasStickyAffinity) {
+            stickyTransportFailureCandidates += 1;
+            if (stickyTransportFailureCandidates >= MAX_STICKY_TRANSPORT_FAILURE_CANDIDATES) {
+              abortRemainingCandidatesForStickyTransportFailure = true;
+            }
           }
           break;
         }
@@ -401,6 +437,7 @@ export async function executeProviderFallback(
           latencyMs,
           serviceTier: candidatePayload.serviceTier,
           serviceTierSource: candidatePayload.serviceTierSource,
+          factoryDiagnostics: buildFactory4xxDiagnostics(candidatePayload.upstreamPayload, promptCacheKey),
           promptCacheKeyUsed: Boolean(promptCacheKey),
         }, candidateStrategy.mode);
 
@@ -440,6 +477,7 @@ export async function executeProviderFallback(
           context.routedModel,
           candidate.providerId,
           context.config,
+          attemptStartedAt,
         );
         if (responseLooksLikeEventStream(upstreamResponse, candidateStrategy.mode) && context.clientWantsStream) {
           void usagePromise;
@@ -477,8 +515,16 @@ export async function executeProviderFallback(
 
         if (isRateLimitResponse(upstreamResponse)) {
           accumulator.sawRateLimit = true;
-          // Extract cooldown from both header and body
-          const cooldownMs = await extractRateLimitCooldownMs(upstreamResponse);
+          let cooldownMs: number | undefined;
+          if (quotaMonitor) {
+            cooldownMs = quotaMonitor.getCooldownMs(candidate.account.accountId);
+          }
+          if (!cooldownMs) {
+            cooldownMs = await extractRateLimitCooldownMs(upstreamResponse);
+          }
+          if (!cooldownMs) {
+            cooldownMs = context.config.keyCooldownMs;
+          }
           keyPool.markRateLimited(candidate.account, cooldownMs);
           if (
             preferredAffinity
@@ -495,11 +541,14 @@ export async function executeProviderFallback(
         if (await responseIndicatesQuotaError(upstreamResponse)) {
           accumulator.sawRateLimit = true;
           const permanentlyDisable = shouldPermanentlyDisableCredential(candidate.account, upstreamResponse.status);
-          const quotaCooldownMs = permanentlyDisable
+          const baseCooldownMs = permanentlyDisable
             ? PERMANENT_DISABLE_COOLDOWN_MS
             : upstreamResponse.status === 402
               ? 24 * 60 * 60 * 1000
               : Math.min(context.config.keyCooldownMs, 60_000);
+          const quotaCooldownMs = healthStore
+            ? healthStore.getGrowingCooldown(candidate.account.providerId, candidate.account.accountId, baseCooldownMs)
+            : baseCooldownMs;
           keyPool.markRateLimited(candidate.account, quotaCooldownMs);
           if (healthStore) {
             healthStore.recordFailure(candidate.account, upstreamResponse.status, "quota_exhausted");
@@ -624,7 +673,7 @@ export async function executeProviderFallback(
               || (candidate.providerId === preferredAffinity.providerId && candidate.account.accountId === preferredAffinity.accountId)
             )
           ) {
-            await promptAffinityStore.upsert(promptCacheKey, candidate.providerId, candidate.account.accountId);
+            await promptAffinityStore.noteSuccess(promptCacheKey, candidate.providerId, candidate.account.accountId);
           }
           releaseInFlight();
           return {
@@ -659,7 +708,13 @@ export async function executeProviderFallback(
           const refreshedCredential = await refreshExpiredToken(candidate.account);
           if (refreshedCredential) {
             const refreshedProviderContext: ProviderAttemptContext = { ...providerContext, account: refreshedCredential };
-            const refreshedHeaders = buildUpstreamHeadersForCredential(context.clientHeaders, refreshedCredential);
+            const refreshedHeaders = buildUpstreamHeadersForCredential(context.clientHeaders, refreshedCredential, {
+              useOpenAiCodexHeaderProfile: shouldUseOpenAiCodexHeaderProfile(
+                candidate.providerId,
+                refreshedCredential,
+                context.config.openaiProviderId,
+              ),
+            });
             candidateStrategy.applyRequestHeaders(refreshedHeaders, refreshedProviderContext, candidatePayload.upstreamPayload);
             const refreshedRelease = keyPool.markInFlight(refreshedCredential);
             const refreshedAttemptStartedAt = Date.now();
@@ -687,6 +742,7 @@ export async function executeProviderFallback(
                 latencyMs: refreshedLatencyMs,
                 serviceTier: candidatePayload.serviceTier,
                 serviceTierSource: candidatePayload.serviceTierSource,
+                factoryDiagnostics: buildFactory4xxDiagnostics(candidatePayload.upstreamPayload, promptCacheKey),
                 promptCacheKeyUsed: Boolean(promptCacheKey),
               }, candidateStrategy.mode);
               const refreshedDiagnosticsPromise = updateFailedAttemptDiagnostics(
@@ -705,6 +761,7 @@ export async function executeProviderFallback(
                 context.routedModel,
                 candidate.providerId,
                 context.config,
+                refreshedAttemptStartedAt,
               );
               if (responseLooksLikeEventStream(refreshedResponse, candidateStrategy.mode) && context.clientWantsStream) {
                 void usagePromise;
@@ -781,7 +838,7 @@ export async function executeProviderFallback(
                     || (candidate.providerId === preferredAffinity.providerId && refreshedCredential.accountId === preferredAffinity.accountId)
                   )
                 ) {
-                  await promptAffinityStore.upsert(promptCacheKey, candidate.providerId, refreshedCredential.accountId);
+                  await promptAffinityStore.noteSuccess(promptCacheKey, candidate.providerId, refreshedCredential.accountId);
                 }
 
                 releaseInFlight();
@@ -853,6 +910,10 @@ export async function executeProviderFallback(
     }
 
     releaseInFlight();
+
+    if (abortRemainingCandidatesForStickyTransportFailure) {
+      break;
+    }
   }
 
   return {

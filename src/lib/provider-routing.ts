@@ -10,6 +10,7 @@ export interface ResolvedModelCatalog {
   readonly modelIds: readonly string[];
   readonly aliasTargets: Readonly<Record<string, string>>;
   readonly dynamicOllamaModelIds: readonly string[];
+  readonly declaredModelIds: readonly string[];
 }
 
 export interface RequestRoutingState {
@@ -26,6 +27,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function looksLikeHostedOpenAiFamily(model: string): boolean {
+  const lowered = model.toLowerCase();
+  return lowered.startsWith("gpt-")
+    || lowered.startsWith("openai/")
+    || lowered.startsWith("openai:")
+    || lowered.startsWith("chatgpt-")
+    || lowered === "o1"
+    || lowered === "o3"
+    || lowered === "o4"
+    || lowered.startsWith("o1-")
+    || lowered.startsWith("o3-")
+    || lowered.startsWith("o4-");
 }
 
 export function stripModelPrefix(model: string, prefixes: readonly string[]): string {
@@ -53,6 +68,10 @@ export function hasModelPrefix(model: string, prefixes: readonly string[]): bool
 }
 
 export function shouldUseLocalOllama(model: string, patterns: readonly string[]): boolean {
+  if (looksLikeHostedOpenAiFamily(model)) {
+    return false;
+  }
+
   const lowered = model.toLowerCase();
   for (const pattern of patterns) {
     const normalizedPattern = pattern.toLowerCase();
@@ -224,7 +243,26 @@ export function buildLargestModelAliases(modelIds: readonly string[]): Record<st
   return aliasTargets;
 }
 
-function routeForProvider(config: ProxyConfig, providerId: string): ProviderRoute | null {
+export type DynamicProviderBaseUrlGetter = (providerId: string) => Promise<string | null | undefined>;
+
+export function createDynamicProviderBaseUrlGetter(
+  sqlCredentialStore: { getProviderById: (providerId: string) => Promise<{ baseUrl: string | null } | null> } | undefined
+): DynamicProviderBaseUrlGetter | undefined {
+  if (!sqlCredentialStore) {
+    return undefined;
+  }
+
+  return async (providerId: string) => {
+    const provider = await sqlCredentialStore.getProviderById(providerId);
+    return provider?.baseUrl ?? null;
+  };
+}
+
+async function routeForProvider(
+  config: ProxyConfig,
+  providerId: string,
+  getDynamicBaseUrl?: DynamicProviderBaseUrlGetter
+): Promise<ProviderRoute | null> {
   const normalizedProviderId = providerId.trim();
   if (normalizedProviderId.length === 0) {
     return null;
@@ -234,11 +272,19 @@ function routeForProvider(config: ProxyConfig, providerId: string): ProviderRout
     return null;
   }
 
-  const baseUrl = (normalizedProviderId === config.openaiProviderId
+  let baseUrl = (normalizedProviderId === config.openaiProviderId
     ? config.openaiBaseUrl
     : config.upstreamProviderBaseUrls[normalizedProviderId] ?? "")
     .trim()
     .replace(/\/+$/, "");
+
+  if (baseUrl.length === 0 && getDynamicBaseUrl) {
+    const dynamicBaseUrl = await getDynamicBaseUrl(normalizedProviderId);
+    if (dynamicBaseUrl && typeof dynamicBaseUrl === "string") {
+      baseUrl = dynamicBaseUrl.trim().replace(/\/+$/, "");
+    }
+  }
+
   if (baseUrl.length === 0) {
     return null;
   }
@@ -249,11 +295,11 @@ function routeForProvider(config: ProxyConfig, providerId: string): ProviderRout
   };
 }
 
-export function buildProviderRoutes(
+export async function buildProviderRoutes(
   config: ProxyConfig,
   useOpenAiUpstream: boolean,
   includeOpenAiFallback: boolean = false
-): ProviderRoute[] {
+): Promise<ProviderRoute[]> {
   if (useOpenAiUpstream) {
     const routes: ProviderRoute[] = [];
     const seen = new Set<string>();
@@ -264,7 +310,7 @@ export function buildProviderRoutes(
       }
       seen.add(providerId);
 
-      const route = routeForProvider(config, providerId);
+      const route = await routeForProvider(config, providerId);
       if (!route) {
         continue;
       }
@@ -287,7 +333,57 @@ export function buildProviderRoutes(
     }
     seen.add(providerId);
 
-    const route = routeForProvider(config, providerId);
+    const route = await routeForProvider(config, providerId);
+    if (!route) {
+      continue;
+    }
+
+    routes.push(route);
+  }
+
+  return routes;
+}
+
+export async function buildProviderRoutesWithDynamicBaseUrls(
+  config: ProxyConfig,
+  useOpenAiUpstream: boolean,
+  getDynamicBaseUrl: DynamicProviderBaseUrlGetter | undefined,
+  includeOpenAiFallback: boolean = false
+): Promise<ProviderRoute[]> {
+  if (useOpenAiUpstream) {
+    const routes: ProviderRoute[] = [];
+    const seen = new Set<string>();
+
+    for (const providerId of [config.openaiProviderId, config.upstreamProviderId, "factory", ...config.upstreamFallbackProviderIds]) {
+      if (seen.has(providerId)) {
+        continue;
+      }
+      seen.add(providerId);
+
+      const route = await routeForProvider(config, providerId, getDynamicBaseUrl);
+      if (!route) {
+        continue;
+      }
+
+      routes.push(route);
+    }
+
+    return routes;
+  }
+
+  const routes: ProviderRoute[] = [];
+  const seen = new Set<string>();
+  const providerIds = includeOpenAiFallback
+    ? [config.upstreamProviderId, config.openaiProviderId, "factory", ...config.upstreamFallbackProviderIds]
+    : [config.upstreamProviderId, "factory", ...config.upstreamFallbackProviderIds];
+
+  for (const providerId of providerIds) {
+    if (seen.has(providerId)) {
+      continue;
+    }
+    seen.add(providerId);
+
+    const route = await routeForProvider(config, providerId, getDynamicBaseUrl);
     if (!route) {
       continue;
     }
@@ -364,7 +460,7 @@ export function resolveProviderRoutesForModel(
   return [...ollamaRoutes, ...nonOllamaRoutes];
 }
 
-const OPENAI_COMPATIBLE_API_PROVIDERS = new Set(["vivgrid", "openai", "factory", "requesty"]);
+const OPENAI_COMPATIBLE_API_PROVIDERS = new Set(["vivgrid", "openai", "factory", "requesty", "zen"]);
 
 function providerSupportsOpenAiCompatibleApi(providerId: string, openAiProviderId?: string): boolean {
   const normalized = providerId.trim().toLowerCase();
