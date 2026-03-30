@@ -6,6 +6,7 @@ import {
   resolvableConcreteModelIds,
   filterProviderRoutesByCatalogAvailability,
   filterProviderRoutesByModelSupport,
+  filterProviderRoutesByCatalogAvailability,
   shouldRejectModelFromProviderCatalog,
 } from "../lib/model-routing-helpers.js";
 import {
@@ -33,7 +34,6 @@ import { isCephalonAutoModel, buildCephalonModelCandidates, reorderCephalonProvi
 import { resolveFederationOwnerSubject } from "../lib/federation/federation-helpers.js";
 import { requestHasExplicitNumCtx } from "../lib/ollama-compat.js";
 import { ensureOllamaContextFits } from "../lib/ollama-context.js";
-import { executeFederatedRequestFallback } from "../lib/federation/federated-fallback.js";
 import { executeBridgeRequestFallback } from "../lib/federation/bridge-fallback.js";
 import type { AppDeps } from "../lib/app-deps.js";
 import { discoverDynamicOllamaRoutes, filterDedicatedOllamaRoutes, hasDedicatedOllamaRoutes, prependDynamicOllamaRoutes } from "../lib/dynamic-ollama-routes.js";
@@ -278,7 +278,7 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
         }
       }
 
-      if (strategy.isLocal && providerRoutes.length === 0) {
+      if (strategy.isLocal) {
         if (!tenantProviderAllowed(proxySettings, "ollama")) {
           if (hasMoreModelCandidates) {
             continue;
