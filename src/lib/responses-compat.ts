@@ -623,11 +623,20 @@ function responsesInputToChatMessages(input: unknown, instructions: unknown): un
       return;
     }
 
-    messages.push({
-      role: "assistant",
-      content: "",
-      tool_calls: pendingToolCalls
-    });
+    const lastMessage = messages.length > 0 && isRecord(messages[messages.length - 1])
+      ? messages[messages.length - 1] as Record<string, unknown>
+      : null;
+
+    if (lastMessage && asString(lastMessage["role"]) === "assistant" && !Array.isArray(lastMessage["tool_calls"])) {
+      lastMessage["tool_calls"] = pendingToolCalls;
+    } else {
+      messages.push({
+        role: "assistant",
+        content: "",
+        tool_calls: pendingToolCalls
+      });
+    }
+
     pendingToolCalls = [];
   };
 
@@ -1428,7 +1437,19 @@ export function chatCompletionEventStreamToResponsesEventStream(streamText: stri
   const createdAt = asNumber(response["created_at"]) ?? Math.floor(Date.now() / 1000);
   const model = asString(response["model"]) ?? fallbackModel;
   const events: string[] = [];
-  let nextOutputIndex = 0;
+  const responseOutput = Array.isArray(response["output"]) ? response["output"] : [];
+  const outputIndexById = new Map<string, number>();
+  for (const [index, item] of responseOutput.entries()) {
+    if (!isRecord(item)) {
+      continue;
+    }
+
+    const itemId = asString(item["id"]);
+    if (itemId) {
+      outputIndexById.set(itemId, index);
+    }
+  }
+
   let messageOutputIndex: number | undefined;
   let reasoningOutputIndex: number | undefined;
   const toolCallState = new Map<number, { readonly itemId: string; readonly callId: string; readonly outputIndex: number }>();
@@ -1453,8 +1474,7 @@ export function chatCompletionEventStreamToResponsesEventStream(streamText: stri
       return reasoningOutputIndex;
     }
 
-    reasoningOutputIndex = nextOutputIndex;
-    nextOutputIndex += 1;
+    reasoningOutputIndex = outputIndexById.get(`rs_${responseId}`) ?? 0;
     emitEvent("response.output_item.added", {
       output_index: reasoningOutputIndex,
       item: {
@@ -1472,8 +1492,7 @@ export function chatCompletionEventStreamToResponsesEventStream(streamText: stri
       return messageOutputIndex;
     }
 
-    messageOutputIndex = nextOutputIndex;
-    nextOutputIndex += 1;
+    messageOutputIndex = outputIndexById.get(`msg_${responseId}`) ?? 0;
     emitEvent("response.output_item.added", {
       output_index: messageOutputIndex,
       item: {
@@ -1533,12 +1552,12 @@ export function chatCompletionEventStreamToResponsesEventStream(streamText: stri
       let state = toolCallState.get(toolCallIndex);
       if (!state) {
         const callId = asString(entry["id"]) ?? `call_${toolCallIndex}`;
+        const itemId = `fc_${responseId}_${toolCallIndex}`;
         state = {
-          itemId: `fc_${responseId}_${toolCallIndex}`,
+          itemId,
           callId,
-          outputIndex: nextOutputIndex
+          outputIndex: outputIndexById.get(itemId) ?? 0
         };
-        nextOutputIndex += 1;
         toolCallState.set(toolCallIndex, state);
         emitEvent("response.output_item.added", {
           output_index: state.outputIndex,
@@ -2168,8 +2187,12 @@ export async function streamResponsesSseToChatCompletionChunks(
   const SSE_BLOCK_SEP = /\r?\n\r?\n/;
 
   function drainBuffer(): void {
-    let match = SSE_BLOCK_SEP.exec(buffer);
-    while (match !== null) {
+    while (true) {
+      const match = SSE_BLOCK_SEP.exec(buffer);
+      if (match === null) {
+        break;
+      }
+
       const sepIdx = match.index ?? 0;
       const block = buffer.slice(0, sepIdx);
       buffer = buffer.slice(sepIdx + match[0].length);
@@ -2196,8 +2219,6 @@ export async function streamResponsesSseToChatCompletionChunks(
       } catch {
         // Skip malformed events
       }
-
-      match = SSE_BLOCK_SEP.exec(buffer);
     }
   }
 
