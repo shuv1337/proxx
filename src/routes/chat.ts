@@ -86,8 +86,17 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
       }
       const aliasTarget = catalog.aliasTargets[requestedModelInput];
       if (typeof aliasTarget === "string" && aliasTarget.length > 0) {
-        routingModelInput = aliasTarget;
-        reply.header("x-open-hax-model-alias", `${requestedModelInput}->${aliasTarget}`);
+        const requestedLower = requestedModelInput.trim().toLowerCase();
+        const aliasLower = aliasTarget.trim().toLowerCase();
+        const requestedWasExplicitOllama = requestedLower.startsWith("ollama/") || requestedLower.startsWith("ollama:");
+        const aliasIsExplicitOllama = aliasLower.startsWith("ollama/") || aliasLower.startsWith("ollama:");
+
+        routingModelInput = requestedWasExplicitOllama && !aliasIsExplicitOllama
+          ? requestedModelInput
+          : aliasTarget;
+        if (routingModelInput !== requestedModelInput) {
+          reply.header("x-open-hax-model-alias", `${requestedModelInput}->${routingModelInput}`);
+        }
       }
     } catch (error) {
       request.log.warn({ error: toErrorMessage(error) }, "failed to resolve dynamic model aliases; using requested model as-is");

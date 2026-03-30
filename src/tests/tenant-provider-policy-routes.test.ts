@@ -16,7 +16,6 @@ import { KeyPool } from "../lib/key-pool.js";
 import { ProxySettingsStore } from "../lib/proxy-settings-store.js";
 import { RequestLogStore } from "../lib/request-log-store.js";
 import { registerUiRoutes } from "../lib/ui-routes.js";
-import { registerApiV1Routes } from "../routes/api/v1/index.js";
 import type { CredentialStoreLike } from "../lib/credential-store.js";
 
 function buildConfig(input: {
@@ -1430,14 +1429,6 @@ test("credentials and quota routes merge runtime-visible oauth accounts with sto
     credentialStore,
     proxySettingsStore,
   });
-  await registerApiV1Routes(app, {
-    config,
-    keyPool,
-    requestLogStore,
-    credentialStore,
-    proxySettingsStore,
-  });
-
   await app.listen({ host: "127.0.0.1", port: 0 });
 
   try {
