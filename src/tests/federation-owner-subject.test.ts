@@ -31,3 +31,18 @@ test("resolveFederationOwnerSubject still rejects explicit owner header for unau
 
   assert.equal(resolved, undefined);
 });
+
+test("resolveFederationOwnerSubject currently accepts any owner header for tenant api keys (cross-tenant validation is not enforced)", () => {
+  const resolved = resolveFederationOwnerSubject({
+    headers: {
+      "x-open-hax-federation-owner-subject": "did:web:other-tenant.promethean.rest",
+    },
+    requestAuth: {
+      kind: "tenant_api_key",
+      subject: "tenant_api_key:tenant-a",
+    },
+    hopCount: 0,
+  });
+
+  assert.equal(resolved, "did:web:other-tenant.promethean.rest");
+});

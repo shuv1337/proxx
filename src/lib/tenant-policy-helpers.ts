@@ -42,7 +42,13 @@ export function tenantModelAllowed(settings: TenantSettings, ...models: Array<st
     return false;
   }
 
-  return [...candidates].some((candidate) => settings.allowedModels!.includes(candidate));
+  const allowedVariants = new Set<string>();
+  for (const allowed of settings.allowedModels!) {
+    for (const variant of normalizeModelVariants(allowed)) {
+      allowedVariants.add(variant);
+    }
+  }
+  return [...candidates].some((candidate) => allowedVariants.has(candidate));
 }
 
 export function tenantProviderAllowed(settings: TenantSettings, providerId: string): boolean {

@@ -927,12 +927,14 @@ export async function executeProviderFallback(
               refreshedRelease();
               }
             }
+          } else {
             await providerRoutePheromoneStore.noteFailure(candidate.providerId, context.routedModel);
             keyPool.markRateLimited(candidate.account, Math.min(context.config.keyCooldownMs, 10_000));
-          if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && candidate.account.accountId === preferredAffinity.accountId) {
-            preferredReassignmentAllowed = true;
+            if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && candidate.account.accountId === preferredAffinity.accountId) {
+              preferredReassignmentAllowed = true;
+            }
           }
-        } else if (!upstreamResponse.ok && outcome.requestError === true && (upstreamResponse.status === 401 || upstreamResponse.status === 402 || upstreamResponse.status === 403)) {
+        if (!upstreamResponse.ok && outcome.requestError === true && (upstreamResponse.status === 401 || upstreamResponse.status === 402 || upstreamResponse.status === 403)) {
           if (shouldCooldownCredentialOnAuthFailure(candidate.providerId, upstreamResponse.status) || shouldPermanentlyDisableCredential(candidate.account, upstreamResponse.status)) {
             const cooldownMs = shouldPermanentlyDisableCredential(candidate.account, upstreamResponse.status)
               ? PERMANENT_DISABLE_COOLDOWN_MS
