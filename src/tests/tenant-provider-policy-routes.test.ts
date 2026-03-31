@@ -1326,7 +1326,7 @@ test("credentials and quota routes merge runtime-visible oauth accounts with sto
 
   const keyPool = new KeyPool({
     keysFilePath: keysPath,
-    reloadIntervalMs: 50,
+    reloadIntervalMs: 1_000_000,
     defaultCooldownMs: 10_000,
     defaultProviderId: config.upstreamProviderId,
   });
@@ -1462,7 +1462,7 @@ test("credentials and quota routes merge runtime-visible oauth accounts with sto
     globalThis.fetch = originalFetch;
     await app.close();
     await requestLogStore.close();
-    await upstream.close();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
     await rm(tempDir, { recursive: true, force: true });
   }
 });

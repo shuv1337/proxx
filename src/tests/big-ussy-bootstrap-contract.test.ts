@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+const testDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(testDir, "..", "..");
+
 test("big ussy bootstrap script keeps repaired local-core relay contract", async () => {
-  const scriptPath = "/home/err/devel/services/proxx/bin/project-complete-devel-stack-to-big-ussy.sh";
+  const scriptPath = resolve(repoRoot, "..", "..", "services", "proxx", "bin", "project-complete-devel-stack-to-big-ussy.sh");
   const script = await readFile(scriptPath, "utf8");
 
   assert.match(script, /REMOTE_RELAY_PORT="18790"/);
