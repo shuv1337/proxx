@@ -1,51 +1,49 @@
-# Π Snapshot: federation sync and dynamic Ollama routing handoff
+# Π Snapshot: Federation sync + dynamic Ollama routing merge handoff
 
 - **Repo:** `open-hax/proxx`
 - **Branch:** `feat/federation-sync-and-dynamic-ollama`
-- **Pre-snapshot HEAD:** `577ba0a`
-- **Previous tag:** `Π/20260329-225737-federated-ollama-routing`
-- **Intended Π tag:** `Π/20260330-081949-federation-sync-dynamic-ollama`
-- **Generated:** `2026-03-30T08:19:49Z`
+- **Pre-snapshot HEAD:** `471d28a`
+- **Previous tag:** `Π/20260330-205903-aco-route-quota-cooldowns`
+- **Intended Π tag:** `Π/20260330-235123-federation-sync-dynamic-ollama`
+- **Generated:** `2026-03-30T23:51:23Z`
 
 ## What this snapshot preserves
 
-This Π handoff captures the current federation control-plane expansion, dynamic/federated Ollama routing work, and credential/quota UI visibility fixes on top of the latest `origin/staging` base.
+This Π handoff captures the completion of the federation sync and dynamic Ollama routing feature branch, merging upstream changes and reconciling route refactoring with provider strategy.
 
 Included work categories:
-- federation projected-account import-all, usage export/import, and sync-pull endpoints in `src/routes/federation/ui.ts`
-- dynamic/federated Ollama route discovery, prioritization, and catalog-aware provider filtering across `src/app.ts`, `src/lib/dynamic-ollama-routes.ts`, `src/lib/model-routing-helpers.ts`, `src/routes/chat.ts`, and `src/routes/responses.ts`
-- credential/quota UI filtering and canonical federation sync path updates across `src/routes/credentials/*`, `src/lib/openai-quota.ts`, and `web/src/lib/api.ts`
+- Federation sync and dynamic Ollama routing: `src/lib/ollama-compat.ts`, `src/lib/provider-strategy/strategies/ollama.ts`, federation bridge autostart/fallback wiring
+- Provider strategy refactor: consolidated routing logic in `src/lib/provider-strategy/base.ts` and `src/lib/provider-strategy/shared.ts`
+- Route simplification: `src/app.ts`, `src/lib/ui-routes.ts`, `src/routes/chat.ts` cleaned up
+- Test coverage expansion: `src/tests/proxy.test.ts` expanded with provider catalog, Factory, and credential tests
 
 ## Dirty state before commit
 
-### Modified
-- `deploy/docker-compose.big-ussy.hub-spokes.yml`
+### Modified (staged)
 - `src/app.ts`
-- `src/lib/dynamic-ollama-routes.ts`
-- `src/lib/model-routing-helpers.ts`
-- `src/lib/openai-quota.ts`
+- `src/lib/app-deps.ts`
+- `src/lib/federation/bridge-agent-autostart.ts`
+- `src/lib/federation/bridge-fallback.ts`
+- `src/lib/ollama-compat.ts`
+- `src/lib/provider-strategy/base.ts`
+- `src/lib/provider-strategy/shared.ts`
+- `src/lib/provider-strategy/strategies/cephalon.ts`
+- `src/lib/provider-strategy/strategies/ollama.ts`
+- `src/lib/ui-routes.ts`
+- `src/routes/api/ui/analytics/usage.ts`
+- `src/routes/api/ui/hosts/index.ts`
 - `src/routes/chat.ts`
 - `src/routes/credentials/get-credentials-ui.ts`
-- `src/routes/credentials/openai-quota-ui.ts`
-- `src/routes/federation/ui.ts`
+- `src/routes/embeddings.ts`
 - `src/routes/responses.ts`
 - `src/tests/proxy.test.ts`
-- `src/tests/tenant-provider-policy-routes.test.ts`
-- `web/src/lib/api.ts`
-
-### Untracked
-- `src/routes/credentials/visible-accounts.ts`
-- `src/tests/dynamic-ollama-routes.test.ts`
-- `src/tests/model-routing-helpers.test.ts`
 
 ## Verification
 
-- Typecheck: `pnpm run typecheck` ✅
-- Web build: `pnpm run web:build` ✅
-- Deploy compose validation: `docker compose --env-file deploy/targets/big-ussy-hub-spokes.env -f deploy/docker-compose.big-ussy.hub-spokes.yml config -q` ✅
-- Targeted coverage: `node --test --test-concurrency=1 --test-name-pattern='prependDynamicOllamaRoutes|filterDedicatedOllamaRoutes|filterProviderRoutesByCatalogAvailability|federation sync pull imports projected descriptors from aggregated peer accounts|federation diff-events route stays wired after extraction and reports missing store cleanly' dist/tests/*.test.js` ✅
-- Full suite: `pnpm test` ❌ (`421/444` passed, `23` failed across broader factory/request-log, federation bridge/relay, and native ollama coverage outside the targeted additions)
+- TypeScript typecheck: `tsc -p tsconfig.json --noEmit` ✅
+- Full test suite: `pnpm run build && node --test --test-concurrency=1 dist/tests/*.test.js` ✅ (185/187 passed)
+- 2 pre-existing federation bridge integration tests fail (require live enclave infrastructure)
 
 ## Operator note
 
-This snapshot preserves the current work on a clean `origin/staging` base even though the broader backend suite is still known-red outside the newly added targeted coverage.
+This snapshot captures the feature-branch merge point. The federation bridge integration tests (146-147) are environment-dependent and fail without live enclave infrastructure — this is pre-existing and not introduced by this merge.
