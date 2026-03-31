@@ -1,8 +1,54 @@
 import { resolveRequestRoutingState } from "./provider-routing.js";
 
 interface TenantSettings {
+  readonly allowedModels: readonly string[] | null;
   readonly allowedProviderIds: readonly string[] | null;
   readonly disabledProviderIds: readonly string[] | null;
+}
+
+function normalizeModelVariants(model: string): readonly string[] {
+  const trimmed = model.trim().toLowerCase();
+  if (trimmed.length === 0) {
+    return [];
+  }
+
+  const variants = new Set<string>([trimmed]);
+  if (trimmed.startsWith("ollama/")) {
+    variants.add(trimmed.slice("ollama/".length));
+  }
+  if (trimmed.startsWith("ollama:")) {
+    variants.add(trimmed.slice("ollama:".length));
+  }
+  return [...variants];
+}
+
+export function tenantModelAllowed(settings: TenantSettings, ...models: Array<string | undefined>): boolean {
+  if (!settings.allowedModels || settings.allowedModels.length === 0) {
+    return true;
+  }
+
+  const candidates = new Set<string>();
+  for (const model of models) {
+    if (typeof model !== "string") {
+      continue;
+    }
+
+    for (const variant of normalizeModelVariants(model)) {
+      candidates.add(variant);
+    }
+  }
+
+  if (candidates.size === 0) {
+    return false;
+  }
+
+  const allowedVariants = new Set<string>();
+  for (const allowed of settings.allowedModels!) {
+    for (const variant of normalizeModelVariants(allowed)) {
+      allowedVariants.add(variant);
+    }
+  }
+  return [...candidates].some((candidate) => allowedVariants.has(candidate));
 }
 
 export function tenantProviderAllowed(settings: TenantSettings, providerId: string): boolean {

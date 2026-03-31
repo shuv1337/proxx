@@ -13,6 +13,7 @@ import {
   shouldRejectModelFromProviderCatalog,
 } from "../lib/model-routing-helpers.js";
 import {
+  tenantModelAllowed,
   filterTenantProviderRoutes,
   resolveExplicitTenantProviderId,
 } from "../lib/tenant-policy-helpers.js";
@@ -59,6 +60,11 @@ export function registerResponsesRoutes(deps: AppDeps, app: FastifyInstance): vo
     const requestedModelInput = typeof requestBody.model === "string" ? requestBody.model : "";
     if (requestedModelInput.length === 0) {
       sendOpenAiError(reply, 400, "Missing required field: model", "invalid_request_error", "missing_model");
+      return;
+    }
+
+    if (!tenantModelAllowed(tenantSettings, requestedModelInput)) {
+      sendOpenAiError(reply, 403, `Model is disabled for this tenant: ${requestedModelInput}`, "invalid_request_error", "model_not_allowed");
       return;
     }
 
@@ -218,6 +224,7 @@ export function registerResponsesRoutes(deps: AppDeps, app: FastifyInstance): vo
         reply,
         deps.requestLogStore,
         deps.promptAffinityStore,
+        deps.providerRoutePheromoneStore,
         deps.keyPool,
         providerRoutes,
         context,
@@ -227,7 +234,7 @@ export function registerResponsesRoutes(deps: AppDeps, app: FastifyInstance): vo
         deps.policyEngine,
         deps.accountHealthStore,
         deps.eventStore,
-        undefined,
+        deps.quotaMonitor,
       );
 
       if (execution.handled) {

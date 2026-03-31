@@ -4,12 +4,13 @@ import { type ChatCompletionRequest, extractPromptCacheKey } from "../lib/reques
 import { isRecord } from "../lib/provider-utils.js";
 import {
   resolvableConcreteModelIds,
-  filterProviderRoutesByModelSupport,
   filterProviderRoutesByCatalogAvailability,
+  filterProviderRoutesByModelSupport,
   shouldRejectModelFromProviderCatalog,
 } from "../lib/model-routing-helpers.js";
 import {
   tenantProviderAllowed,
+  tenantModelAllowed,
   filterTenantProviderRoutes,
   resolveExplicitTenantProviderId,
 } from "../lib/tenant-policy-helpers.js";
@@ -35,6 +36,7 @@ import { ensureOllamaContextFits } from "../lib/ollama-context.js";
 import { executeBridgeRequestFallback } from "../lib/federation/bridge-fallback.js";
 import type { AppDeps } from "../lib/app-deps.js";
 import { discoverDynamicOllamaRoutes, filterDedicatedOllamaRoutes, hasDedicatedOllamaRoutes, prependDynamicOllamaRoutes } from "../lib/dynamic-ollama-routes.js";
+import { rankProviderRoutesWithAco } from "../lib/provider-route-aco.js";
 
 export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
   app.post<{ Body: ChatCompletionRequest }>("/v1/chat/completions", async (request, reply) => {
@@ -61,6 +63,10 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
     }
 
     const requestedModelInput = typeof requestBody.model === "string" ? requestBody.model : "";
+    if (!tenantModelAllowed(proxySettings, requestedModelInput)) {
+      sendOpenAiError(reply, 403, `Model is disabled for this tenant: ${requestedModelInput || "unknown"}`, "invalid_request_error", "model_not_allowed");
+      return;
+    }
     const explicitlyBlockedProviderId = resolveExplicitTenantProviderId(deps.config, requestedModelInput, proxySettings);
     if (explicitlyBlockedProviderId) {
       sendOpenAiError(reply, 403, `Provider is disabled for this tenant: ${explicitlyBlockedProviderId}`, "invalid_request_error", "provider_not_allowed");
@@ -80,8 +86,17 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
       }
       const aliasTarget = catalog.aliasTargets[requestedModelInput];
       if (typeof aliasTarget === "string" && aliasTarget.length > 0) {
-        routingModelInput = aliasTarget;
-        reply.header("x-open-hax-model-alias", `${requestedModelInput}->${aliasTarget}`);
+        const requestedLower = requestedModelInput.trim().toLowerCase();
+        const aliasLower = aliasTarget.trim().toLowerCase();
+        const requestedWasExplicitOllama = requestedLower.startsWith("ollama/") || requestedLower.startsWith("ollama:");
+        const aliasIsExplicitOllama = aliasLower.startsWith("ollama/") || aliasLower.startsWith("ollama:");
+
+        routingModelInput = requestedWasExplicitOllama && !aliasIsExplicitOllama
+          ? requestedModelInput
+          : aliasTarget;
+        if (routingModelInput !== requestedModelInput) {
+          reply.header("x-open-hax-model-alias", `${requestedModelInput}->${routingModelInput}`);
+        }
       }
     } catch (error) {
       request.log.warn({ error: toErrorMessage(error) }, "failed to resolve dynamic model aliases; using requested model as-is");
@@ -194,11 +209,15 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
       }
 
       if (providerRoutes.length === 0) {
-        if (hasMoreModelCandidates) {
-          continue;
+        if (strategy.isLocal) {
+          // Tenant policy can intentionally clear hosted providers to force the configured local/Ollama edge path.
+        } else {
+          if (hasMoreModelCandidates) {
+            continue;
+          }
+          sendOpenAiError(reply, 403, "No upstream providers are allowed for this tenant and request.", "invalid_request_error", "provider_not_allowed");
+          return;
         }
-        sendOpenAiError(reply, 403, "No upstream providers are allowed for this tenant and request.", "invalid_request_error", "provider_not_allowed");
-        return;
       }
 
       try {
@@ -214,6 +233,24 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
 
         if (context.localOllama || isCephalonAutoModel(requestedModelInput) || isCephalonAutoModel(routingModelInput)) {
           providerRoutes = filterProviderRoutesByCatalogAvailability(providerRoutes, context.routedModel, catalogBundle);
+          const ranked = await rankProviderRoutesWithAco({
+            providerRoutes,
+            model: context.routedModel,
+            upstreamMode: strategy.mode,
+            keyPool: deps.keyPool,
+            requestLogStore: deps.requestLogStore,
+            healthStore: deps.accountHealthStore,
+            pheromoneStore: deps.providerRoutePheromoneStore,
+          });
+          providerRoutes = ranked.orderedRoutes;
+        }
+
+        if (providerRoutes.length === 0) {
+          if (hasMoreModelCandidates) {
+            continue;
+          }
+          sendOpenAiError(reply, 503, "No healthy Ollama nodes are currently available.", "server_error", "healthy_nodes_unavailable");
+          return;
         }
 
         if (shouldRejectModelFromProviderCatalog(providerRoutes, context.routedModel, catalogBundle)) {
@@ -301,6 +338,7 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
         reply,
         deps.requestLogStore,
         deps.promptAffinityStore,
+        deps.providerRoutePheromoneStore,
         deps.keyPool,
         providerRoutes,
         context,
@@ -310,7 +348,7 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
         deps.policyEngine,
         deps.accountHealthStore,
         deps.eventStore,
-        undefined,
+        deps.quotaMonitor,
       );
 
       if (execution.handled) {
