@@ -15,6 +15,8 @@ export interface KeyPoolConfig {
   readonly accountStore?: ProviderAccountStore;
   readonly preferAccountStoreProviders?: boolean;
   readonly expiryBufferMs?: number;
+  readonly cooldownJitterFactor?: number;
+  readonly enableRandomWalk?: boolean;
 }
 
 export interface ProviderCredential {
@@ -574,11 +576,18 @@ function resolveExpiryBufferMs(expiryBufferMs: unknown): number {
 export class KeyPool {
   private readonly cooldownByAccountKey = new Map<string, number>();
   private readonly inFlightByAccountKey = new Map<string, number>();
+  private readonly failureStreakByAccountKey = new Map<string, number>();
   private providers = new Map<string, ProviderState>();
   private lastReloadAt = 0;
   private reloadInFlight: Promise<void> | null = null;
+  private readonly rng: () => number;
 
-  public constructor(private readonly config: KeyPoolConfig) {}
+  public constructor(
+    private readonly config: KeyPoolConfig,
+    rng?: () => number,
+  ) {
+    this.rng = rng ?? Math.random;
+  }
 
   public async warmup(): Promise<void> {
     await this.ensureFreshProviders(true);
@@ -595,14 +604,14 @@ export class KeyPool {
 
     const accountCount = providerState.accounts.length;
     const now = Date.now();
-    const startOffset = providerState.nextOffset % accountCount;
-    providerState.nextOffset = (providerState.nextOffset + 1) % accountCount;
-
     const expiryBuffer = resolveExpiryBufferMs(this.config.expiryBufferMs);
+
     const idle: ProviderCredential[] = [];
     const busy: ProviderCredential[] = [];
+    const cooldownSoon: ProviderCredential[] = [];
+
     for (let index = 0; index < accountCount; index += 1) {
-      const credential = providerState.accounts[(startOffset + index) % accountCount];
+      const credential = providerState.accounts[index];
       if (!credential) {
         continue;
       }
@@ -619,10 +628,82 @@ export class KeyPool {
         } else {
           idle.push(credential);
         }
+      } else {
+        cooldownSoon.push(credential);
       }
     }
 
+    if (this.config.enableRandomWalk) {
+      return this.randomWalkOrder(idle, busy, cooldownSoon);
+    }
+
     return [...idle, ...busy];
+  }
+
+  private randomWalkOrder(
+    idle: ProviderCredential[],
+    busy: ProviderCredential[],
+    cooldownSoon: ProviderCredential[],
+  ): ProviderCredential[] {
+    const jitterFactor = this.config.cooldownJitterFactor ?? 0.4;
+
+    const shuffledIdle = this.weightedShuffle(idle);
+    const shuffledBusy = this.weightedShuffle(busy);
+
+    const jitteredCooldown = cooldownSoon
+      .map((cred) => ({
+        cred,
+        jitteredUntil: this.applyCooldownJitter(
+          this.cooldownByAccountKey.get(accountStateKey(cred)) ?? 0,
+          jitterFactor,
+        ),
+      }))
+      .sort((a, b) => a.jitteredUntil - b.jitteredUntil)
+      .map((entry) => entry.cred);
+
+    return [...shuffledIdle, ...shuffledBusy, ...jitteredCooldown];
+  }
+
+  private weightedShuffle<T>(items: T[]): T[] {
+    if (items.length <= 1) {
+      return [...items];
+    }
+
+    const weights = items.map(() => 0.5 + this.rng());
+    const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+
+    const result: T[] = [];
+    const remaining = items.map((item, i) => ({ item, weight: weights[i]! / totalWeight }));
+
+    while (remaining.length > 0) {
+      let target = this.rng();
+      let selectedIndex = 0;
+      let cumulativeWeight = 0;
+
+      for (let i = 0; i < remaining.length; i++) {
+        cumulativeWeight += remaining[i]!.weight;
+        if (target <= cumulativeWeight) {
+          selectedIndex = i;
+          break;
+        }
+      }
+
+      result.push(remaining.splice(selectedIndex, 1)[0]!.item);
+    }
+
+    return result;
+  }
+
+  private applyCooldownJitter(cooldownUntil: number, jitterFactor: number): number {
+    if (cooldownUntil <= 0) {
+      return 0;
+    }
+    const remaining = cooldownUntil - Date.now();
+    if (remaining <= 0) {
+      return 0;
+    }
+    const jitter = remaining * jitterFactor * (this.rng() - 0.5) * 2;
+    return cooldownUntil + jitter;
   }
 
   public async getAllAccounts(providerId: string = this.config.defaultProviderId): Promise<ProviderCredential[]> {
@@ -666,23 +747,23 @@ export class KeyPool {
 
     const accountCount = providerState.accounts.length;
     const now = Date.now();
-    const startOffset = providerState.nextOffset % accountCount;
-    providerState.nextOffset = (providerState.nextOffset + 1) % accountCount;
 
     const expiryBuffer = resolveExpiryBufferMs(this.config.expiryBufferMs);
 
     const idle: ProviderCredential[] = [];
     const busy: ProviderCredential[] = [];
+    const cooldownSoon: ProviderCredential[] = [];
     const refreshCandidates: ProviderCredential[] = [];
 
     for (let index = 0; index < accountCount; index += 1) {
-      const credential = providerState.accounts[(startOffset + index) % accountCount];
+      const credential = providerState.accounts[index];
       if (!credential) {
         continue;
       }
 
       const cooldownUntil = this.cooldownByAccountKey.get(accountStateKey(credential)) ?? 0;
       if (cooldownUntil > now) {
+        cooldownSoon.push(credential);
         continue;
       }
 
@@ -715,7 +796,12 @@ export class KeyPool {
       }
     }
 
-    return [...idle, ...busy, ...refreshed];
+    if (this.config.enableRandomWalk) {
+      const ordered = this.randomWalkOrder(idle, busy, cooldownSoon);
+      return [...ordered, ...refreshed];
+    }
+
+    return [...idle, ...busy, ...cooldownSoon, ...refreshed];
   }
 
   public isAccountExpired(credential: ProviderCredential): boolean {
@@ -802,12 +888,25 @@ export class KeyPool {
   }
 
   public markRateLimited(credential: ProviderCredential, retryAfterMs?: number): void {
-    const cooldown = Math.max(retryAfterMs ?? this.config.defaultCooldownMs, 1000);
-    this.cooldownByAccountKey.set(accountStateKey(credential), Date.now() + cooldown);
+    const baseCooldown = Math.max(retryAfterMs ?? this.config.defaultCooldownMs, 1000);
+    const jitterFactor = this.config.cooldownJitterFactor ?? 0.4;
+    const jitteredCooldown = this.applyJitterToCooldown(baseCooldown, jitterFactor);
+    this.cooldownByAccountKey.set(accountStateKey(credential), Date.now() + jitteredCooldown);
+
+    const streakKey = accountStateKey(credential);
+    const currentStreak = this.failureStreakByAccountKey.get(streakKey) ?? 0;
+    this.failureStreakByAccountKey.set(streakKey, currentStreak + 1);
+
     getTelemetry().recordMetric("proxy.key_pool.rate_limited", 1, {
       "proxy.provider_id": credential.providerId ?? this.config.defaultProviderId,
       "proxy.account_id": credential.accountId,
     });
+  }
+
+  private applyJitterToCooldown(baseCooldownMs: number, jitterFactor: number): number {
+    const jitterRange = baseCooldownMs * jitterFactor;
+    const jitter = (this.rng() - 0.5) * 2 * jitterRange;
+    return Math.max(1000, baseCooldownMs + jitter);
   }
 
   public setAccountCooldownUntil(providerId: string, accountId: string, cooldownUntil: number): void {
@@ -821,7 +920,9 @@ export class KeyPool {
   }
 
   public clearAccountCooldown(providerId: string, accountId: string): void {
-    this.cooldownByAccountKey.delete(accountStateKeyFromIds(normalizeProviderId(providerId), accountId));
+    const key = accountStateKeyFromIds(normalizeProviderId(providerId), accountId);
+    this.cooldownByAccountKey.delete(key);
+    this.failureStreakByAccountKey.delete(key);
   }
 
   public async msUntilAnyKeyReady(providerId: string = this.config.defaultProviderId): Promise<number> {
@@ -990,6 +1091,12 @@ export class KeyPool {
     for (const key of this.inFlightByAccountKey.keys()) {
       if (!activeKeys.has(key)) {
         this.inFlightByAccountKey.delete(key);
+      }
+    }
+
+    for (const key of this.failureStreakByAccountKey.keys()) {
+      if (!activeKeys.has(key)) {
+        this.failureStreakByAccountKey.delete(key);
       }
     }
   }

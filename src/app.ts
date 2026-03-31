@@ -235,6 +235,8 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     defaultProviderId: config.upstreamProviderId,
     accountStore: sqlCredentialStore,
     preferAccountStoreProviders: sqlCredentialStore !== undefined,
+    cooldownJitterFactor: config.keyCooldownJitterFactor,
+    enableRandomWalk: config.enableKeyRandomWalk,
   });
   try {
     await keyPool.warmup();

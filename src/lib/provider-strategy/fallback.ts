@@ -8,7 +8,7 @@ import type { PromptAffinityStore } from "../prompt-affinity-store.js";
 import type { ProviderRoutePheromoneStore } from "../provider-route-pheromone-store.js";
 import type { RequestLogStore } from "../request-log-store.js";
 import type { QuotaMonitor } from "../quota-monitor.js";
-import { buildUpstreamHeadersForCredential, extractRateLimitCooldownMs, isRateLimitResponse } from "../proxy.js";
+import { buildUpstreamHeadersForCredential, detectOllamaLimitKind, extractRateLimitCooldownMs, isRateLimitResponse } from "../proxy.js";
 import {
   responsesEventStreamToErrorPayload,
 } from "../responses-compat.js";
@@ -523,6 +523,21 @@ export async function executeProviderFallback(
 
         if (isRateLimitResponse(upstreamResponse)) {
           accumulator.sawRateLimit = true;
+
+          let ollamaMultiplier = 1;
+          if (candidate.account.providerId === "ollama-cloud") {
+            try {
+              const cloned = upstreamResponse.clone();
+              const body = await cloned.json() as Record<string, unknown>;
+              const limitKind = detectOllamaLimitKind(body);
+              if (limitKind === "weekly") {
+                ollamaMultiplier = context.config.ollamaWeeklyCooldownMultiplier;
+              }
+            } catch {
+              // If we can't parse the body, fall back to no multiplier.
+            }
+          }
+
           let cooldownMs: number | undefined;
           if (quotaMonitor?.tracksProvider(candidate.account.providerId)) {
             cooldownMs = quotaMonitor.getCooldownMs(candidate.account.accountId);
@@ -541,6 +556,8 @@ export async function executeProviderFallback(
           if (!cooldownMs) {
             cooldownMs = context.config.keyCooldownMs;
           }
+
+          cooldownMs = Math.round(cooldownMs * ollamaMultiplier);
           keyPool.markRateLimited(candidate.account, cooldownMs);
           if (
             preferredAffinity

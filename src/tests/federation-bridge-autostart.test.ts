@@ -121,6 +121,9 @@ function buildConfig(input: {
     settingsFilePath: input.paths.settingsPath,
     keyReloadMs: 50,
     keyCooldownMs: 10_000,
+    keyCooldownJitterFactor: 0.4,
+    enableKeyRandomWalk: true,
+    ollamaWeeklyCooldownMultiplier: 24,
     requestTimeoutMs: 2_000,
     streamBootstrapTimeoutMs: 2_000,
     upstreamTransientRetryCount: 1,
@@ -346,6 +349,17 @@ test("relay /v1/models merges bridged model inventory from an attached enclave a
         const payload = response.json() as { readonly sessions: ReadonlyArray<Record<string, unknown>> };
         return payload.sessions[0]?.state === "connected";
       });
+
+      await waitFor(async () => {
+        const response = await relayApp!.inject({
+          method: "GET",
+          url: "/v1/models",
+          headers: { authorization: "Bearer bridge-admin-token" },
+        });
+        const payload = response.json() as { readonly data: ReadonlyArray<{ readonly id?: string }> };
+        const modelIds = payload.data.map((entry) => entry.id).filter((entry): entry is string => typeof entry === "string");
+        return modelIds.includes("gpt-5.2") && modelIds.includes("gpt-5.2-codex");
+      }, 10_000);
 
       const modelsResponse = await relayApp!.inject({
         method: "GET",

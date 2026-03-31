@@ -74,6 +74,9 @@ export interface ProxyConfig {
   readonly settingsFilePath: string;
   readonly keyReloadMs: number;
   readonly keyCooldownMs: number;
+  readonly keyCooldownJitterFactor: number;
+  readonly enableKeyRandomWalk: boolean;
+  readonly ollamaWeeklyCooldownMultiplier: number;
   readonly requestTimeoutMs: number;
   readonly streamBootstrapTimeoutMs: number;
   readonly upstreamTransientRetryCount: number;
@@ -533,7 +536,10 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     promptAffinityFlushMs: nonNegativeNumberFromEnvAliases(["PROXY_PROMPT_AFFINITY_FLUSH_MS"], 250),
     settingsFilePath: filePathFromEnvAliases(["PROXY_SETTINGS_FILE"], "./data/proxy-settings.json", cwd),
     keyReloadMs: numberFromEnvAliases(["PROXY_KEY_RELOAD_MS", "VIVGRID_KEY_RELOAD_MS"], 5000),
-    keyCooldownMs: numberFromEnvAliases(["PROXY_KEY_COOLDOWN_MS", "VIVGRID_KEY_COOLDOWN_MS"], 300_000),
+    keyCooldownMs: numberFromEnvAliases(["PROXY_KEY_COOLDOWN_MS", "VIVGRID_KEY_COOLDOWN_MS"], 4 * 60 * 60 * 1000),
+    keyCooldownJitterFactor: numberFromEnvAliases(["PROXY_KEY_COOLDOWN_JITTER_FACTOR"], 0.4),
+    enableKeyRandomWalk: booleanFromEnvAliases(["PROXY_KEY_RANDOM_WALK"], true),
+    ollamaWeeklyCooldownMultiplier: numberFromEnvAliases(["OLLAMA_WEEKLY_COOLDOWN_MULTIPLIER"], 24),
     requestTimeoutMs: numberFromEnvAliases(["UPSTREAM_REQUEST_TIMEOUT_MS"], 180000),
     streamBootstrapTimeoutMs: numberFromEnvAliases(["UPSTREAM_STREAM_BOOTSTRAP_TIMEOUT_MS"], 8000),
     upstreamTransientRetryCount: nonNegativeNumberFromEnvAliases(["UPSTREAM_TRANSIENT_RETRY_COUNT"], 2),
