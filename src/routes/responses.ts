@@ -44,6 +44,7 @@ import {
 
 import type { AppDeps } from "../lib/app-deps.js";
 import type { ResolvedCatalogWithPreferences } from "../lib/provider-catalog.js";
+import { resolveCatalogAndAlias } from "../lib/catalog-alias-resolver.js";
 
 function requestedModelIsExplicitOllama(model: string): boolean {
   const normalized = model.trim().toLowerCase();
@@ -149,27 +150,16 @@ export function registerResponsesRoutes(deps: AppDeps, app: FastifyInstance): vo
       return;
     }
 
-    let routingModelInput = requestedModelInput;
-    let resolvedModelCatalog = null;
-    let resolvedCatalogBundle: ResolvedCatalogWithPreferences | null = null;
-    try {
-      const catalogBundle = await deps.providerCatalogStore.getCatalog();
-      resolvedCatalogBundle = catalogBundle;
-      const catalog = catalogBundle.catalog;
-      resolvedModelCatalog = catalog;
-      const disabledModelSet = new Set(catalogBundle.preferences.disabled);
-      if (disabledModelSet.has(requestedModelInput) || disabledModelSet.has(catalog.aliasTargets[requestedModelInput] ?? "")) {
-        sendOpenAiError(reply, 403, `Model is disabled: ${requestedModelInput}`, "invalid_request_error", "model_disabled");
-        return;
-      }
-      const aliasTarget = catalog.aliasTargets[requestedModelInput];
-      if (typeof aliasTarget === "string" && aliasTarget.length > 0) {
-        routingModelInput = aliasTarget;
-        reply.header("x-open-hax-model-alias", `${requestedModelInput}->${aliasTarget}`);
-      }
-    } catch (error) {
-      request.log.warn({ error: toErrorMessage(error) }, "failed to resolve dynamic model aliases for /v1/responses; using requested model as-is");
+    const catalogResult = await resolveCatalogAndAlias(
+      deps.providerCatalogStore,
+      requestedModelInput,
+      reply,
+      request.log,
+    );
+    if (!catalogResult) {
+      return;
     }
+    const { routingModelInput, resolvedModelCatalog, resolvedCatalogBundle } = catalogResult;
 
     if (requestedModelIsExplicitOllama(requestedModelInput) || requestedModelIsExplicitOllama(routingModelInput)) {
       await handleOllamaResponsesCompatibility(

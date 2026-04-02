@@ -39,6 +39,7 @@ import { executeBridgeRequestFallback } from "../lib/federation/bridge-fallback.
 import type { AppDeps } from "../lib/app-deps.js";
 import { discoverDynamicOllamaRoutes, filterDedicatedOllamaRoutes, hasDedicatedOllamaRoutes, prependDynamicOllamaRoutes } from "../lib/dynamic-ollama-routes.js";
 import { rankProviderRoutesWithAco } from "../lib/provider-route-aco.js";
+import { resolveCatalogAndAlias } from "../lib/catalog-alias-resolver.js";
 
 export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
   app.post<{ Body: ChatCompletionRequest }>("/v1/chat/completions", async (request, reply) => {
@@ -75,34 +76,17 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
       return;
     }
 
-    let routingModelInput = requestedModelInput;
-    let resolvedModelCatalog = null;
-    try {
-      const catalogBundle = await deps.providerCatalogStore.getCatalog();
-      const catalog = catalogBundle.catalog;
-      resolvedModelCatalog = catalog;
-      const disabledModelSet = new Set(catalogBundle.preferences.disabled);
-      if (disabledModelSet.has(requestedModelInput) || disabledModelSet.has(catalog.aliasTargets[requestedModelInput] ?? "")) {
-        sendOpenAiError(reply, 403, `Model is disabled: ${requestedModelInput}`, "invalid_request_error", "model_disabled");
-        return;
-      }
-      const aliasTarget = catalog.aliasTargets[requestedModelInput];
-      if (typeof aliasTarget === "string" && aliasTarget.length > 0) {
-        const requestedLower = requestedModelInput.trim().toLowerCase();
-        const aliasLower = aliasTarget.trim().toLowerCase();
-        const requestedWasExplicitOllama = requestedLower.startsWith("ollama/") || requestedLower.startsWith("ollama:");
-        const aliasIsExplicitOllama = aliasLower.startsWith("ollama/") || aliasLower.startsWith("ollama:");
-
-        routingModelInput = requestedWasExplicitOllama && !aliasIsExplicitOllama
-          ? requestedModelInput
-          : aliasTarget;
-        if (routingModelInput !== requestedModelInput) {
-          reply.header("x-open-hax-model-alias", `${requestedModelInput}->${routingModelInput}`);
-        }
-      }
-    } catch (error) {
-      request.log.warn({ error: toErrorMessage(error) }, "failed to resolve dynamic model aliases; using requested model as-is");
+    const catalogResult = await resolveCatalogAndAlias(
+      deps.providerCatalogStore,
+      requestedModelInput,
+      reply,
+      request.log,
+      { preserveExplicitOllama: true },
+    );
+    if (!catalogResult) {
+      return;
     }
+    const { routingModelInput, resolvedModelCatalog } = catalogResult;
 
     const concreteModelIds = resolvableConcreteModelIds(resolvedModelCatalog);
     const dynamicOllamaModelIds = resolvedModelCatalog?.dynamicOllamaModelIds;
