@@ -1,41 +1,33 @@
 import type { FastifyReply } from "fastify";
 
-import type { AccountHealthStore } from "../db/account-health-store.js";
-import type { EventStore } from "../db/event-store.js";
-import type { ProviderCredential } from "../key-pool.js";
-import type { PolicyEngine } from "../policy/index.js";
-import type { PromptAffinityStore } from "../prompt-affinity-store.js";
-import type { ProviderRoutePheromoneStore } from "../provider-route-pheromone-store.js";
-import type { RequestLogStore } from "../request-log-store.js";
-import type { QuotaMonitor } from "../quota-monitor.js";
-import { buildUpstreamHeadersForCredential, detectOllamaLimitKind, extractRateLimitCooldownMs, isRateLimitResponse } from "../proxy.js";
+import type { AccountHealthStore } from "../../db/account-health-store.js";
+import type { EventStore } from "../../db/event-store.js";
+import type { ProviderCredential } from "../../key-pool.js";
+import type { PolicyEngine } from "../../policy/index.js";
+import type { PromptAffinityStore } from "../../prompt-affinity-store.js";
+import type { ProviderRoutePheromoneStore } from "../../provider-route-pheromone-store.js";
+import type { RequestLogStore } from "../../request-log-store.js";
+import type { QuotaMonitor } from "../../quota-monitor.js";
+import { buildUpstreamHeadersForCredential, detectOllamaLimitKind, extractRateLimitCooldownMs, isRateLimitResponse } from "../../proxy.js";
 import {
   responsesEventStreamToErrorPayload,
-} from "../responses-compat.js";
-import type { ProviderRoute } from "../provider-routing.js";
+} from "../../responses-compat.js";
+import type { ProviderRoute } from "../../provider-routing.js";
 import {
   fetchWithResponseTimeout,
   responseIndicatesQuotaError,
   summarizeUpstreamError,
   toErrorMessage,
-} from "../provider-utils.js";
-import { getTelemetry } from "../telemetry/otel.js";
-import { selectRemoteProviderStrategyForRoute } from "./registry.js";
+} from "../../provider-utils.js";
+import { getTelemetry } from "../../telemetry/otel.js";
+import { selectRemoteProviderStrategyForRoute } from "../registry.js";
 import {
-  PERMANENT_DISABLE_COOLDOWN_MS,
   buildCodexResponsesImagesBody,
   buildFactory4xxDiagnostics,
   extractImagesFromCodexEventStream,
   extractImagesFromCodexResponse,
   joinUrl,
-  providerAccountsForRequest,
-  providerAccountsForRequestWithPolicy,
-  reorderAccountsForLatency,
-  reorderCandidatesForAffinities,
   responseLooksLikeEventStream,
-  shouldCooldownCredentialOnAuthFailure,
-  shouldPermanentlyDisableCredential,
-  shouldRetrySameCredentialForServerError,
   sleep,
   transientRetryDelayMs,
   recordAttempt,
@@ -49,8 +41,20 @@ import {
   type ProviderFallbackExecutionResult,
   type ProviderStrategy,
   type StrategyRequestContext,
-} from "./shared.js";
-import { requestyModelProvider } from "../model-family.js";
+} from "../shared.js";
+import {
+  PERMANENT_DISABLE_COOLDOWN_MS,
+  shouldCooldownCredentialOnAuthFailure,
+  shouldPermanentlyDisableCredential,
+  shouldRetrySameCredentialForServerError,
+} from "./error-classifier.js";
+import {
+  providerAccountsForRequest,
+  providerAccountsForRequestWithPolicy,
+  reorderAccountsForLatency,
+  reorderCandidatesForAffinities,
+} from "./credential-selector.js";
+import { requestyModelProvider } from "../../model-family.js";
 
 function shouldUseOpenAiCodexHeaderProfile(
   providerId: string,
