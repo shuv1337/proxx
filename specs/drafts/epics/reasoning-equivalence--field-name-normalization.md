@@ -3,7 +3,17 @@
 **Epic:** `reasoning-equivalence-epic.md`
 **SP:** 2
 **Priority:** P0
-**Status:** Draft
+**Status:** ✅ Done (audit confirmed already consistent)
+
+## Findings
+
+After audit, the field normalization is already in good shape:
+- `chatCompletionHasReasoningContent()` already checks both `reasoning_content` and `reasoning` (provider-utils.ts:186)
+- All compat layers produce `reasoning_content` as the canonical output field
+- All compat layers read with `asString(x["reasoning_content"]) ?? asString(x["reasoning"])` pattern
+- No compat layer outputs `reasoning` in delta/message — always `reasoning_content`
+
+The related bug was in `streamPayloadHasReasoningTrace()` (fixed in sub-spec 1).
 
 ## Bug
 

@@ -3,7 +3,7 @@
 **Epic:** `reasoning-equivalence-epic.md`
 **SP:** 1
 **Priority:** P0
-**Status:** Draft
+**Status:** ✅ Done
 
 ## Bug
 

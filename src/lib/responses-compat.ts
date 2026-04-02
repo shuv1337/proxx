@@ -818,6 +818,16 @@ export function responsesRequestToChatRequest(requestBody: Record<string, unknow
 
   if (requestBody["reasoning"] !== undefined) {
     payload["reasoning"] = requestBody["reasoning"];
+    if (isRecord(requestBody["reasoning"])) {
+      const effort = requestBody["reasoning"]["effort"];
+      if (typeof effort === "string") {
+        payload["reasoning_effort"] = effort;
+      }
+      const summary = requestBody["reasoning"]["summary"];
+      if (typeof summary === "string") {
+        payload["reasoning_summary"] = summary;
+      }
+    }
   }
 
   if (requestBody["tools"] !== undefined) {

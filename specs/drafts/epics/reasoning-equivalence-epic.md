@@ -27,13 +27,13 @@ reasoning_content handling is NOT equivalent across endpoint types and strategie
 
 ## Sub-specs
 
-| # | Sub-spec | SP | Priority | File |
-|---|----------|----|----------|------|
-| 1 | Fix `streamPayloadHasReasoningTrace` for Responses API deltas | 2 | P0 | `epics/reasoning-equivalence--stream-payload-check.md` |
-| 2 | Normalize `reasoning` vs `reasoning_content` field names | 2 | P0 | `epics/reasoning-equivalence--field-name-normalization.md` |
-| 3 | Fix `responsesRequestToChatRequest` reasoning.effort mapping | 1 | P0 | `epics/reasoning-equivalence--request-effort-mapping.md` |
-| 4 | Add true streaming to non-OpenAI Responses strategy | 5 | P1 | `epics/reasoning-equivalence--responses-true-streaming.md` |
-| 5 | Add true streaming to Anthropic Messages strategy | 3 | P1 | `epics/reasoning-equivalence--messages-true-streaming.md` |
+| # | Sub-spec | SP | Priority | Status | File |
+|---|----------|----|----------|--------|------|
+| 1 | Fix `streamPayloadHasReasoningTrace` for Responses API deltas | 2 | P0 | ✅ Done | `epics/reasoning-equivalence--stream-payload-check.md` |
+| 2 | Normalize `reasoning` vs `reasoning_content` field names | 2 | P0 | ✅ Done (already consistent) | `epics/reasoning-equivalence--field-name-normalization.md` |
+| 3 | Fix `responsesRequestToChatRequest` reasoning.effort mapping | 1 | P0 | ✅ Done | `epics/reasoning-equivalence--request-effort-mapping.md` |
+| 4 | Add true streaming to non-OpenAI Responses strategy | 5 | P1 | ⬜ Not started | `epics/reasoning-equivalence--responses-true-streaming.md` |
+| 5 | Add true streaming to Anthropic Messages strategy | 3 | P1 | ⬜ Not started | `epics/reasoning-equivalence--messages-true-streaming.md` |
 
 ## Execution order
 
