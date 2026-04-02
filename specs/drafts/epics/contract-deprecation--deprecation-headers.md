@@ -3,8 +3,12 @@
 **Epic:** `contract-deprecation-epic.md`
 **SP:** 3
 **Priority:** P0
-**Status:** Draft
-**Depends on:** `contract-deprecation--frontend-migration.md`
+**Status:** ✅ Done (prior session)
+
+## Findings
+- `registerUiRoutes` in `ui-routes.ts:29-35` already adds `Deprecation: true` and `Link` headers
+- Live verification: `curl -I /api/ui/settings` returns both headers
+- `Deprecation: true` and `Link: </api/v1/settings>; rel="successor-version"` confirmed
 
 ## Scope
 Add `Deprecation: true` and `Link` headers to all `/api/ui/*` responses, and add parity tests confirming identical behavior at both prefixes.

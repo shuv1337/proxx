@@ -3,7 +3,12 @@
 **Epic:** `contract-deprecation-epic.md`
 **SP:** 3
 **Priority:** P0
-**Status:** Draft
+**Status:** ✅ Done (prior session)
+
+## Findings
+- All 37 references in `web/src/lib/api.ts` already use `/api/v1/*`
+- Zero `/api/ui/` references remain in `web/src/`
+- `web/src/pages/FederationPage.tsx` WebSocket also uses `/api/v1/federation/observability/ws`
 
 ## Scope
 Update `web/src/lib/api.ts` and all frontend call sites to use `/api/v1/*` exclusively for control-plane API calls.
