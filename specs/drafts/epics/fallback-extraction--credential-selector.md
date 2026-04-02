@@ -2,8 +2,9 @@
 
 **Epic:** `fallback-extraction-epic.md`
 **SP:** 2
+**Status:** ✅ Done
 **Priority:** P0
-**Depends on:** `fallback-extraction--error-classifier.md`
+**Depends on:** `fallback-extraction--error-classifier.md` ✅
 
 ## Scope
 Extract credential ordering and selection logic from `executeProviderFallback` into `src/lib/provider-strategy/fallback/credential-selector.ts`.

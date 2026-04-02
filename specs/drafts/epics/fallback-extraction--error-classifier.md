@@ -2,6 +2,7 @@
 
 **Epic:** `fallback-extraction-epic.md`
 **SP:** 2
+**Status:** ✅ Done
 **Priority:** P0
 **Depends on:** nothing
 

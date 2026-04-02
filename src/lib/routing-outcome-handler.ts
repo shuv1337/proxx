@@ -107,17 +107,6 @@ export async function handleRoutingOutcome(input: RoutingOutcomeInput): Promise<
     return true;
   }
 
-  if (summary.lastUpstreamAuthError) {
-    sendOpenAiError(
-      reply,
-      summary.lastUpstreamAuthError.status,
-      summary.lastUpstreamAuthError.message ?? "Upstream rejected the request due to authentication/authorization.",
-      "invalid_request_error",
-      "upstream_auth_error",
-    );
-    return true;
-  }
-
   const message = summary.sawRequestError
     ? "All upstream attempts failed due to network/transport errors."
     : "Upstream rejected the request with no successful fallback.";

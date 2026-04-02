@@ -1,6 +1,6 @@
 # Epic: fallback.ts Extraction
 
-**Status:** Draft
+**Status:** Partial (2 of 4 sub-specs done)
 **Epic SP:** 8 (broken into 4 sub-specs ≤5 SP each)
 **Priority:** P0
 **Parent file:** `specs/lint-complexity-reduction/fallback-extraction.spec.md`
@@ -10,12 +10,12 @@
 
 ## Sub-specs
 
-| # | Sub-spec | SP | File |
-|---|----------|----|------|
-| 1 | Error classifier extraction | 2 | `epics/fallback-extraction--error-classifier.md` |
-| 2 | Credential selector extraction | 2 | `epics/fallback-extraction--credential-selector.md` |
-| 3 | Response handler + orchestrator | 3 | `epics/fallback-extraction--response-handler-orchestrator.md` |
-| 4 | Early return refactor + strategy delegation | 3 | `epics/fallback-extraction--early-return-strategy.md` |
+| # | Sub-spec | SP | Status | File |
+|---|----------|----|--------|------|
+| 1 | Error classifier extraction | 2 | ✅ Done | `epics/fallback-extraction--error-classifier.md` |
+| 2 | Credential selector extraction | 2 | ✅ Done | `epics/fallback-extraction--credential-selector.md` |
+| 3 | Response handler + orchestrator | 3 | ⬜ Not started | `epics/fallback-extraction--response-handler-orchestrator.md` |
+| 4 | Early return refactor + strategy delegation | 3 | ⬜ Not started | `epics/fallback-extraction--early-return-strategy.md` |
 
 ## Execution order
 1 → 2 → 3 → 4 (each sub-spec builds on the previous)

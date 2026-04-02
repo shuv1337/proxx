@@ -5053,8 +5053,8 @@ test("/api/v1 root labels planned migration targets separately from implemented 
       const payload: any = response.json();
       assert.equal(payload.migration.legacyPrefix, "/api/ui");
       assert.equal(payload.migration.targetPrefix, "/api/v1");
-      assert.equal(payload.summary.planned, 1);
-      assert.equal(payload.summary.implemented, 7);
+      assert.equal(payload.summary.planned, 2);
+      assert.equal(payload.summary.implemented, 6);
       assert.equal(payload.endpoints.sessions.path, "/api/v1/sessions");
       assert.equal(payload.endpoints.sessions.legacyPath, "/api/ui/sessions");
       assert.equal(payload.endpoints.sessions.status, "implemented");
@@ -5063,7 +5063,7 @@ test("/api/v1 root labels planned migration targets separately from implemented 
       assert.equal(payload.endpoints.hosts.status, "implemented");
       assert.equal(payload.endpoints.events.status, "implemented");
       assert.equal(payload.endpoints.observability.status, "implemented");
-      assert.equal(payload.endpoints.mcp.status, "implemented");
+      assert.equal(payload.endpoints.mcp.status, "planned");
       assert.equal(payload.documentation.path, "/api/v1/openapi.json");
       assert.equal(payload.documentation.status, "implemented");
     },
