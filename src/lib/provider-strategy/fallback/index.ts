@@ -28,3 +28,12 @@ export {
 } from "./credential-selector.js";
 
 export type { PreferredAffinity } from "./credential-selector.js";
+
+export type { FallbackCandidate, FallbackDeps, FallbackKeyPool } from "./types.js";
+
+export {
+  clampRouteQuality,
+  createAccumulator,
+  emptyResult,
+  successResult,
+} from "./types.js";

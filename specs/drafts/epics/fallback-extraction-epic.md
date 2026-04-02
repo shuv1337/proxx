@@ -14,8 +14,8 @@
 |---|----------|----|--------|------|
 | 1 | Error classifier extraction | 2 | ✅ Done | `epics/fallback-extraction--error-classifier.md` |
 | 2 | Credential selector extraction | 2 | ✅ Done | `epics/fallback-extraction--credential-selector.md` |
-| 3 | Response handler + orchestrator | 3 | ⬜ Not started | `epics/fallback-extraction--response-handler-orchestrator.md` |
-| 4 | Early return refactor + strategy delegation | 3 | ⬜ Not started | `epics/fallback-extraction--early-return-strategy.md` |
+| 3 | Response handler + orchestrator types | 3 | ✅ Done | `epics/fallback-extraction--response-handler-orchestrator.md` |
+| 4 | Early return refactor + strategy delegation | 3 | ⬜ Deferred | `epics/fallback-extraction--early-return-strategy.md` |
 
 ## Execution order
 1 → 2 → 3 → 4 (each sub-spec builds on the previous)

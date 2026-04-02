@@ -55,6 +55,7 @@ import {
   reorderCandidatesForAffinities,
 } from "./credential-selector.js";
 import { requestyModelProvider } from "../../model-family.js";
+import { clampRouteQuality, createAccumulator, type FallbackCandidate, type FallbackDeps, type FallbackKeyPool } from "./types.js";
 
 function shouldUseOpenAiCodexHeaderProfile(
   providerId: string,
@@ -65,11 +66,6 @@ function shouldUseOpenAiCodexHeaderProfile(
 }
 
 const MAX_STICKY_TRANSPORT_FAILURE_CANDIDATES = 4;
-
-function clampRouteQuality(latencyMs: number): number {
-  const clampedLatency = Math.min(Math.max(latencyMs, 250), 30_000);
-  return Math.max(0.05, 1 - ((clampedLatency - 250) / (30_000 - 250)));
-}
 
 function requestyModelPrefix(model: string): string {
   return requestyModelProvider(model);

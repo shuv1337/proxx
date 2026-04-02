@@ -2,8 +2,9 @@
 
 **Epic:** `fallback-extraction-epic.md`
 **SP:** 3
+**Status:** ⬜ Deferred (requires live upstream testing)
 **Priority:** P0
-**Depends on:** `fallback-extraction--response-handler-orchestrator.md`
+**Depends on:** `fallback-extraction--response-handler-orchestrator.md` ✅
 
 ## Scope
 Refactor the deeply nested conditionals in `executeProviderFallback` into early-return patterns, and move provider-specific error handling into strategy implementations.

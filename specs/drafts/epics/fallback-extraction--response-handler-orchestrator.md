@@ -2,8 +2,9 @@
 
 **Epic:** `fallback-extraction-epic.md`
 **SP:** 3
+**Status:** ✅ Done (types/foundation)
 **Priority:** P0
-**Depends on:** `fallback-extraction--credential-selector.md`
+**Depends on:** `fallback-extraction--credential-selector.md` ✅
 
 ## Scope
 Extract the response handling (stream passthrough, JSON handling, error accumulation) and the main candidate loop into two new modules.
