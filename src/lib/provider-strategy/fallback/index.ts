@@ -37,3 +37,7 @@ export {
   emptyResult,
   successResult,
 } from "./types.js";
+
+export { buildFallbackCandidates } from "./orchestrator.js";
+
+export type { BuildCandidatesResult } from "./orchestrator.js";

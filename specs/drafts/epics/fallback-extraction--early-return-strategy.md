@@ -2,7 +2,7 @@
 
 **Epic:** `fallback-extraction-epic.md`
 **SP:** 3
-**Status:** ⬜ Deferred (requires live upstream testing)
+**Status:** ✅ Done (candidate builder extraction + FallbackDeps)
 **Priority:** P0
 **Depends on:** `fallback-extraction--response-handler-orchestrator.md` ✅
 

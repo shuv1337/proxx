@@ -55,7 +55,8 @@ import {
   reorderCandidatesForAffinities,
 } from "./credential-selector.js";
 import { requestyModelProvider } from "../../model-family.js";
-import { clampRouteQuality, createAccumulator, type FallbackCandidate, type FallbackDeps, type FallbackKeyPool } from "./types.js";
+import { buildFallbackCandidates } from "./orchestrator.js";
+import { clampRouteQuality, createAccumulator, emptyResult, type FallbackCandidate, type FallbackDeps, type FallbackKeyPool } from "./types.js";
 
 function shouldUseOpenAiCodexHeaderProfile(
   providerId: string,
@@ -69,22 +70,6 @@ const MAX_STICKY_TRANSPORT_FAILURE_CANDIDATES = 4;
 
 function requestyModelPrefix(model: string): string {
   return requestyModelProvider(model);
-}
-
-function resolveForcedCredentialSelection(context: StrategyRequestContext): {
-  readonly providerId?: string;
-  readonly accountId?: string;
-} {
-  if (context.requestAuth?.kind !== "legacy_admin") {
-    return {};
-  }
-
-  const providerId = readHeaderValue(context.clientHeaders, "x-open-hax-forced-provider")?.trim().toLowerCase();
-  const accountId = readHeaderValue(context.clientHeaders, "x-open-hax-forced-account-id")?.trim();
-  return {
-    providerId: providerId && providerId.length > 0 ? providerId : undefined,
-    accountId: accountId && accountId.length > 0 ? accountId : undefined,
-  };
 }
 
 export async function executeProviderRoutingPlan(
@@ -111,114 +96,18 @@ export async function executeProviderRoutingPlan(
   eventStore?: EventStore,
   quotaMonitor?: QuotaMonitor,
 ): Promise<ProviderFallbackExecutionResult> {
-  const accumulator: FallbackAccumulator = {
-    sawRateLimit: false,
-    sawRequestError: false,
-    sawUpstreamServerError: false,
-    sawUpstreamInvalidRequest: false,
-    sawModelNotFound: false,
-    sawModelNotSupportedForAccount: false,
-    attempts: 0,
+  const accumulator = createAccumulator();
+
+  const deps: FallbackDeps = {
+    strategy, reply, requestLogStore, promptAffinityStore, providerRoutePheromoneStore,
+    keyPool, providerRoutes, context, payload, promptCacheKey, refreshExpiredToken,
+    policy, healthStore, eventStore, quotaMonitor,
   };
 
-  const candidatesByProvider: Record<string, Array<{ readonly providerId: string; readonly baseUrl: string; readonly account: ProviderCredential }>> = {};
-  const forcedCredentialSelection = resolveForcedCredentialSelection(context);
-
-  for (const route of providerRoutes) {
-    if (forcedCredentialSelection.providerId && route.providerId !== forcedCredentialSelection.providerId) {
-      continue;
-    }
-
-    let routeAccounts: ProviderCredential[];
-    try {
-      const rawAccounts = await keyPool.getRequestOrder(route.providerId);
-      routeAccounts = policy
-        ? providerAccountsForRequestWithPolicy(policy, rawAccounts, route.providerId, context.routedModel, {
-            openAiPrefixed: context.openAiPrefixed,
-            localOllama: context.localOllama,
-            explicitOllama: context.explicitOllama,
-          }, healthStore)
-        : providerAccountsForRequest(rawAccounts, route.providerId, context.routedModel);
-    } catch {
-      continue;
-    }
-
-    // Skip accounts the quota monitor already knows are exhausted (pre-flight check).
-    if (quotaMonitor?.tracksProvider(route.providerId)) {
-      routeAccounts = routeAccounts.filter((account) => !quotaMonitor.isAccountExhausted(account.accountId));
-    }
-
-    routeAccounts = reorderAccountsForLatency(requestLogStore, route.providerId, routeAccounts, context.routedModel, strategy.mode);
-
-    if (forcedCredentialSelection.accountId) {
-      routeAccounts = routeAccounts.filter((account) => account.accountId === forcedCredentialSelection.accountId);
-    }
-
-    const routeCandidates = routeAccounts.map((account) => ({
-      providerId: route.providerId,
-      baseUrl: route.baseUrl,
-      account,
-    }));
-
-    if (routeCandidates.length > 0) {
-      candidatesByProvider[route.providerId] = routeCandidates;
-    }
-  }
-
-  const affinityRecord = promptCacheKey
-    ? await promptAffinityStore.get(promptCacheKey)
-    : undefined;
-  const preferredAffinity = affinityRecord
-    ? { providerId: affinityRecord.providerId, accountId: affinityRecord.accountId }
-    : undefined;
-  const provisionalAffinity = affinityRecord?.provisionalProviderId && affinityRecord?.provisionalAccountId
-    ? { providerId: affinityRecord.provisionalProviderId, accountId: affinityRecord.provisionalAccountId }
-    : undefined;
-
-  const allCandidates = providerRoutes.flatMap((route) => candidatesByProvider[route.providerId] ?? []);
-
-  const providerIndex = new Map(providerRoutes.map((route, index) => [route.providerId, index] as const));
-
-  const sortedCandidates = [...allCandidates].sort((left, right) => {
-    const idxLeft = providerIndex.get(left.providerId) ?? Number.MAX_SAFE_INTEGER;
-    const idxRight = providerIndex.get(right.providerId) ?? Number.MAX_SAFE_INTEGER;
-
-    // Respect provider ordering first (already policy-ordered), with an escape hatch
-    // for significant TTFT differences.
-    if (idxLeft !== idxRight) {
-      const perfLeft = requestLogStore.getPerfSummary(left.providerId, left.account.accountId, context.routedModel, strategy.mode);
-      const perfRight = requestLogStore.getPerfSummary(right.providerId, right.account.accountId, context.routedModel, strategy.mode);
-
-      const ttftLeft = perfLeft?.ewmaTtftMs;
-      const ttftRight = perfRight?.ewmaTtftMs;
-      if (
-        typeof ttftLeft === "number" && Number.isFinite(ttftLeft)
-        && typeof ttftRight === "number" && Number.isFinite(ttftRight)
-      ) {
-        const ttftDelta = Math.abs(ttftLeft - ttftRight);
-        if (ttftDelta > 120) {
-          return ttftLeft - ttftRight;
-        }
-      }
-
-      return idxLeft - idxRight;
-    }
-
-    // Within a provider, preserve upstream ordering (policy + account ordering + latency window).
-    return 0;
-  });
-
-  const candidates = reorderCandidatesForAffinities(
-    sortedCandidates,
-    [preferredAffinity, provisionalAffinity].filter((value): value is { readonly providerId: string; readonly accountId: string } => Boolean(value)),
-  );
+  const { candidates, preferredAffinity, provisionalAffinity } = await buildFallbackCandidates(deps);
 
   if (candidates.length === 0) {
-    return {
-      handled: false,
-      candidateCount: 0,
-      summary: accumulator
-    };
+    return emptyResult(0);
   }
 
   let preferredReassignmentAllowed = preferredAffinity === undefined || candidates.every(
