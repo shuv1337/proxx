@@ -47,7 +47,7 @@ import { PromptAffinityStore } from "./lib/prompt-affinity-store.js";
 import { ProviderRoutePheromoneStore } from "./lib/provider-route-pheromone-store.js";
 import { ProxySettingsStore } from "./lib/proxy-settings-store.js";
 import { QuotaMonitor } from "./lib/quota-monitor.js";
-import { registerUiRoutes } from "./lib/ui-routes.js";
+import { registerWebSocketRoutes } from "./routes/api/ui/ws.js";
 import { registerApiV1Routes } from "./routes/api/v1/index.js";
 import { modelIdsToNativeTags } from "./lib/ollama-native.js";
 import { createSqlConnection, closeConnection, type Sql } from "./lib/db/index.js";
@@ -788,7 +788,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   registerEmbeddingsRoutes(deps, app);
   registerNativeOllamaRoutes(deps, app);
 
-  const uiBridgeRelay = await registerUiRoutes(app, {
+  const { bridgeRelay: wsBridgeRelay } = await registerWebSocketRoutes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -800,11 +800,10 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     authPersistence: sqlAuthPersistence,
     proxySettingsStore,
     eventStore,
-    refreshOpenAiOauthAccounts,
   });
 
-  bridgeRelay = uiBridgeRelay;
-  (deps as { bridgeRelay: FederationBridgeRelay | undefined }).bridgeRelay = uiBridgeRelay;
+  bridgeRelay = wsBridgeRelay;
+  (deps as { bridgeRelay: FederationBridgeRelay | undefined }).bridgeRelay = wsBridgeRelay;
 
   await registerApiV1Routes(app, {
     config,
@@ -819,7 +818,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     proxySettingsStore,
     eventStore,
     refreshOpenAiOauthAccounts,
-    bridgeRelay: uiBridgeRelay,
+    bridgeRelay: wsBridgeRelay,
   });
 
   app.get("/api/tags", async (_request, reply) => {

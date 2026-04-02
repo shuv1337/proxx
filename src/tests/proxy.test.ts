@@ -1455,7 +1455,7 @@ test("records z.ai chat-completions usage in request logs", { concurrency: false
 
       const logsResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?providerId=zai&limit=1"
+        url: "/api/v1/request-logs?providerId=zai&limit=1"
       });
       assert.equal(logsResponse.statusCode, 200);
 
@@ -1714,7 +1714,7 @@ test("persists request logs with usage counts for dashboard surfaces", async () 
 
       const overviewResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview",
+        url: "/api/v1/dashboard/overview",
       });
       assert.equal(overviewResponse.statusCode, 200);
       const overviewPayload: unknown = overviewResponse.json();
@@ -1727,7 +1727,7 @@ test("persists request logs with usage counts for dashboard surfaces", async () 
 
       const overviewWeeklyResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview?window=weekly",
+        url: "/api/v1/dashboard/overview?window=weekly",
       });
       assert.equal(overviewWeeklyResponse.statusCode, 200);
       const weeklyPayload: unknown = overviewWeeklyResponse.json();
@@ -1884,7 +1884,7 @@ test("fetches live OpenAI Codex quota windows and persists refreshed OAuth token
       async ({ app, tempDir }) => {
         const response = await app.inject({
           method: "GET",
-          url: "/api/ui/credentials/openai/quota",
+          url: "/api/v1/credentials/openai/quota",
         });
 
         assert.equal(response.statusCode, 200);
@@ -2011,7 +2011,7 @@ test("probes an OpenAI account with a minimal hello request", async () => {
       async ({ app }) => {
         const response = await app.inject({
           method: "POST",
-          url: "/api/ui/credentials/openai/probe",
+          url: "/api/v1/credentials/openai/probe",
           payload: {
             accountId: "openai-probe-a",
           },
@@ -4370,7 +4370,7 @@ test("applies global fast mode to responses requests through proxy settings", as
     async ({ app }) => {
       const settingsResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           "content-type": "application/json"
         },
@@ -4401,7 +4401,7 @@ test("applies global fast mode to responses requests through proxy settings", as
 
       const requestLogsPayload = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?limit=1",
+        url: "/api/v1/request-logs?limit=1",
       });
       assert.equal(requestLogsPayload.statusCode, 200);
       const requestLogsBody: unknown = requestLogsPayload.json();
@@ -4413,7 +4413,7 @@ test("applies global fast mode to responses requests through proxy settings", as
 
       const overviewResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview",
+        url: "/api/v1/dashboard/overview",
       });
       assert.equal(overviewResponse.statusCode, 200);
       const overviewPayload: unknown = overviewResponse.json();
@@ -4454,7 +4454,7 @@ test("request-level service tier overrides global fast mode", async () => {
     async ({ app }) => {
       await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           "content-type": "application/json"
         },
@@ -4483,7 +4483,7 @@ test("request-level service tier overrides global fast mode", async () => {
 
       const requestLogsPayload = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?limit=1",
+        url: "/api/v1/request-logs?limit=1",
       });
       assert.equal(requestLogsPayload.statusCode, 200);
       const requestLogsBody: unknown = requestLogsPayload.json();
@@ -4495,7 +4495,7 @@ test("request-level service tier overrides global fast mode", async () => {
 
       const overviewResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview",
+        url: "/api/v1/dashboard/overview",
       });
       assert.equal(overviewResponse.statusCode, 200);
       const overviewPayload: unknown = overviewResponse.json();
@@ -4537,7 +4537,7 @@ test("tenant requests per minute quota blocks excess requests", async () => {
     async ({ app }) => {
       const settingsResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           authorization: "Bearer tenant-admin-token",
           "content-type": "application/json",
@@ -4614,7 +4614,7 @@ test("tenant allowedProviderIds blocks disallowed upstream providers", async () 
     async ({ app }) => {
       const settingsResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           authorization: "Bearer tenant-admin-token",
           "content-type": "application/json",
@@ -4659,7 +4659,7 @@ test("tenant disabledProviderIds blocks local ollama usage", async () => {
     async ({ app }) => {
       const settingsResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           authorization: "Bearer tenant-admin-token",
           "content-type": "application/json",
@@ -4904,7 +4904,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview?window=weekly&sort=tokens",
+        url: "/api/v1/dashboard/overview?window=weekly&sort=tokens",
       });
 
       assert.equal(response.statusCode, 200);
@@ -4923,7 +4923,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
   );
 });
 
-test("/api/ui/me exposes resolved auth context for legacy admin token", async () => {
+test("/api/v1/me exposes resolved auth context for legacy admin token", async () => {
   await withProxyApp(
     {
       keys: ["key-a"],
@@ -4937,7 +4937,7 @@ test("/api/ui/me exposes resolved auth context for legacy admin token", async ()
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/me",
+        url: "/api/v1/me",
         headers: {
           authorization: "Bearer ui-token",
         },
@@ -5175,7 +5175,7 @@ test("provider-model analytics summarizes global models, providers, and provider
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/analytics/provider-model?window=weekly&sort=tokens",
+        url: "/api/v1/analytics/provider-model?window=weekly&sort=tokens",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5293,7 +5293,7 @@ test("dashboard overview scopes usage to the requested tenant", async () => {
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview?window=weekly&tenantId=acme",
+        url: "/api/v1/dashboard/overview?window=weekly&tenantId=acme",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5400,7 +5400,7 @@ test("provider-model analytics scopes rollups to the requested tenant", async ()
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/analytics/provider-model?window=weekly&tenantId=acme",
+        url: "/api/v1/analytics/provider-model?window=weekly&tenantId=acme",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5500,7 +5500,7 @@ test("provider-model analytics excludes failed prompt-cache attempts from cache-
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/analytics/provider-model?window=daily",
+        url: "/api/v1/analytics/provider-model?window=daily",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5598,7 +5598,7 @@ test("dashboard overview excludes failed prompt-cache attempts from cache-hit su
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview?window=daily",
+        url: "/api/v1/dashboard/overview?window=daily",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5668,7 +5668,7 @@ test("does not tag non-responses requests with a service tier", async () => {
 
       const requestLogsPayload = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?limit=1",
+        url: "/api/v1/request-logs?limit=1",
       });
       assert.equal(requestLogsPayload.statusCode, 200);
       const requestLogsBody: unknown = requestLogsPayload.json();
@@ -7385,7 +7385,7 @@ test("records token usage from codex SSE responses with missing content-type (re
 
       const logsResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?limit=1",
+        url: "/api/v1/request-logs?limit=1",
       });
 
       assert.equal(logsResponse.statusCode, 200);
@@ -7448,7 +7448,7 @@ test("extracts cached prompt tokens from messages usage cache_read_input_tokens"
 
       const logsResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?providerId=vivgrid&limit=1",
+        url: "/api/v1/request-logs?providerId=vivgrid&limit=1",
       });
 
       assert.equal(logsResponse.statusCode, 200);
@@ -8157,7 +8157,7 @@ test("records ollama token usage in request logs", async () => {
 
       const logsResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?providerId=ollama&limit=1"
+        url: "/api/v1/request-logs?providerId=ollama&limit=1"
       });
       assert.equal(logsResponse.statusCode, 200);
 
@@ -10645,7 +10645,7 @@ test("persists stable prompt cache keys on sessions and exposes them via UI API"
     async ({ app }) => {
       const createResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/sessions",
+        url: "/api/v1/sessions",
         headers: {
           "content-type": "application/json"
         },
@@ -10665,7 +10665,7 @@ test("persists stable prompt cache keys on sessions and exposes them via UI API"
       assert.ok(sessionId.length > 0);
       const cacheKeyResponse = await app.inject({
         method: "GET",
-        url: `/api/ui/sessions/${sessionId}/cache-key`
+        url: `/api/v1/sessions/${sessionId}/cache-key`
       });
 
       assert.equal(cacheKeyResponse.statusCode, 200);
@@ -10675,7 +10675,7 @@ test("persists stable prompt cache keys on sessions and exposes them via UI API"
 
       const getSessionResponse = await app.inject({
         method: "GET",
-        url: `/api/ui/sessions/${sessionId}`
+        url: `/api/v1/sessions/${sessionId}`
       });
       const getSessionPayload: unknown = getSessionResponse.json();
       assert.ok(isRecord(getSessionPayload));
@@ -10700,7 +10700,7 @@ test("session UI routes support append, fork, and search after extraction from u
     async ({ app }) => {
       const createResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/sessions",
+        url: "/api/v1/sessions",
         headers: {
           "content-type": "application/json"
         },
@@ -10718,7 +10718,7 @@ test("session UI routes support append, fork, and search after extraction from u
 
       const appendResponse = await app.inject({
         method: "POST",
-        url: `/api/ui/sessions/${sessionId}/messages`,
+        url: `/api/v1/sessions/${sessionId}/messages`,
         headers: {
           "content-type": "application/json"
         },
@@ -10737,7 +10737,7 @@ test("session UI routes support append, fork, and search after extraction from u
 
       const forkResponse = await app.inject({
         method: "POST",
-        url: `/api/ui/sessions/${sessionId}/fork`,
+        url: `/api/v1/sessions/${sessionId}/fork`,
         headers: {
           "content-type": "application/json"
         },
@@ -10754,7 +10754,7 @@ test("session UI routes support append, fork, and search after extraction from u
 
       const searchResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/sessions/search",
+        url: "/api/v1/sessions/search",
         headers: {
           "content-type": "application/json"
         },
@@ -10968,7 +10968,7 @@ test("credential summary route works after extraction from ui-routes monolith", 
       async ({ app }) => {
         const hiddenResponse = await app.inject({
           method: "GET",
-          url: "/api/ui/credentials"
+          url: "/api/v1/credentials"
         });
 
         assert.equal(hiddenResponse.statusCode, 200);
@@ -10986,7 +10986,7 @@ test("credential summary route works after extraction from ui-routes monolith", 
 
         const revealResponse = await app.inject({
           method: "GET",
-          url: "/api/ui/credentials?reveal=1"
+          url: "/api/v1/credentials?reveal=1"
         });
 
         assert.equal(revealResponse.statusCode, 200);
@@ -11333,7 +11333,7 @@ test("federation self route stays wired after extraction from ui-routes monolith
       async ({ app }) => {
         const response = await app.inject({
           method: "GET",
-          url: "/api/ui/federation/self",
+          url: "/api/v1/federation/self",
           headers: {
             authorization: "Bearer ui-token"
           }
@@ -11432,7 +11432,7 @@ test("federation peer routes stay wired after extraction and report missing stor
     async ({ app }) => {
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/federation/peers?ownerSubject=owner-1",
+        url: "/api/v1/federation/peers?ownerSubject=owner-1",
         headers: {
           authorization: "Bearer ui-token"
         }
@@ -11445,7 +11445,7 @@ test("federation peer routes stay wired after extraction and report missing stor
 
       const createResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/federation/peers",
+        url: "/api/v1/federation/peers",
         headers: {
           authorization: "Bearer ui-token",
           "content-type": "application/json"
@@ -11572,7 +11572,7 @@ test("federation diff-events route stays wired after extraction and reports miss
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/federation/diff-events?ownerSubject=owner-1&afterSeq=5&limit=2",
+        url: "/api/v1/federation/diff-events?ownerSubject=owner-1&afterSeq=5&limit=2",
         headers: {
           authorization: "Bearer ui-token"
         }
@@ -11602,7 +11602,7 @@ test("federation accounts route stays wired after extraction and reports missing
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/federation/accounts?ownerSubject=owner-1",
+        url: "/api/v1/federation/accounts?ownerSubject=owner-1",
         headers: {
           authorization: "Bearer ui-token"
         }
@@ -11632,7 +11632,7 @@ test("federation projected-account import route stays wired after extraction and
     async ({ app }) => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/ui/federation/projected-accounts/import",
+        url: "/api/v1/federation/projected-accounts/import",
         headers: {
           authorization: "Bearer ui-token",
           "content-type": "application/json"
@@ -11673,7 +11673,7 @@ test("federation projected-account imported route stays wired after extraction a
     async ({ app }) => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/ui/federation/projected-accounts/imported",
+        url: "/api/v1/federation/projected-accounts/imported",
         headers: {
           authorization: "Bearer ui-token",
           "content-type": "application/json"

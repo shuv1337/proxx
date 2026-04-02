@@ -19,7 +19,8 @@ import { KeyPool } from "../lib/key-pool.js";
 import { ProxySettingsStore } from "../lib/proxy-settings-store.js";
 import { RequestLogStore } from "../lib/request-log-store.js";
 import { BRIDGE_PROTOCOL_VERSION } from "../lib/federation/bridge-protocol.js";
-import { registerUiRoutes } from "../lib/ui-routes.js";
+import { registerApiV1Routes } from "../routes/api/v1/index.js";
+import { registerWebSocketRoutes } from "../routes/api/ui/ws.js";
 
 interface BridgeTestContext {
   readonly app: FastifyInstance;
@@ -284,7 +285,16 @@ async function withTenantScopedBridgeUiApp(
     resolveUiSession: async (subject: string) => sessions.get(subject),
   } as Pick<SqlCredentialStore, "resolveTenantApiKey" | "resolveUiSession"> as SqlCredentialStore;
 
-  await registerUiRoutes(app, {
+  await registerApiV1Routes(app, {
+    config,
+    keyPool,
+    requestLogStore,
+    credentialStore,
+    sqlCredentialStore,
+    authPersistence,
+    proxySettingsStore,
+  });
+  await registerWebSocketRoutes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -301,7 +311,7 @@ async function withTenantScopedBridgeUiApp(
   }
 
   const baseUrl = `http://127.0.0.1:${appAddress.port}`;
-  const wsUrl = `ws://127.0.0.1:${appAddress.port}/api/ui/federation/bridge/ws`;
+  const wsUrl = `ws://127.0.0.1:${appAddress.port}/api/v1/federation/bridge/ws`;
 
   try {
     await fn({ app, upstream, tempDir, baseUrl, wsUrl });
