@@ -1,27 +1,37 @@
 # Sub-spec: OpenAPI ownership + ui-routes.ts removal
 
 **Epic:** `contract-deprecation-epic.md`
-**SP:** 2
+**Epic SP:** 4 (broken into 2 sub-specs ≤3 SP each)
 **Priority:** P0
-**Status:** ⬜ Blocked (test migration needed)
+**Status:** Partial (deprecation headers done, removal blocked)
 
-## Current state
-- Frontend migrated to `/api/v1/*` ✅
-- Deprecation headers live ✅
-- `ui-routes.ts` is a 62-line thin barrel (no unique business logic) ✅
-- Tests still import `registerUiRoutes` directly — needs migration to `registerApiV1Routes`
-- Parity tests not yet written
+## What's done
+- ✅ Frontend migrated to `/api/v1/*`
+- ✅ Deprecation headers live
+- ✅ `ui-routes.ts` is a 62-line thin barrel
 
-## Remaining work
-1. Migrate test imports from `registerUiRoutes` to `registerApiV1Routes` (or equivalent v1 registration)
-2. Add parity test pairs confirming `/api/ui/*` and `/api/v1/*` return identical responses
-3. Remove `registerUiRoutes` call from `app.ts`
-4. Delete `src/lib/ui-routes.ts`
-5. Remove `/api/ui/*` route registrations from all route modules
+## Remaining (broken into sub-tasks)
 
-## Blocked by
-- Test migration (test files import `registerUiRoutes` for route setup)
-- Parity test coverage
+| # | Task | SP | Status |
+|---|------|----|--------|
+| 1 | Migrate 2 test files from `registerUiRoutes` to `registerApiV1Routes` | 2 | ⬜ |
+| 2 | Remove `registerUiRoutes` from app.ts + delete `ui-routes.ts` | 2 | ⬜ blocked by #1 |
+
+### Task 1: Test migration (2 SP)
+Files to migrate:
+- `src/tests/tenant-provider-policy-routes.test.ts` — 9 calls to `registerUiRoutes`, 11 test URLs use `/api/ui/*`
+- `src/tests/federation-bridge-relay.test.ts` — 2 calls to `registerUiRoutes`
+
+Replace: `import { registerUiRoutes }` → `import { registerApiV1Routes }` (or equivalent)
+Replace: `/api/ui/` URLs → `/api/v1/` equivalents
+The route registration functions accept a prefix-aware deps object, so the URL change is the primary task.
+
+### Task 2: Remove legacy layer (2 SP)
+After tests pass with `/api/v1/*`:
+1. Remove `registerUiRoutes` call from `app.ts`
+2. Delete `src/lib/ui-routes.ts`
+3. Remove `LEGACY_*_ROUTE_PREFIX` constants from route modules
+4. Remove `/api/ui/*` route registrations from route modules
 
 ## Scope
 Final cleanup: make `/api/v1/openapi.json` control-plane-filtered and remove `ui-routes.ts`.

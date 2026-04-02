@@ -19,7 +19,7 @@ import {
 
 import { KeyPool, type ProviderCredential } from "./lib/key-pool.js";
 import { CredentialStore } from "./lib/credential-store.js";
-import { OpenAiOAuthManager, isTerminalOpenAiRefreshError, type OAuthTokens } from "./lib/openai-oauth.js";
+import { OpenAiOAuthManager } from "./lib/openai-oauth.js";
 import {
   factoryCredentialNeedsRefresh,
   parseJwtExpiry,
@@ -61,7 +61,7 @@ import { SqlTenantProviderPolicyStore } from "./lib/db/sql-tenant-provider-polic
 import { SqlAuthPersistence } from "./lib/auth/sql-persistence.js";
 import { seedFromJsonFile, seedFromJsonValue, seedFactoryAuthFromFiles, seedModelsFromFile } from "./lib/db/json-seeder.js";
 import { RuntimeCredentialStore } from "./lib/runtime-credential-store.js";
-import { TokenRefreshManager } from "./lib/token-refresh-manager.js";
+import { createTokenRefreshManager } from "./lib/token-refresh-handlers.js";
 import { DEFAULT_TENANT_ID } from "./lib/tenant-api-key.js";
 import { resolveRequestAuth, type ResolvedRequestAuth } from "./lib/request-auth.js";
 import { createEnvFederationBridgeAgent } from "./lib/federation/bridge-agent-autostart.js";
@@ -285,99 +285,20 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     clientSecret: config.openaiOauthClientSecret,
   });
 
-  const tokenRefreshManager = new TokenRefreshManager(
-    async (credential) => {
-      if (!credential.refreshToken) {
-        return null;
-      }
-
-      // Factory OAuth credentials use WorkOS refresh, not OpenAI OAuth
-      if (credential.providerId === "factory") {
-        return refreshFactoryAccount(credential);
-      }
-
-      app.log.info({ accountId: credential.accountId, providerId: credential.providerId }, "refreshing expired OAuth token");
-
-      let newTokens: OAuthTokens;
-      try {
-        newTokens = await oauthManager.refreshToken(credential.refreshToken);
-      } catch (error) {
-        if (isTerminalOpenAiRefreshError(error)) {
-          const disabledCredential: ProviderCredential = {
-            ...credential,
-            refreshToken: undefined,
-          };
-
-          keyPool.updateAccountCredential(credential.providerId, credential, disabledCredential);
-          if (typeof credential.expiresAt === "number" && credential.expiresAt <= Date.now()) {
-            keyPool.markRateLimited(disabledCredential, 24 * 60 * 60 * 1000);
-          }
-
-          await runtimeCredentialStore.upsertOAuthAccount(
-            credential.providerId,
-            disabledCredential.accountId,
-            disabledCredential.token,
-            undefined,
-            disabledCredential.expiresAt,
-            disabledCredential.chatgptAccountId,
-            undefined,
-            undefined,
-            disabledCredential.planType,
-          );
-
-          app.log.warn({
-            accountId: credential.accountId,
-            providerId: credential.providerId,
-            code: error.code,
-            status: error.status,
-          }, "disabled terminally invalid OpenAI refresh token; full reauth required");
-        }
-
-        throw error;
-      }
-
-      const newCredential: ProviderCredential = {
-        providerId: credential.providerId,
-        accountId: newTokens.accountId,
-        token: newTokens.accessToken,
-        authType: "oauth_bearer",
-        chatgptAccountId: newTokens.chatgptAccountId ?? credential.chatgptAccountId,
-        planType: newTokens.planType,
-        refreshToken: newTokens.refreshToken ?? credential.refreshToken,
-        expiresAt: newTokens.expiresAt,
-      };
-
-      keyPool.updateAccountCredential(credential.providerId, credential, newCredential);
-
-      await runtimeCredentialStore.upsertOAuthAccount(
-        credential.providerId,
-        newCredential.accountId,
-        newCredential.token,
-        newCredential.refreshToken,
-        newCredential.expiresAt,
-        newCredential.chatgptAccountId,
-        newTokens.email,
-        newTokens.subject,
-        newTokens.planType,
-      );
-
-      app.log.info({
-        accountId: newCredential.accountId,
-        providerId: newCredential.providerId,
-        expiresAt: newCredential.expiresAt,
-      }, "OAuth token refreshed successfully");
-
-      return newCredential;
-    },
-    app.log,
-    {
+  const tokenRefreshManager = createTokenRefreshManager({
+    keyPool,
+    runtimeCredentialStore,
+    oauthManager,
+    sqlCredentialStore,
+    log: app.log,
+    config: {
       maxConcurrency: config.oauthRefreshMaxConcurrency,
       backgroundIntervalMs: config.oauthRefreshBackgroundIntervalMs,
       expiryBufferMs: 60_000,
       proactiveRefreshWindowMs: config.oauthRefreshProactiveWindowMs,
       maxConsecutiveFailures: 3,
     },
-  );
+  });
 
   async function refreshExpiredOAuthAccount(credential: ProviderCredential): Promise<ProviderCredential | null> {
     return tokenRefreshManager.refresh(credential);
