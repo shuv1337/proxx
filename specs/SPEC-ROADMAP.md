@@ -27,10 +27,12 @@ These block other specs or address live architectural debt that causes drift.
 | 2 | `app-composition-root-slimming.md` | 3 remaining | Partial | app-modularization, all route extraction |
 | 3 | `data-plane-routing-orchestrator.md` | 3 remaining | Partial | Route handler clarity, future routing changes |
 | 4 | `legacy-api-ui-deprecation.md` | 5 | Partial | Cannot remove /api/ui/* until parity confirmed |
-| 5 | `fallback-extraction.spec.md` (lint) | 8 | Draft | Highest-complexity file in the codebase (cognitive 399) |
+| 5 | `fallback-extraction.spec.md` (lint) | 8 → 4 sub-specs | Draft | Highest-complexity file in the codebase (cognitive 399). See Epic below. |
 | 6 | `app-modularization.spec.md` (lint) | 5 | Draft | Was 2337 lines, still ~976; gates all route work |
 
 **P0 subtotal:** ~29 SP remaining
+
+> **Rule:** All specs >5 SP are broken into sub-specs ≤5 SP under an epic. See [Epics](#epics) section below.
 
 ### Rationale
 - **#1** (contract) is the prerequisite for every control-plane slice. It's partial because routes exist but the contract isn't formally locked with parity tests.
@@ -45,7 +47,7 @@ These block other specs or address live architectural debt that causes drift.
 
 | # | Spec | SP | Status | Notes |
 |---|------|----|--------|-------|
-| 7 | `control-plane-slice-federation-v1.md` | 8 | Partial | Federation routes still delegate to `registerFederationUiRoutes` with prefix change only |
+| 7 | `control-plane-slice-federation-v1.md` | 8 → 3 sub-specs | Partial | Federation routes still delegate to `registerFederationUiRoutes`. See Epic below. |
 | 8 | `multitenancy-phase1-default-tenant-auth-schema.md` | 5 | Partial | Default tenant + API keys exist; tenant-scoped settings and membership management are incomplete |
 | 9 | `federation-bridge-ws-v0.md` | 5 | Draft | Bridge relay exists in code but spec isn't formally closed |
 | 10 | `real-federation-peer-diff-and-at-did-auth.md` | 5 | In progress | AT DID auth and diff streams partially implemented |
@@ -92,11 +94,11 @@ These block other specs or address live architectural debt that causes drift.
 
 | # | Spec | SP | Status | Notes |
 |---|------|----|--------|-------|
-| 30 | `proxx-mcp-gateway.md` | 8 | Draft | Unified MCP gateway — large scope |
-| 31 | `proxx-openplanner-integration.md` | 8 | Draft | Session data lake behind proxx |
+| 30 | `proxx-mcp-gateway.md` | 8 → 3 sub-specs | Draft | See Epic below |
+| 31 | `proxx-openplanner-integration.md` | 8 → 3 sub-specs | Draft | See Epic below |
 | 32 | `proxx-graph-surface.md` | 5 | Draft | Myrmex graph crawler API |
 | 33 | `proxx-voxx-integration.md` | 5 | Draft | Voice/audio service proxy |
-| 34 | `openplanner-opencode-lite-and-mcp-tools.md` | 8 | Draft | Postgres-backed opencode-lite |
+| 34 | `openplanner-opencode-lite-and-mcp-tools.md` | 8 → 3 sub-specs | Draft | See Epic below |
 | 35 | `routed-image-analysis-tool.md` | 3 | Draft | Vision classifier + dispatch |
 | 36 | `ussy3-staging-bootstrap-and-github-actions.md` | 3 | Draft | Staging deploy + CI gates |
 
@@ -231,3 +233,45 @@ real-federation-peer-diff-and-at-did-auth
   └── federation-bridge-ws-v0
       └── federated-tenant-provider-share-policies
 ```
+
+---
+
+## Epics
+
+All specs >5 SP are broken into sub-specs ≤5 SP under an epic in `specs/drafts/epics/`.
+
+### Epic: `fallback-extraction` (8 SP → 4 sub-specs, P0)
+| Sub-spec | SP | Depends on |
+|----------|----|------------|
+| `fallback-extraction--error-classifier.md` | 2 | — |
+| `fallback-extraction--credential-selector.md` | 2 | error-classifier |
+| `fallback-extraction--response-handler-orchestrator.md` | 3 | credential-selector |
+| `fallback-extraction--early-return-strategy.md` | 3 | response-handler-orchestrator |
+
+### Epic: `federation-slice` (8 SP → 3 sub-specs, P1)
+| Sub-spec | SP | Depends on |
+|----------|----|------------|
+| `federation-slice--advanced-routes.md` | 3 | control-plane-api-contract-v1 |
+| `federation-slice--bridge-relay-lifecycle.md` | 3 | control-plane-api-contract-v1 |
+| `federation-slice--parity-tests.md` | 2 | advanced-routes, bridge-relay-lifecycle |
+
+### Epic: `mcp-gateway` (8 SP → 3 sub-specs, P3)
+| Sub-spec | SP | Depends on |
+|----------|----|------------|
+| `mcp-gateway--registry-proxy.md` | 5 | — |
+| `mcp-gateway--control-plane-config.md` | 3 | registry-proxy |
+| `mcp-gateway--lifecycle-tools.md` | 3 | control-plane-config |
+
+### Epic: `openplanner-integration` (8 SP → 3 sub-specs, P3)
+| Sub-spec | SP | Depends on |
+|----------|----|------------|
+| `openplanner-integration--proxy-registry.md` | 5 | — |
+| `openplanner-integration--config-lifecycle.md` | 3 | proxy-registry |
+| `openplanner-integration--session-search-migration.md` | 3 | config-lifecycle |
+
+### Epic: `opencode-lite-mcp` (8 SP → 3 sub-specs, P3)
+| Sub-spec | SP | Depends on |
+|----------|----|------------|
+| `opencode-lite-mcp--opencode-lite.md` | 5 | — |
+| `opencode-lite-mcp--tool-discovery.md` | 3 | opencode-lite |
+| `opencode-lite-mcp--agent-loop.md` | 3 | tool-discovery |
