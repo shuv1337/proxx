@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  addAnthropicSetupToken,
   addApiKeyCredential,
   exchangeAnthropicCode,
   getAnthropicCredentialQuota,
@@ -249,6 +250,9 @@ export function CredentialsPage(): JSX.Element {
     code: string;
     submitting: boolean;
   } | null>(null);
+  const [setupTokenValue, setSetupTokenValue] = useState("");
+  const [setupTokenAccountId, setSetupTokenAccountId] = useState("");
+  const [setupTokenSubmitting, setSetupTokenSubmitting] = useState(false);
   const [copiedFieldKey, setCopiedFieldKey] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -683,6 +687,28 @@ export function CredentialsPage(): JSX.Element {
     }
   }, [anthropicCodeFlow, refreshCredentials, loadAnthropicQuota]);
 
+  const submitSetupToken = useCallback(async () => {
+    if (setupTokenValue.trim().length === 0) return;
+    setSetupTokenSubmitting(true);
+    setError(null);
+    setStatus(null);
+    try {
+      const result = await addAnthropicSetupToken(
+        setupTokenValue.trim(),
+        setupTokenAccountId.trim() || undefined,
+      );
+      setSetupTokenValue("");
+      setSetupTokenAccountId("");
+      setStatus(`Claude setup-token added as ${result.accountId}`);
+      void refreshCredentials();
+      void loadAnthropicQuota();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSetupTokenSubmitting(false);
+    }
+  }, [setupTokenValue, setupTokenAccountId, refreshCredentials, loadAnthropicQuota]);
+
   const handleAddFactoryKey = () => {
     setApiKeyProvider("factory");
     setApiKeyAccount("");
@@ -1101,6 +1127,44 @@ export function CredentialsPage(): JSX.Element {
               </div>
             </div>
           )}
+        </div>
+
+        {/* Anthropic Setup-Token Section */}
+        <div style={{ marginTop: 24, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+          <h3 style={{ margin: "0 0 8px", fontSize: 15, fontWeight: 600 }}>Claude Setup Token</h3>
+          <p style={{ margin: "0 0 8px", fontSize: 13, opacity: 0.7 }}>
+            Run <code style={{ background: "var(--bg-muted, rgba(255,255,255,0.08))", padding: "2px 6px", borderRadius: 4, fontSize: 12 }}>claude setup-token</code> on any machine, then paste the token here.
+          </p>
+          <p style={{ margin: "0 0 12px", fontSize: 12, opacity: 0.55, fontStyle: "italic" }}>
+            Some setup tokens may not support quota visibility. Inference will still work.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <input
+              type="password"
+              placeholder="sk-ant-oat01-..."
+              value={setupTokenValue}
+              onChange={(e) => setSetupTokenValue(e.target.value)}
+              style={{ padding: "6px 10px", fontSize: 13, fontFamily: "monospace" }}
+              disabled={setupTokenSubmitting}
+              autoComplete="off"
+            />
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                type="text"
+                placeholder="Account label (optional)"
+                value={setupTokenAccountId}
+                onChange={(e) => setSetupTokenAccountId(e.target.value)}
+                style={{ flex: 1, padding: "6px 10px", fontSize: 13 }}
+                disabled={setupTokenSubmitting}
+              />
+              <button
+                onClick={() => void submitSetupToken()}
+                disabled={setupTokenSubmitting || setupTokenValue.trim().length === 0}
+              >
+                {setupTokenSubmitting ? "Adding…" : "Add setup token"}
+              </button>
+            </div>
+          </div>
         </div>
 
         {status && <p className="status-text">{status}</p>}

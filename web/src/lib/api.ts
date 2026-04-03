@@ -707,6 +707,27 @@ export async function exchangeAnthropicCode(code: string, verifier: string): Pro
   });
 }
 
+export interface AddAnthropicSetupTokenResponse {
+  readonly ok: true;
+  readonly providerId: "anthropic";
+  readonly accountId: string;
+  readonly authType: "oauth_bearer";
+  readonly credentialKind: "setup_token";
+}
+
+export async function addAnthropicSetupToken(
+  token: string,
+  accountId?: string,
+): Promise<AddAnthropicSetupTokenResponse> {
+  return requestJson<AddAnthropicSetupTokenResponse>("/api/ui/credentials/anthropic/setup-token", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ token, accountId }),
+  });
+}
+
 export async function getAnthropicCredentialQuota(accountId?: string): Promise<GenericQuotaOverview> {
   const query = new URLSearchParams();
   if (accountId && accountId.trim().length > 0) {

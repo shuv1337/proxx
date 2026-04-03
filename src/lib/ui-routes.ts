@@ -12,6 +12,13 @@ import { FactoryOAuthManager } from "./factory-oauth.js";
 import { fetchOpenAiQuotaSnapshots } from "./openai-quota.js";
 import { AnthropicOAuthManager } from "./anthropic-oauth.js";
 import { fetchAnthropicQuotaSnapshots } from "./anthropic-quota.js";
+import {
+  generateSetupTokenAccountId,
+  logSetupTokenSaveRejected,
+  logSetupTokenSaved,
+  logSetupTokenValidationFailure,
+  validateAnthropicSetupToken,
+} from "./anthropic-setup-token.js";
 import { RequestLogStore } from "./request-log-store.js";
 import { ChromaSessionIndex } from "./chroma-session-index.js";
 import { SessionStore, type ChatRole } from "./session-store.js";
@@ -1792,6 +1799,58 @@ export async function registerUiRoutes(app: FastifyInstance, deps: UiRouteDepend
       } catch (error) {
         reply.code(502).send({
           error: "anthropic_oauth_start_failed",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+
+    // Paste a Claude setup-token directly
+    app.post<{
+      Body: { readonly token?: string; readonly accountId?: string };
+    }>("/api/ui/credentials/anthropic/setup-token", async (request, reply) => {
+      const rawToken = typeof request.body?.token === "string" ? request.body.token.trim() : "";
+      const validationError = validateAnthropicSetupToken(rawToken);
+      if (validationError) {
+        logSetupTokenValidationFailure(validationError);
+        reply.code(400).send({ error: "invalid_setup_token", detail: validationError });
+        return;
+      }
+
+      const rawAccountId = typeof request.body?.accountId === "string" ? request.body.accountId.trim() : "";
+      const accountId = rawAccountId.length > 0 ? rawAccountId : generateSetupTokenAccountId();
+
+      try {
+        await credentialStore.upsertOAuthAccount(
+          "anthropic",
+          accountId,
+          rawToken,
+          undefined, // no refreshToken
+          undefined, // no expiresAt
+          undefined, // no chatgptAccountId
+          undefined, // no email
+          undefined, // no subject
+          undefined, // no planType
+        );
+        await deps.keyPool.warmup().catch(() => undefined);
+
+        logSetupTokenSaved("anthropic", accountId);
+        app.log.info({ providerId: "anthropic", accountId }, "saved Anthropic setup-token account");
+
+        reply.send({
+          ok: true,
+          providerId: "anthropic",
+          accountId,
+          authType: "oauth_bearer",
+          credentialKind: "setup_token",
+        });
+      } catch (error) {
+        logSetupTokenSaveRejected(error instanceof Error ? error.message : String(error));
+        app.log.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          "failed to save Anthropic setup-token",
+        );
+        reply.code(500).send({
+          error: "setup_token_save_failed",
           detail: error instanceof Error ? error.message : String(error),
         });
       }

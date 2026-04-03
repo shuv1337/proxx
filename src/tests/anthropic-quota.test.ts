@@ -585,3 +585,108 @@ test("missing access token: returns error without crashing", async () => {
   assert.ok(snap.error?.toLowerCase().includes("token"), `error should mention token, got: ${snap.error}`);
   assert.equal(fetchCalled, false, "usage fetch should not be called when token is missing");
 });
+
+// ─── Setup-token specific: no-refresh, no-expiresAt behavior ──────────────────
+
+test("setup-token account (no expiresAt, no refreshToken) skips refresh and proceeds to quota fetch", async () => {
+  const accountId = uniqueAccountId();
+  // Simulate a setup-token account: has a valid token but no refresh metadata
+  const account = makeAccount({
+    id: accountId,
+    secret: "sk-ant-oat01-" + "a".repeat(70), // valid token
+    refreshToken: undefined,
+    expiresAt: undefined,
+    email: undefined,
+    subject: undefined,
+  });
+
+  const store = createMockCredentialStore([account]);
+
+  let refreshCalled = false;
+  let usageCalled = false;
+  const mockFetch = async (input: string | URL | Request): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("/oauth/token")) {
+      refreshCalled = true;
+      return jsonResponse({ access_token: "new-token", refresh_token: "new-refresh", expires_in: 3600 });
+    }
+    if (url.includes("/usage")) {
+      usageCalled = true;
+      return jsonResponse({
+        daily: { used_percent: 15, resets_at: new Date(Date.now() + 86400_000).toISOString() },
+      });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  const result = await fetchAnthropicQuotaSnapshots(store, {
+    fetchFn: mockFetch as typeof fetch,
+  });
+
+  const snap = result.accounts[0]!;
+  assert.equal(snap.status, "ok");
+  assert.equal(refreshCalled, false, "refresh should NOT be called for setup-token account (no expiresAt)");
+  assert.equal(usageCalled, true, "usage fetch should proceed for setup-token account");
+  assert.ok(snap.windows.length > 0, "windows should be populated");
+});
+
+test("403 scope failure produces user-friendly error for setup-token-like account", async () => {
+  const accountId = uniqueAccountId();
+  const account = makeAccount({
+    id: accountId,
+    secret: "sk-ant-oat01-" + "b".repeat(70),
+    refreshToken: undefined,
+    expiresAt: undefined,
+  });
+
+  const store = createMockCredentialStore([account]);
+
+  const mockFetch = async (): Promise<Response> =>
+    new Response(
+      JSON.stringify({ error: { message: "Insufficient scope: user:profile required" } }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+
+  const result = await fetchAnthropicQuotaSnapshots(store, {
+    fetchFn: mockFetch as typeof fetch,
+  });
+
+  const snap = result.accounts[0]!;
+  assert.equal(snap.status, "error");
+  assert.ok(
+    snap.error?.toLowerCase().includes("scope") || snap.error?.toLowerCase().includes("quota unavailable"),
+    `error should mention scope or quota unavailability, got: ${snap.error}`,
+  );
+  // Should NOT trigger backoff
+  assert.equal(snap.backoffUntil, undefined, "403 scope failure should not trigger backoff");
+  // Account should still be in the response (not removed)
+  assert.equal(snap.accountId, accountId);
+});
+
+test("quota fetch for normal browser OAuth accounts remains unchanged", async () => {
+  const accountId = uniqueAccountId();
+  // Normal OAuth account: has refresh token and expiresAt
+  const account = makeAccount({
+    id: accountId,
+    secret: makeJwt({ sub: "normal_user" }),
+    refreshToken: "refresh-tok",
+    expiresAt: Date.now() + 60 * 60 * 1000, // 1 hour in the future, not expired
+    email: "normal@example.com",
+    subject: "normal_user",
+  });
+
+  const store = createMockCredentialStore([account]);
+
+  const mockFetch = async (): Promise<Response> =>
+    jsonResponse({
+      daily: { used_percent: 25, resets_at: new Date(Date.now() + 86400_000).toISOString() },
+    });
+
+  const result = await fetchAnthropicQuotaSnapshots(store, {
+    fetchFn: mockFetch as typeof fetch,
+  });
+
+  const snap = result.accounts[0]!;
+  assert.equal(snap.status, "ok");
+  assert.ok(snap.windows.length > 0, "normal OAuth account should get quota windows");
+});

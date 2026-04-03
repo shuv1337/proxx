@@ -387,6 +387,23 @@ function quotaErrorMessage(responseStatus: number, responseText: string): string
   return trimmed.length > 160 ? `${trimmed.slice(0, 157)}...` : trimmed;
 }
 
+/**
+ * Detect whether a quota error response is likely caused by a missing OAuth scope,
+ * common for Claude setup-token credentials that lack `user:profile` scope.
+ */
+function isProbableScopeError(responseStatus: number, responseText: string): boolean {
+  if (responseStatus !== 403) {
+    return false;
+  }
+  const lower = responseText.toLowerCase();
+  return (
+    lower.includes("scope") ||
+    lower.includes("user:profile") ||
+    lower.includes("permission") ||
+    lower.includes("insufficient")
+  );
+}
+
 // ─── Token refresh ────────────────────────────────────────────────────────────
 
 interface RefreshedAnthropicTokens {
@@ -757,13 +774,26 @@ async function fetchQuotaForAccount(
         };
       }
 
-      const errMessage = quotaErrorMessage(response.status, responseText);
+      const rawErrMessage = quotaErrorMessage(response.status, responseText);
+      const scopeFailure = isProbableScopeError(response.status, responseText);
+      const errMessage = scopeFailure
+        ? "Quota unavailable — this token may lack the required scope. Inference can still work."
+        : rawErrMessage;
+
+      if (scopeFailure) {
+        telemetry.recordLog("warn", "anthropic.quota.scope_failure", {
+          providerId,
+          accountId: account.id,
+          httpStatus: response.status,
+        });
+      }
+
       span.setStatus("error", errMessage);
       span.setAttribute("http.status_code", response.status);
       span.end();
 
       logger?.warn?.(
-        { providerId, accountId: account.id, status: response.status, error: errMessage },
+        { providerId, accountId: account.id, status: response.status, error: errMessage, scopeFailure },
         "Anthropic quota fetch failed",
       );
 
