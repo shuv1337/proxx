@@ -1,6 +1,6 @@
 # Epic: Migrate proxx dashboard frontend to @devel/ui component library
 
-**Status:** Partial (3 of 5 sub-specs done, 2 partial)
+**Status:** Partial (3 of 5 sub-specs done, 2 advanced partials)
 **Epic SP:** 13 (broken into 5 sub-specs ≤5 SP each)
 **Priority:** P2
 **Parent:** `specs/drafts/dashboard-ui-modernization.md`
@@ -16,8 +16,8 @@ The proxx web dashboard (`web/src/`) uses hand-rolled CSS and inline styles acro
 | 1 | Add @devel/ui dependency + ToastProvider + global theme | 2 | ✅ Done | `epics/dashboard-ui-migration--dependency-setup.md` |
 | 2 | Migrate DashboardPage + HostsPage (primitives) | 3 | ✅ Done | `epics/dashboard-ui-migration--dashboard-hosts.md` |
 | 3 | Migrate CredentialsPage (cards, modals, progress) | 5 | ✅ Done | `epics/dashboard-ui-migration--credentials.md` |
-| 4 | Migrate FederationPage + AnalyticsPage (tabs, feed, badges) | 3 | ⬜ Partial (imports added) | `epics/dashboard-ui-migration--federation-analytics.md` |
-| 5 | Migrate ChatPage + remove custom CSS | 3 | ⬜ Partial (imports added) | `epics/dashboard-ui-migration--chat-cleanup.md` |
+| 4 | Migrate FederationPage + AnalyticsPage (tabs, feed, badges) | 3 | ⬜ Partial (inputs/buttons/spinners/badges migrated) | `epics/dashboard-ui-migration--federation-analytics.md` |
+| 5 | Migrate ChatPage + remove custom CSS | 3 | ⬜ Partial (buttons/inputs migrated, full Chat replacement pending) | `epics/dashboard-ui-migration--chat-cleanup.md` |
 
 ## What's done
 - ✅ `@devel/ui-react` and `@devel/ui-tokens` added as dependencies
@@ -26,11 +26,14 @@ The proxx web dashboard (`web/src/`) uses hand-rolled CSS and inline styles acro
 - ✅ HostsPage: status pills → Badge, loading → Spinner
 - ✅ DashboardPage: loading "..." → Spinner, 4 status pill patterns → Badge
 - ✅ CredentialsPage: all 15+ hand-rolled badge patterns → Badge components
-- ✅ FederationPage: provider list badges → Badge
-- ✅ AnalyticsPage + ChatPage: @devel/ui imports added
+- ✅ FederationPage: provider list badges → Badge, toolbar/form inputs → Input, action buttons → Button, peer status → Badge
+- ✅ AnalyticsPage: summary loading states → Spinner, search inputs → Input
+- ✅ ChatPage: session/search/action/send buttons → Button, sidebar search input → Input
+- ✅ ImagesPage: model input → Input, generate → Button, image results → Card, response wait state → Spinner
+- ✅ Frontend smoke harness covers dashboard, hosts, credentials, tools, analytics, federation, chat, and images
 
 ## What remains
-- FederationPage: tab navigation → Tabs component, loading → Spinner
-- AnalyticsPage: status indicators → Badge, loading → Spinner
+- FederationPage: tab navigation → Tabs component (optional enhancement)
+- AnalyticsPage: richer status tokens/cards beyond current spinner/input migration
 - ChatPage: full replacement with @devel/ui Chat component (requires restructuring session management, model selection, streaming)
 - Global CSS cleanup: styles.css from 2267 → <500 lines

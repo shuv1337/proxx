@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Badge, Spinner, Tabs } from "@devel/ui-react";
+import { Badge, Button, Input, Spinner } from "@devel/ui-react";
 import {
   addFederationPeer,
   getFederationAccounts,
@@ -275,7 +275,7 @@ export function FederationPage(): JSX.Element {
       <section className="federation-toolbar panel-sheen">
         <label>
           Owner subject
-          <input
+          <Input
             type="text"
             value={ownerSubject}
             onChange={(event) => setOwnerSubject(event.currentTarget.value)}
@@ -283,15 +283,16 @@ export function FederationPage(): JSX.Element {
           />
         </label>
         <div className="federation-toolbar-actions">
-          <button type="button" onClick={() => void load()} disabled={loading}>
+          <Button type="button" variant="primary" loading={loading} onClick={() => void load()}>
             {loading ? "Refreshing…" : "Refresh"}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="secondary"
             onClick={() => setOwnerSubject(DEFAULT_OWNER_SUBJECT)}
           >
             Default brethren subject
-          </button>
+          </Button>
         </div>
       </section>
 
@@ -408,7 +409,7 @@ export function FederationPage(): JSX.Element {
               <article key={peer.id} className="federation-peer-card">
                 <div className="federation-peer-title-row">
                   <h4>{peer.label}</h4>
-                  <span className={`federation-peer-status federation-peer-status-${peer.status.toLowerCase()}`}>{peer.status}</span>
+                  <Badge variant={peer.status.toLowerCase() === "healthy" ? "success" : peer.status.toLowerCase() === "warning" ? "warning" : "default"}>{peer.status}</Badge>
                 </div>
                 <dl className="federation-kv">
                   <dt>Owner</dt><dd>{peer.ownerSubject}</dd>
@@ -419,9 +420,9 @@ export function FederationPage(): JSX.Element {
                   <dt>Updated</dt><dd>{formatDate(peer.updatedAt)}</dd>
                 </dl>
                 <div className="federation-peer-actions">
-                  <button type="button" onClick={() => void handleSyncPeer(peer)}>
+                  <Button type="button" size="sm" onClick={() => void handleSyncPeer(peer)}>
                     Sync pull
-                  </button>
+                  </Button>
                   <small>{syncStatus[peer.id] ?? "Idle"}</small>
                 </div>
               </article>
@@ -435,7 +436,7 @@ export function FederationPage(): JSX.Element {
         <form className="federation-form" onSubmit={(event) => void handleSubmitPeer(event)}>
           <label>
             Owner credential
-            <input
+            <Input
               type="password"
               value={peerForm.ownerCredential}
               onChange={(event) => setPeerForm((current) => ({ ...current, ownerCredential: event.currentTarget.value }))}
@@ -445,7 +446,7 @@ export function FederationPage(): JSX.Element {
           </label>
           <label>
             Label
-            <input
+            <Input
               type="text"
               value={peerForm.label}
               onChange={(event) => setPeerForm((current) => ({ ...current, label: event.currentTarget.value }))}
@@ -455,7 +456,7 @@ export function FederationPage(): JSX.Element {
           </label>
           <label>
             Base URL
-            <input
+            <Input
               type="url"
               value={peerForm.baseUrl}
               onChange={(event) => setPeerForm((current) => ({ ...current, baseUrl: event.currentTarget.value }))}
@@ -465,7 +466,7 @@ export function FederationPage(): JSX.Element {
           </label>
           <label>
             Control base URL
-            <input
+            <Input
               type="url"
               value={peerForm.controlBaseUrl}
               onChange={(event) => setPeerForm((current) => ({ ...current, controlBaseUrl: event.currentTarget.value }))}
@@ -474,7 +475,7 @@ export function FederationPage(): JSX.Element {
           </label>
           <label>
             Peer DID
-            <input
+            <Input
               type="text"
               value={peerForm.peerDid}
               onChange={(event) => setPeerForm((current) => ({ ...current, peerDid: event.currentTarget.value }))}
@@ -483,7 +484,7 @@ export function FederationPage(): JSX.Element {
           </label>
           <label>
             Auth credential
-            <input
+            <Input
               type="password"
               value={peerForm.authCredential}
               onChange={(event) => setPeerForm((current) => ({ ...current, authCredential: event.currentTarget.value }))}
@@ -491,9 +492,9 @@ export function FederationPage(): JSX.Element {
             />
           </label>
           <div className="federation-form-actions">
-            <button type="submit" disabled={submittingPeer}>
+            <Button type="submit" variant="primary" loading={submittingPeer}>
               {submittingPeer ? "Adding…" : "Add peer"}
-            </button>
+            </Button>
           </div>
         </form>
       </article>

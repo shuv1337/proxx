@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { Badge, Spinner } from "@devel/ui-react";
+import { Badge, Input, Spinner } from "@devel/ui-react";
 import { getProviderModelAnalytics, type AnalyticsRow, type ProviderModelAnalytics } from "../lib/api";
 import { useStoredState } from "../lib/use-stored-state";
 
@@ -212,27 +212,27 @@ export function AnalyticsPage(): JSX.Element {
       <section className="analytics-summary-grid">
         <article className="analytics-stat-card panel-sheen">
           <span>Observed Models</span>
-          <strong>{loading ? "..." : formatCompactNumber(analytics?.models.length ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatCompactNumber(analytics?.models.length ?? 0)}</strong>
           <small>Top model: {topModel?.model ?? "-"}</small>
         </article>
         <article className="analytics-stat-card panel-sheen">
           <span>Observed Providers</span>
-          <strong>{loading ? "..." : formatCompactNumber(analytics?.providers.length ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatCompactNumber(analytics?.providers.length ?? 0)}</strong>
           <small>Top provider: {topProvider?.providerId ?? "-"}</small>
         </article>
         <article className="analytics-stat-card panel-sheen">
           <span>Provider × Model Pairs</span>
-          <strong>{loading ? "..." : formatCompactNumber(analytics?.providerModels.length ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatCompactNumber(analytics?.providerModels.length ?? 0)}</strong>
           <small>Window: {windowValue}</small>
         </article>
         <article className="analytics-stat-card panel-sheen">
           <span>Top Model Suitability</span>
-          <strong>{loading ? "..." : formatMaybeSuitability(topModel?.suitabilityScore ?? null)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatMaybeSuitability(topModel?.suitabilityScore ?? null)}</strong>
           <small>{topModel?.model ?? "-"}</small>
         </article>
         <article className="analytics-stat-card panel-sheen">
           <span>Top Provider Suitability</span>
-          <strong>{loading ? "..." : formatMaybeSuitability(topProvider?.suitabilityScore ?? null)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatMaybeSuitability(topProvider?.suitabilityScore ?? null)}</strong>
           <small>{topProvider?.providerId ?? "-"}</small>
         </article>
       </section>
@@ -289,7 +289,7 @@ export function AnalyticsPage(): JSX.Element {
             <h3>Global Model Stats</h3>
             <p>How each model performs across all observed providers.</p>
           </div>
-          <input
+          <Input
             value={modelSearch}
             onChange={(event) => setModelSearch(event.currentTarget.value)}
             placeholder="Search models…"
@@ -343,7 +343,7 @@ export function AnalyticsPage(): JSX.Element {
             <h3>Global Provider Stats</h3>
             <p>How each provider performs across all observed models.</p>
           </div>
-          <input
+          <Input
             value={providerSearch}
             onChange={(event) => setProviderSearch(event.currentTarget.value)}
             placeholder="Search providers…"

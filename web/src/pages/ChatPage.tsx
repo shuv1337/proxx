@@ -336,18 +336,18 @@ export function ChatPage(): JSX.Element {
       <aside className="chat-sidebar">
         <div className="chat-sidebar-header">
           <h2>Sessions</h2>
-          <button type="button" onClick={() => void createNewSession()}>
+          <Button type="button" size="sm" onClick={() => void createNewSession()}>
             New
-          </button>
+          </Button>
         </div>
 
         <form className="chat-search-form" onSubmit={(event) => void runSearch(event)}>
-          <input
+          <Input
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.currentTarget.value)}
             placeholder="Semantic search history"
           />
-          <button type="submit">Search</button>
+          <Button type="submit" size="sm">Search</Button>
         </form>
 
         {searchResults.length > 0 && (
@@ -407,17 +407,18 @@ export function ChatPage(): JSX.Element {
               ))}
             </select>
             <div className="chat-main-control-buttons">
-              <button
+              <Button
                 type="button"
+                size="sm"
                 onClick={() => void refreshModelOptions().catch((nextError) => {
                   setError(nextError instanceof Error ? nextError.message : String(nextError));
                 })}
               >
                 Refresh models
-              </button>
-              <button type="button" onClick={() => void handleFork()} disabled={!activeSession}>
+              </Button>
+              <Button type="button" size="sm" variant="secondary" onClick={() => void handleFork()} disabled={!activeSession}>
                 Fork latest
-              </button>
+              </Button>
             </div>
           </div>
         </header>
@@ -431,12 +432,12 @@ export function ChatPage(): JSX.Element {
               <header>
                 <strong>{message.role}</strong>
                 <div>
-                  <button type="button" onClick={() => void handleCopy(message)}>
+                  <Button type="button" size="sm" variant="ghost" onClick={() => void handleCopy(message)}>
                     {copiedMessageId === message.id ? "Copied" : "Copy"}
-                  </button>
-                  <button type="button" onClick={() => void handleFork(message.id)}>
+                  </Button>
+                  <Button type="button" size="sm" variant="ghost" onClick={() => void handleFork(message.id)}>
                     Fork here
-                  </button>
+                  </Button>
                 </div>
               </header>
               <p>{message.content}</p>
@@ -463,9 +464,9 @@ export function ChatPage(): JSX.Element {
             placeholder="Send a message..."
             rows={4}
           />
-          <button type="submit" disabled={sending}>
+          <Button type="submit" variant="primary" loading={sending} disabled={sending}>
             {sending ? "Sending..." : "Send"}
-          </button>
+          </Button>
         </form>
 
         {error && <p className="chat-error">{error}</p>}
