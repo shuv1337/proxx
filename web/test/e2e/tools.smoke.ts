@@ -6,6 +6,14 @@ import { chromium } from "playwright";
 const BASE_URL = "http://127.0.0.1:5174";
 const NOW = new Date("2026-04-03T00:00:00Z").toISOString();
 
+type ChatMessage = {
+  readonly id: string;
+  readonly role: "user" | "assistant";
+  readonly content: string;
+  readonly reasoningContent?: string;
+  readonly model?: string;
+};
+
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -51,12 +59,154 @@ async function main(): Promise<void> {
 
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
+  const chatSession = {
+    id: "session-1",
+    title: "Local smoke session",
+    forkedFromSessionId: null,
+    messages: [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: "Welcome to the smoke session.",
+        model: "gpt-5.3-codex",
+      },
+    ] as ChatMessage[],
+  };
 
   await page.route("**/api/v1/settings", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ fastMode: false }),
+    });
+  });
+
+  await page.route("**/api/v1/sessions/search", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ source: "fts", results: [] }),
+    });
+  });
+
+  await page.route("**/api/v1/sessions/*/cache-key", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ promptCacheKey: "smoke-cache-key" }),
+    });
+  });
+
+  await page.route("**/api/v1/sessions/*/messages", async (route) => {
+    const request = route.request();
+    const body = JSON.parse(request.postData() ?? "{}");
+    const nextMessage: ChatMessage = {
+      id: `msg-${chatSession.messages.length + 1}`,
+      role: body.role === "assistant" ? "assistant" : "user",
+      content: typeof body.content === "string" ? body.content : "",
+      reasoningContent: typeof body.reasoningContent === "string" ? body.reasoningContent : undefined,
+      model: typeof body.model === "string" ? body.model : undefined,
+    };
+    chatSession.messages.push(nextMessage);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ message: nextMessage }),
+    });
+  });
+
+  await page.route("**/api/v1/sessions/*/fork", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session: {
+          ...chatSession,
+          id: "session-fork-1",
+          title: "Local smoke session (fork)",
+          forkedFromSessionId: chatSession.id,
+        },
+      }),
+    });
+  });
+
+  await page.route("**/api/v1/sessions", async (route) => {
+    if (route.request().method() === "POST") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ session: chatSession }),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            id: chatSession.id,
+            title: chatSession.title,
+            lastMessagePreview: chatSession.messages.at(-1)?.content ?? "",
+            updatedAt: NOW,
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/api/v1/sessions/session-1", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ session: chatSession }),
+    });
+  });
+
+  await page.route("**/v1/models", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: [
+          { id: "gpt-5.3-codex" },
+          { id: "openai/gpt-5.3-codex" },
+          { id: "ollama/qwen3-vl:2b" },
+          { id: "gpt-image-1" },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/v1/chat/completions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: "Hello from the mocked assistant.",
+              reasoning_content: "Brief reasoning trace.",
+            },
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/v1/images/generations", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: [
+          {
+            url: "https://example.invalid/generated-cat.png",
+          },
+        ],
+      }),
     });
   });
 
@@ -521,6 +671,22 @@ async function main(): Promise<void> {
     await page.getByText("Peer A").waitFor();
     await page.getByRole("heading", { name: /Bridge sessions/i }).waitFor();
     await page.getByRole("heading", { name: /Account knowledge/i }).waitFor();
+
+    await page.getByRole("link", { name: /Chat/i }).click();
+    await page.waitForURL("**/chat");
+    await page.getByRole("heading", { name: /Sessions/i }).waitFor();
+    await page.getByRole("heading", { name: "Local smoke session" }).waitFor();
+    await page.getByRole("article").getByText("Welcome to the smoke session.").waitFor();
+    await page.getByPlaceholder("Send a message...").fill("hello smoke test");
+    await page.getByRole("button", { name: /^Send$/i }).click();
+    await page.getByRole("article").getByText("Hello from the mocked assistant.").waitFor();
+    await page.locator("summary", { hasText: "Reasoning trace" }).waitFor();
+
+    await page.getByRole("link", { name: /Images/i }).click();
+    await page.waitForURL("**/images");
+    await page.getByRole("heading", { name: /^Images$/i }).waitFor();
+    await page.getByRole("button", { name: /^Generate$/i }).click();
+    await page.locator('img[alt="generated"]').waitFor();
   } finally {
     await page.close();
     await browser.close();

@@ -22,6 +22,7 @@
     "web:test": "tsx --test web/test/*.test.tsx",
     "web:test:watch": "tsx --watch --test web/test/*.test.tsx",
     "web:test:e2e": "tsx web/test/e2e/tools.smoke.ts",
+    "validate:required": "pnpm build && pnpm web:build && pnpm web:test && pnpm web:test:e2e && PROXY_AUTH_TOKEN=$(grep PROXY_AUTH_TOKEN /home/err/devel/services/proxx/.env | cut -d= -f2) npx tsx --test src/tests/proxy.test.ts",
     "lint": "eslint .",
     "lint:errors": "eslint . --quiet"
   },
