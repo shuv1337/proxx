@@ -1,4 +1,4 @@
-# Sub-spec: Migrate FederationPage + AnalyticsPage to @devel/ui
+# Sub-spec: Migrate FederationPage + AnalyticsPage to @open-hax/uxx
 
 **Epic:** `dashboard-ui-migration-epic.md`
 **SP:** 3

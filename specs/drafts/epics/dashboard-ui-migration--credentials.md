@@ -32,7 +32,7 @@ Migrate the largest and most complex page (1819 lines) using @open-hax/uxx primi
 - Target: 1819 → ~630 lines total (65% reduction)
 
 ### Changes
-- `web/src/pages/CredentialsPage.tsx` — split into components, replace with @devel/ui
+- `web/src/pages/CredentialsPage.tsx` — split into components, replace with @open-hax/uxx
 - `web/src/pages/CredentialsPage/CredentialCard.tsx` — new
 - `web/src/pages/CredentialsPage/CredentialFilters.tsx` — new
 - `web/src/pages/CredentialsPage/CredentialActions.tsx` — new

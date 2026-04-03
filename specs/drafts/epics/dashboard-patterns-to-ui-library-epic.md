@@ -1,4 +1,4 @@
-# Epic: Graduate repeated proxx dashboard patterns into @devel/ui
+# Epic: Graduate repeated proxx dashboard patterns into @open-hax/uxx
 
 **Status:** ✅ Done (5 of 5 sub-specs done)
 **Epic SP:** 15 (broken into 5 sub-specs ≤5 SP each)
