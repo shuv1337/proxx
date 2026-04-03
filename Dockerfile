@@ -8,15 +8,19 @@ RUN pnpm add -g pm2
 
 WORKDIR /app
 
-COPY package.json tsconfig.json ./
+COPY orgs/open-hax/proxx/package.json orgs/open-hax/proxx/tsconfig.json ./
+COPY packages/ui/tokens/package.json /packages/ui/tokens/package.json
+COPY packages/ui/tokens/dist /packages/ui/tokens/dist
+COPY packages/ui/react/package.json /packages/ui/react/package.json
+COPY packages/ui/react/dist /packages/ui/react/dist
 
 RUN pnpm install --no-frozen-lockfile
 
-COPY src ./src
-COPY web ./web
-COPY ecosystem.container.config.cjs ./ecosystem.container.config.cjs
-COPY keys.example.json ./keys.example.json
-COPY models.example.json ./models.example.json
+COPY orgs/open-hax/proxx/src ./src
+COPY orgs/open-hax/proxx/web ./web
+COPY orgs/open-hax/proxx/ecosystem.container.config.cjs ./ecosystem.container.config.cjs
+COPY orgs/open-hax/proxx/keys.example.json ./keys.example.json
+COPY orgs/open-hax/proxx/models.example.json ./models.example.json
 
 RUN pnpm build && pnpm web:build
 

@@ -19,6 +19,9 @@
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts",
     "web:preview": "vite preview --config web/vite.config.ts",
+    "web:test": "tsx --test web/test/*.test.tsx",
+    "web:test:watch": "tsx --watch --test web/test/*.test.tsx",
+    "web:test:e2e": "tsx web/test/e2e/tools.smoke.ts",
     "lint": "eslint .",
     "lint:errors": "eslint . --quiet"
   },
@@ -45,9 +48,12 @@
     "@types/react-dom": "^18.3.0",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "@testing-library/jest-dom": "^6.5.0",
+    "@testing-library/react": "^13.4.0",
     "eslint": "^9.39.1",
     "eslint-plugin-sonarjs": "^3.0.6",
     "imapflow": "^1.2.13",
+    "jsdom": "^22.1.0",
     "playwright": "^1.58.2",
     "prism-react-renderer": "^2.4.1",
     "react": "^18.3.1",
@@ -56,6 +62,7 @@
     "tsx": "^4.20.6",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.57.1",
-    "vite": "^5.4.10"
+    "vite": "^5.4.10",
+    "vitest": "^1.6.1"
   }
 }
