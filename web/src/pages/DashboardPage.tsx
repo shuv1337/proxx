@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { Badge, Progress, Spinner } from "@devel/ui-react";
 import {
   getUsageOverview,
   listCredentials,
@@ -369,12 +370,12 @@ export function DashboardPage(): JSX.Element {
       <section className="dashboard-metrics-grid">
         <article className={`dashboard-metric-card ${metricTone(overview?.summary.requests24h ?? 0)}`}>
           <span>Requests / {windowLabel}</span>
-          <strong>{loading ? "..." : formatCompactNumber(overview?.summary.requests24h ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatCompactNumber(overview?.summary.requests24h ?? 0)}</strong>
           {overview ? miniBars(overview.trends.requests) : <div className="dashboard-sparkbars dashboard-sparkbars-placeholder" />}
         </article>
         <article className={`dashboard-metric-card ${metricTone(overview?.summary.tokens24h ?? 0)}`}>
           <span>Tokens / {windowLabel}</span>
-          <strong>{loading ? "..." : formatCompactNumber(overview?.summary.tokens24h ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatCompactNumber(overview?.summary.tokens24h ?? 0)}</strong>
           <small>
             In {formatCompactNumber(overview?.summary.promptTokens24h ?? 0)} / Out {formatCompactNumber(overview?.summary.completionTokens24h ?? 0)}
             {" · "}
@@ -385,26 +386,26 @@ export function DashboardPage(): JSX.Element {
         </article>
         <article className={`dashboard-metric-card ${metricTone(overview?.summary.imageCount24h ?? 0)}`}>
           <span>Images / {windowLabel}</span>
-          <strong>{loading ? "..." : formatCompactNumber(overview?.summary.imageCount24h ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatCompactNumber(overview?.summary.imageCount24h ?? 0)}</strong>
           <small>
             Cost {formatUsd(overview?.summary.imageCostUsd24h ?? 0)}
           </small>
         </article>
         <article className={`dashboard-metric-card ${metricTone(overview?.summary.errorRate24h ?? 0, true)}`}>
           <span>Error Rate</span>
-          <strong>{loading ? "..." : formatPercent(overview?.summary.errorRate24h ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatPercent(overview?.summary.errorRate24h ?? 0)}</strong>
           {overview ? miniBars(overview.trends.errors) : <div className="dashboard-sparkbars dashboard-sparkbars-placeholder" />}
         </article>
         <article className={`dashboard-metric-card ${metricTone(overview?.summary.activeAccounts ?? 0)}`}>
           <span>Active Accounts</span>
-          <strong>{loading ? "..." : formatCompactNumber(overview?.summary.activeAccounts ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatCompactNumber(overview?.summary.activeAccounts ?? 0)}</strong>
           <small>
             Top model {overview?.summary.topModel ?? "-"} · Top provider {overview?.summary.topProvider ?? "-"}
           </small>
         </article>
         <article className={`dashboard-metric-card ${metricTone((overview?.summary.routingRequests24h.federated ?? 0) + (overview?.summary.routingRequests24h.bridge ?? 0))}`}>
           <span>Projected / {windowLabel}</span>
-          <strong>{loading ? "..." : formatCompactNumber((overview?.summary.routingRequests24h.federated ?? 0) + (overview?.summary.routingRequests24h.bridge ?? 0))}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatCompactNumber((overview?.summary.routingRequests24h.federated ?? 0) + (overview?.summary.routingRequests24h.bridge ?? 0))}</strong>
           <small>
             Federated {formatCompactNumber(overview?.summary.routingRequests24h.federated ?? 0)}
             {" · "}
@@ -415,14 +416,14 @@ export function DashboardPage(): JSX.Element {
         </article>
         <article className={`dashboard-metric-card ${metricTone(overview?.summary.costUsd24h ?? 0)}`}>
           <span>Est. Cost / {windowLabel}</span>
-          <strong>{loading ? "..." : formatUsd(overview?.summary.costUsd24h ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatUsd(overview?.summary.costUsd24h ?? 0)}</strong>
           <small>
             {formatCompactNumber((overview?.summary.energyJoules24h ?? 0) / 1000)} kJ energy
           </small>
         </article>
         <article className={`dashboard-metric-card ${metricTone(overview?.summary.waterEvaporatedMl24h ?? 0)}`}>
           <span>Water Evaporated / {windowLabel}</span>
-          <strong>{loading ? "..." : formatWater(overview?.summary.waterEvaporatedMl24h ?? 0)}</strong>
+          <strong>{loading ? <Spinner size="sm" /> : formatWater(overview?.summary.waterEvaporatedMl24h ?? 0)}</strong>
           <small>
             ~1.8 L/kWh DC cooling avg
           </small>
@@ -510,9 +511,9 @@ export function DashboardPage(): JSX.Element {
                 <article key={status.providerId} className="dashboard-provider-card">
                   <div className="dashboard-provider-card-header">
                     <strong>{status.providerId}</strong>
-                    <span className={`dashboard-status-pill dashboard-status-${status.cooldownAccounts > 0 ? "cooldown" : "healthy"}`}>
+                    <Badge variant={status.cooldownAccounts > 0 ? "warning" : "success"}>
                       {formatAuthType(status.authType)}
-                    </span>
+                    </Badge>
                   </div>
                   <dl>
                     <div><dt>Total</dt><dd>{formatCompactNumber(status.totalAccounts)}</dd></div>
@@ -551,10 +552,12 @@ export function DashboardPage(): JSX.Element {
                 <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
                 <span>{formatProviderRouteCell(entry)}</span>
                 <span>{entry.model}</span>
-                <span className={`dashboard-status-pill dashboard-tier-pill dashboard-tier-${entry.serviceTierSource}`}>
+                <Badge variant={entry.serviceTierSource === "fast_mode" ? "info" : "default"}>
                   {formatServiceTier(entry)}
-                </span>
-                <span className={`dashboard-status-pill dashboard-status-${entry.status === 0 || entry.status >= 400 ? "cooldown" : "healthy"}`}>{entry.status === 0 ? "ERR" : entry.status}</span>
+                </Badge>
+                <Badge variant={entry.status === 0 || entry.status >= 400 ? "error" : "success"}>
+                  {entry.status === 0 ? "ERR" : entry.status}
+                </Badge>
                 <span>{Math.round(entry.latencyMs)} ms</span>
               </div>
             ))}
@@ -624,7 +627,9 @@ export function DashboardPage(): JSX.Element {
                     <strong>{account.displayName}</strong>
                     <small>{formatAuthType(account.authType)}</small>
                   </div>
-                  <span className={`dashboard-status-pill dashboard-status-${account.status}`}>{account.status}</span>
+                  <Badge variant={account.status === "healthy" ? "success" : account.status === "cooldown" ? "warning" : "error"}>
+                    {account.status}
+                  </Badge>
                   <span>{formatMaybeScore(account.healthScore)}</span>
                   <span>{formatMaybeMs(account.avgTtftMs)}</span>
                   <span>{formatMaybeTps(account.avgDecodeTps)}</span>

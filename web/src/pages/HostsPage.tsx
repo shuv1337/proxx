@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { Badge, Spinner } from "@devel/ui-react";
 import { getHostsOverview, type HostDashboardSnapshot, type HostsOverview } from "../lib/api";
 
 function formatDate(value: string): string {
@@ -8,14 +9,14 @@ function formatDate(value: string): string {
 
 function HostReachabilityPill({ host }: { readonly host: HostDashboardSnapshot }): JSX.Element {
   if (!host.reachable) {
-    return <span className="hosts-pill hosts-pill-error">Unreachable</span>;
+    return <Badge variant="error">Unreachable</Badge>;
   }
 
   if (host.errors.length > 0) {
-    return <span className="hosts-pill hosts-pill-warn">Partial</span>;
+    return <Badge variant="warning">Partial</Badge>;
   }
 
-  return <span className="hosts-pill hosts-pill-ok">Live</span>;
+  return <Badge variant="success">Live</Badge>;
 }
 
 function formatContainerPorts(ports: readonly string[]): string {
@@ -127,7 +128,7 @@ export function HostsPage(): JSX.Element {
       </header>
 
       {loading && !overview ? (
-        <div className="hosts-empty">Loading host inventory…</div>
+        <div className="hosts-empty"><Spinner size="md" label="Loading host inventory…" /></div>
       ) : null}
       {error ? <div className="hosts-empty hosts-empty-error">{error}</div> : null}
 
@@ -140,7 +141,7 @@ export function HostsPage(): JSX.Element {
                 <div>
                   <div className="hosts-card-title-row">
                     <h3>{host.label}</h3>
-                    {overview?.selfTargetId === host.id ? <span className="hosts-pill hosts-pill-self">This console</span> : null}
+                    {overview?.selfTargetId === host.id ? <Badge variant="info">This console</Badge> : null}
                     <HostReachabilityPill host={host} />
                   </div>
                   <p>
