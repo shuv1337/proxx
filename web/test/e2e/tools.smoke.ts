@@ -246,6 +246,196 @@ async function main(): Promise<void> {
     });
   });
 
+  await page.route("**/api/v1/analytics/provider-model**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        window: "weekly",
+        generatedAt: NOW,
+        coverage: {
+          requestedWindowStart: NOW,
+          coverageStart: NOW,
+          hasFullWindowCoverage: true,
+          retainedEntryCount: 1,
+          maxRetainedEntries: 1000,
+        },
+        models: [
+          {
+            model: "gpt-5.3-codex",
+            requestCount: 12,
+            errorCount: 0,
+            errorRate: 0,
+            totalTokens: 3400,
+            promptTokens: 1200,
+            completionTokens: 2200,
+            cachedPromptTokens: 200,
+            cacheHitRate: 20,
+            avgTtftMs: 420,
+            avgDecodeTps: 18,
+            avgTps: 14,
+            avgEndToEndTps: 10,
+            costUsd: 1.23,
+            energyJoules: 12000,
+            waterEvaporatedMl: 34,
+            firstSeenAt: NOW,
+            lastSeenAt: NOW,
+            confidenceScore: 0.9,
+            suitabilityScore: 0.86,
+          },
+        ],
+        providers: [
+          {
+            providerId: "openai",
+            requestCount: 12,
+            errorCount: 0,
+            errorRate: 0,
+            totalTokens: 3400,
+            promptTokens: 1200,
+            completionTokens: 2200,
+            cachedPromptTokens: 200,
+            cacheHitRate: 20,
+            avgTtftMs: 420,
+            avgDecodeTps: 18,
+            avgTps: 14,
+            avgEndToEndTps: 10,
+            costUsd: 1.23,
+            energyJoules: 12000,
+            waterEvaporatedMl: 34,
+            firstSeenAt: NOW,
+            lastSeenAt: NOW,
+            confidenceScore: 0.9,
+            suitabilityScore: 0.86,
+          },
+        ],
+        providerModels: [
+          {
+            providerId: "openai",
+            model: "gpt-5.3-codex",
+            requestCount: 12,
+            errorCount: 0,
+            errorRate: 0,
+            totalTokens: 3400,
+            promptTokens: 1200,
+            completionTokens: 2200,
+            cachedPromptTokens: 200,
+            cacheHitRate: 20,
+            avgTtftMs: 420,
+            avgDecodeTps: 18,
+            avgTps: 14,
+            avgEndToEndTps: 10,
+            costUsd: 1.23,
+            energyJoules: 12000,
+            waterEvaporatedMl: 34,
+            firstSeenAt: NOW,
+            lastSeenAt: NOW,
+            confidenceScore: 0.9,
+            suitabilityScore: 0.86,
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/api/v1/federation/self", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        nodeId: "local-primary",
+        groupId: "proxx-local",
+        clusterId: "proxx-local-cluster",
+        peerDid: "did:web:proxx.local",
+        publicBaseUrl: "http://127.0.0.1:8789",
+        peerCount: 1,
+      }),
+    });
+  });
+
+  await page.route("**/api/v1/federation/peers**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        peers: [
+          {
+            id: "peer-a",
+            ownerSubject: "did:web:proxx.promethean.rest:brethren",
+            peerDid: "did:web:peer-a.local",
+            label: "Peer A",
+            baseUrl: "https://peer-a.local",
+            authMode: "admin_key",
+            auth: {},
+            status: "healthy",
+            capabilities: {},
+            createdAt: NOW,
+            updatedAt: NOW,
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/api/v1/federation/accounts**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ownerSubject: "did:web:proxx.promethean.rest:brethren",
+        localAccounts: [
+          {
+            providerId: "openai",
+            accountId: "acct-1",
+            displayName: "Primary OpenAI",
+            authType: "oauth_bearer",
+            planType: "pro",
+            hasCredentials: true,
+            knowledgeSources: ["local"],
+          },
+        ],
+        projectedAccounts: [
+          {
+            sourcePeerId: "peer-a",
+            ownerSubject: "did:web:peer-a.local:owner",
+            providerId: "openai",
+            accountId: "projected-1",
+            availabilityState: "warm",
+            warmRequestCount: 3,
+            createdAt: NOW,
+            updatedAt: NOW,
+          },
+        ],
+        knownAccounts: [
+          {
+            providerId: "openai",
+            accountId: "acct-1",
+            displayName: "Primary OpenAI",
+            authType: "oauth_bearer",
+            hasCredentials: true,
+            knowledgeSources: ["local"],
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/api/v1/federation/bridges", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            sessionId: "bridge-1",
+            peerDid: "did:web:peer-a.local",
+            agentId: "agent-a",
+            connectedAt: NOW,
+          },
+        ],
+      }),
+    });
+  });
+
   await page.route("**/api/v1/tools?*", async (route) => {
     await route.fulfill({
       status: 200,
@@ -305,6 +495,20 @@ async function main(): Promise<void> {
     assert.ok(content?.includes("Patch files safely"));
     assert.ok(content?.includes("MCP Manager"));
     assert.ok(content?.includes("social-publisher"));
+
+    await page.goto(`${BASE_URL}/analytics`, { waitUntil: "networkidle" });
+    content = await page.textContent("body");
+    assert.ok(content?.includes("Provider + model analytics"));
+    assert.ok(content?.includes("Global Model Stats"));
+    assert.ok(content?.includes("gpt-5.3-codex"));
+    assert.ok(content?.includes("openai"));
+
+    await page.goto(`${BASE_URL}/federation`, { waitUntil: "networkidle" });
+    content = await page.textContent("body");
+    assert.ok(content?.includes("Brethren control surface"));
+    assert.ok(content?.includes("Peer A"));
+    assert.ok(content?.includes("Bridge sessions"));
+    assert.ok(content?.includes("Account knowledge"));
   } finally {
     await page.close();
     await browser.close();
