@@ -23,6 +23,8 @@
     "lint:errors": "eslint . --quiet"
   },
   "dependencies": {
+    "@devel/ui-react": "file:../../../packages/ui/react",
+    "@devel/ui-tokens": "file:../../../packages/ui/tokens",
     "@fastify/cookie": "^11.0.2",
     "@fastify/swagger": "9.5.1",
     "@fastify/swagger-ui": "5.2.3",
@@ -47,6 +49,7 @@
     "eslint-plugin-sonarjs": "^3.0.6",
     "imapflow": "^1.2.13",
     "playwright": "^1.58.2",
+    "prism-react-renderer": "^2.4.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.30.1",

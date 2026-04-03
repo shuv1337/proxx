@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 
+import { ToastProvider } from "@devel/ui-react";
 import { getProxyUiSettings, getSavedAuthToken, saveAuthToken, saveProxyUiSettings } from "./lib/api";
 import { ChatPage } from "./pages/ChatPage";
 import { CredentialsPage } from "./pages/CredentialsPage";
@@ -65,6 +66,7 @@ export function App(): JSX.Element {
   const hasStoredToken = savedToken.trim().length > 0;
 
   return (
+    <ToastProvider position="top-right">
     <div className={`shell-root${isDashboard ? " shell-root-dashboard" : ""}`}>
       <header className="shell-header">
         <div className="shell-brand">
@@ -157,5 +159,6 @@ export function App(): JSX.Element {
         </Routes>
       </main>
     </div>
+    </ToastProvider>
   );
 }
