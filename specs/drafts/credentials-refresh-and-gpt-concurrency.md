@@ -74,5 +74,10 @@ High — current operator workflow is painful with hundreds of OpenAI accounts, 
 
 ## Progress
 - [x] Investigation: confirmed an existing PM2 dev instance on `8795/5175`; it reuses `.env` and therefore the same `DATABASE_URL` when configured. Confirmed credentials UI lacks a manual OpenAI refresh control, the page shell is not fixed-height on `/credentials`, refresh concurrency is hardcoded to `5`, and GPT cross-provider sorting can override policy order using TTFT history.
-- [ ] Implementation
+- [x] Backend controls + routing hardening:
+  - Manual OpenAI OAuth refresh UI endpoint exists (`src/routes/credentials/openai-refresh-ui.ts`)
+  - Token refresh throughput configurable via `OAUTH_REFRESH_MAX_CONCURRENCY` env var (default 32)
+  - Refreshed OpenAI plan metadata persisted during app-level token refresh
+  - GPT cross-provider latency overrides no longer leapfrog OpenAI preference with VivGrid
+- [ ] Credentials-page UX (frontend work — fixed-height layout, compact cards)
 - [ ] Verification
