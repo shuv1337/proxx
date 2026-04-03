@@ -23,6 +23,10 @@ import {
   ollamaToChatCompletion,
 } from "../ollama-compat.js";
 import {
+  isGlmModel,
+  applyGlmThinking,
+} from "../glm-compat.js";
+import {
   responseIsEventStream,
   summarizeUpstreamError,
 } from "../provider-utils.js";
@@ -886,6 +890,11 @@ function buildRequestBodyForUpstream(context: StrategyRequestContext): Record<st
   }
 
   delete upstreamBody["open_hax"];
+
+  if (isGlmModel(context.routedModel)) {
+    return applyGlmThinking(upstreamBody, context.routedModel);
+  }
+
   return upstreamBody;
 }
 
