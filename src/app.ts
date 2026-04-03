@@ -300,87 +300,14 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     },
   });
 
-  async function refreshExpiredOAuthAccount(credential: ProviderCredential): Promise<ProviderCredential | null> {
-    return tokenRefreshManager.refresh(credential);
-  }
-
-  async function refreshFactoryAccount(credential: ProviderCredential): Promise<ProviderCredential | null> {
-    if (!credential.refreshToken) {
-      return null;
-    }
-
-    try {
-      app.log.info({ accountId: credential.accountId, providerId: "factory" }, "refreshing Factory OAuth token via WorkOS");
-
-      const refreshed = await refreshFactoryOAuthToken(credential.refreshToken);
-      const expiresAt = refreshed.expiresAt ?? parseJwtExpiry(refreshed.accessToken) ?? undefined;
-
-      const newCredential: ProviderCredential = {
-        providerId: "factory",
-        accountId: credential.accountId,
-        token: refreshed.accessToken,
-        authType: "oauth_bearer",
-        refreshToken: refreshed.refreshToken,
-        expiresAt,
-      };
-
-      // Update the credential in the KeyPool's in-memory state
-      keyPool.updateAccountCredential("factory", credential, newCredential);
-
-      // Persist to the credential store (file or SQL)
-      await runtimeCredentialStore.upsertOAuthAccount(
-        "factory",
-        newCredential.accountId,
-        newCredential.token,
-        newCredential.refreshToken,
-        newCredential.expiresAt,
-      );
-
-      if (!sqlCredentialStore) {
-        try {
-          await persistFactoryAuthV2(refreshed.accessToken, refreshed.refreshToken);
-        } catch {
-          // Expected to fail on read-only container filesystems; DB has the data.
-        }
-      }
-
-      app.log.info({
-        accountId: newCredential.accountId,
-        providerId: "factory",
-        expiresAt: newCredential.expiresAt,
-      }, "Factory OAuth token refreshed successfully");
-
-      return newCredential;
-    } catch (error) {
-      app.log.warn({
-        error: toErrorMessage(error),
-        accountId: credential.accountId,
-        providerId: "factory",
-      }, "failed to refresh Factory OAuth token");
-      return null;
-    }
-  }
-
-  async function ensureFreshAccounts(providerId: string): Promise<void> {
-    const expiredAccounts = keyPool.getExpiredAccountsWithRefreshTokens(providerId);
-
-    if (expiredAccounts.length > 0) {
-      await tokenRefreshManager.refreshBatch(expiredAccounts);
-    }
-
-    // Factory OAuth: proactively refresh tokens within 30-min window (before they expire)
-    if (providerId === "factory") {
-      const allFactoryAccounts = await keyPool.getAllAccounts("factory").catch(() => [] as ProviderCredential[]);
-      for (const account of allFactoryAccounts) {
-        if (factoryCredentialNeedsRefresh(account)) {
-          await tokenRefreshManager.refresh(account);
-        }
-      }
-    }
-  }
-
   const FEDERATION_OWNER_SUBJECT_HEADER = "x-open-hax-federation-owner-subject";
   const FEDERATION_BRIDGE_TENANT_HEADER = "x-open-hax-bridge-tenant-id";
+
+  tokenRefreshManager.startBackgroundRefresh(() => {
+    const expiring = keyPool.getExpiringAccounts(config.oauthRefreshProactiveWindowMs);
+    const expired = keyPool.getAllExpiredWithRefreshTokens();
+    return [...expired, ...expiring];
+  });
 
   function inferWebConsoleUrl(request: FastifyRequest): string {
     const forwardedHost = readSingleHeader(request.headers as Record<string, unknown>, "x-forwarded-host")?.trim();
@@ -436,8 +363,6 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
 </html>`;
   }
 
-
-
   async function refreshOpenAiOauthAccounts(accountId?: string): Promise<{
     readonly totalAccounts: number;
     readonly refreshedCount: number;
@@ -473,12 +398,6 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       failedCount: candidates.length - refreshedCount,
     };
   }
-
-  tokenRefreshManager.startBackgroundRefresh(() => {
-    const expiring = keyPool.getExpiringAccounts(config.oauthRefreshProactiveWindowMs);
-    const expired = keyPool.getAllExpiredWithRefreshTokens();
-    return [...expired, ...expiring];
-  });
 
   const quotaMonitor = new QuotaMonitor(
     runtimeCredentialStore,
@@ -771,9 +690,22 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     dynamicProviderBaseUrlGetter: dynamicProviderBaseUrlGetter
       ? async (id: string) => (await dynamicProviderBaseUrlGetter(id)) ?? undefined
       : async () => undefined, bridgeRelay, quotaMonitor,
-    refreshFactoryAccount: async (c) => { await refreshFactoryAccount(c as never); },
-    ensureFreshAccounts,
-    refreshExpiredOAuthAccount: async (c) => await refreshExpiredOAuthAccount(c as never),
+    refreshExpiredOAuthAccount: async (c) => tokenRefreshManager.refresh(c),
+    refreshFactoryAccount: async (c) => { await tokenRefreshManager.refresh(c); return null; },
+    ensureFreshAccounts: async (providerId) => {
+      const expired = keyPool.getExpiredAccountsWithRefreshTokens(providerId);
+      if (expired.length > 0) {
+        await tokenRefreshManager.refreshBatch(expired);
+      }
+      if (providerId === "factory") {
+        const allFactoryAccounts = await keyPool.getAllAccounts("factory").catch(() => [] as ProviderCredential[]);
+        for (const account of allFactoryAccounts) {
+          if (factoryCredentialNeedsRefresh(account)) {
+            await tokenRefreshManager.refresh(account);
+          }
+        }
+      }
+    },
     getMergedModelIds,
     executeFederatedRequestFallback: async (input) => executeFederatedRequestFallback(fedDeps, input),
     injectNativeBridge: async (url, payload, headers) => injectNativeBridge(getBridgeDeps(), url, payload, headers),
