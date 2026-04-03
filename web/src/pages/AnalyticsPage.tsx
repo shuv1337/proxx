@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { Badge, Spinner } from "@devel/ui-react";
 import { getProviderModelAnalytics, type AnalyticsRow, type ProviderModelAnalytics } from "../lib/api";
 import { useStoredState } from "../lib/use-stored-state";
 

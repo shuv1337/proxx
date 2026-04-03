@@ -1,5 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { Badge, Spinner, Tabs } from "@devel/ui-react";
 import {
   addFederationPeer,
   getFederationAccounts,
@@ -342,21 +343,21 @@ export function FederationPage(): JSX.Element {
               <h4>Local</h4>
               <p>{accounts?.localAccounts.length ?? 0} accounts</p>
               <ul className="federation-pills">
-                {localProviders.map((entry) => <li key={`local-${entry.providerId}`}>{entry.providerId} · {entry.count}</li>)}
+                {localProviders.map((entry) => <li key={`local-${entry.providerId}`}><Badge variant="info">{entry.providerId}</Badge> · {entry.count}</li>)}
               </ul>
             </div>
             <div>
               <h4>Projected</h4>
               <p>{accounts?.projectedAccounts.length ?? 0} accounts</p>
               <ul className="federation-pills">
-                {projectedProviders.map((entry) => <li key={`projected-${entry.providerId}`}>{entry.providerId} · {entry.count}</li>)}
+                {projectedProviders.map((entry) => <li key={`projected-${entry.providerId}`}><Badge variant="warning">{entry.providerId}</Badge> · {entry.count}</li>)}
               </ul>
             </div>
             <div>
               <h4>Known</h4>
               <p>{accounts?.knownAccounts.length ?? 0} accounts</p>
               <ul className="federation-pills">
-                {knownProviders.map((entry) => <li key={`known-${entry.providerId}`}>{entry.providerId} · {entry.count}</li>)}
+                {knownProviders.map((entry) => <li key={`known-${entry.providerId}`}><Badge variant="success">{entry.providerId}</Badge> · {entry.count}</li>)}
               </ul>
             </div>
           </div>
