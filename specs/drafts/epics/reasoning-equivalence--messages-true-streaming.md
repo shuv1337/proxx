@@ -3,8 +3,7 @@
 **Epic:** `reasoning-equivalence-epic.md`
 **SP:** 3
 **Priority:** P1
-**Status:** Draft
-**Depends on:** `reasoning-equivalence--field-name-normalization.md`
+**Status:** ⬜ Deferred (requires live Anthropic upstream testing)
 
 ## Bug
 

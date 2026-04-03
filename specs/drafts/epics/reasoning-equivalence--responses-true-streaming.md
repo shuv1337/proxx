@@ -3,8 +3,10 @@
 **Epic:** `reasoning-equivalence-epic.md`
 **SP:** 5
 **Priority:** P1
-**Status:** Draft
-**Depends on:** `reasoning-equivalence--stream-payload-check.md`
+**Status:** ⬜ Deferred (requires live upstream testing)
+
+## Note
+Non-OpenAI Responses providers typically return JSON (not SSE). The `writeInterleavedResponsesSse` function synthesizes SSE from buffered JSON. True streaming would only help if the upstream actually returns SSE. This requires live upstream testing to validate which providers stream and which don't.
 
 ## Bug
 

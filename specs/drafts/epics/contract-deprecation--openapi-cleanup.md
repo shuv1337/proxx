@@ -11,3 +11,5 @@
 - Migrated 57 test URLs from `/api/ui/*` to `/api/v1/*` across 3 test files
 - All advanced federation routes now available at `/api/v1/federation/*`
 - 162/162 proxy tests pass, container healthy
+- Parity confirmed: existing proxy.test.ts exercises both `/api/ui/*` and `/api/v1/*` endpoints
+- Deprecation headers verified live via curl
