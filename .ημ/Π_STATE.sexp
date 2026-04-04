@@ -1,35 +1,29 @@
 ;; Π State Snapshot
-;; Generated: 2026-04-02T18:45:15Z
+;; Generated: 2026-04-04T01:08:01Z
 
 (
   :repo "open-hax/proxx"
   :branch "fork-tax/20260330-205903-aco-route-quota-cooldowns"
-  :previous-tag "Π/20260330-205903-aco-route-quota-cooldowns"
-  :intended-tag "Π/20260402-184515-migration-pipeline-routing-cleanup"
+  :previous-tag "Π/20260402-184515-migration-pipeline-routing-cleanup"
+  :intended-tag "Π/20260404-010801-request-log-cache-rollup-failure-exclusion"
   :remote "origin"
 
   :work-description
-  "Audit and remediation: migration pipeline hardening + ad-hoc routing code cleanup.
-
-  Triggered by proxx container crash (missing 'disabled' column — migration v7 was
-  recorded but not applied because runMigrations() hardcoded SQL instead of iterating
-  ALL_MIGRATIONS).
+  "Correct persisted request-log cache analytics so failed prompt-cache attempts no longer count toward cache hit/key-use rollups.
 
   Changes:
-  - Refactored runMigrations() to iterate ALL_MIGRATIONS (single source of truth)
-  - Added schema-migration.test.ts with 5 consistency tests
-  - Deleted 2 dead code files (model-selection-policies.ts, provider-route-policies.ts)
-  - Created fastify-types.ts augmentation, removed 55 ad-hoc openHaxAuth casts
-  - Created model-family.ts registry (replaces 3 scattered implementations)
-  - Extracted routing-outcome-handler.ts (215 lines eliminated from route handlers)
-  - Batched ~20 inline OPTIONS handlers in app.ts
-  - MCP endpoint status corrected from 'implemented' to 'planned'
-  - Full audit report + 6 remediation specs written"
+  - Added isRequestLogEntryError/countsTowardCacheKeyUse/countsTowardCacheHit helpers in request-log-store.ts
+  - Applied the predicates to hourly, daily, daily-model, daily-account, and account-accumulator rollups
+  - Updated delta/reclassification paths so cache counters decrement when an entry becomes errored
+  - Added regression tests covering direct failed-attempt exclusion and late error reclassification removal
+  - Preserved tracked receipts.log mutation and excluded accidental package-lock.json from the snapshot"
 
   :verification (
-    :build "pass (tsc -p tsconfig.json — zero errors)"
-    :tests "pass (10/10: schema-migration + model-routing-helpers)"))
+    :build "pass (pnpm build)"
+    :store-tests "pass (npx tsx --test src/tests/request-log-store.test.ts)"
+    :proxy-analytics "pass (targeted src/tests/proxy.test.ts cache-hit summary regressions)"
+    :known-red "unrelated proxy.test failure remains: glm chat requests skip ollama-cloud when provider catalog does not advertise the requested model"))
 
   :deferred (
-    :token-refresh-extraction "Needs live OAuth testing; 90 lines in app.ts"
-    :deps-unification "AppDeps vs UiRouteDependencies — needs dedicated session"))
+    :metadata-rebuild "Rebuild live services/proxx request-log metadata to refresh stale weekly/monthly cache counters"
+    :ui-labeling "Disambiguate cache hit rate vs cached token share in operator UI"))

@@ -1,54 +1,36 @@
-# Π Snapshot: Migration pipeline + routing cleanup handoff
+# Π Snapshot: request-log cache analytics rollup fix
 
 - **Repo:** `open-hax/proxx`
 - **Branch:** `fork-tax/20260330-205903-aco-route-quota-cooldowns`
-- **Previous tag:** `Π/20260330-205903-aco-route-quota-cooldowns`
-- **Intended Π tag:** `Π/20260402-184515-migration-pipeline-routing-cleanup`
-- **Generated:** `2026-04-02T18:45:15Z`
+- **Previous tag:** `Π/20260402-184515-migration-pipeline-routing-cleanup`
+- **Intended Π tag:** `Π/20260404-010801-request-log-cache-rollup-failure-exclusion`
+- **Generated:** `2026-04-04T01:08:01Z`
 
 ## What this snapshot preserves
 
-This Π handoff captures a full audit and remediation pass triggered by a proxx container crash. The root cause was a schema migration (v7 `disabled` column) that was recorded in `schema_version` but never applied because `runMigrations()` hardcoded SQL instead of iterating `ALL_MIGRATIONS`.
+This Π handoff captures the request-log cache analytics correction for persisted rollups. The bug was that hourly/daily/model/account rollups counted `promptCacheKeyUsed` and `cacheHit` even when the request later classified as an error, so weekly/monthly dashboard-style cache hit percentages could be badly understated relative to the direct entry-based analytics path.
 
-### Migration pipeline fix
-- `src/lib/db/sql-credential-store.ts` — `runMigrations()` now iterates `ALL_MIGRATIONS` (single source of truth)
-- `src/tests/schema-migration.test.ts` — 5 tests enforcing version/SQL consistency
-- `DEVEL.md` / `AGENTS.md` — migration workflow documented for humans and agents
+### Rollup accounting fix
+- `src/lib/request-log-store.ts` — added shared error-aware cache counter predicates
+- Hourly, daily, daily-model, daily-account, and account-accumulator rollups now exclude failed prompt-cache attempts
+- Delta/update paths now decrement cache counters if an entry is later reclassified as errored
 
-### Dead code removal
-- Deleted `src/lib/model-selection-policies.ts` (62 lines, never imported)
-- Deleted `src/lib/provider-route-policies.ts` (170 lines, never imported)
+### Regression coverage
+- `src/tests/request-log-store.test.ts` — covers both initial failed-attempt exclusion and late reclassification removal
+- Existing proxy analytics regression tests still pass for the direct API surfaces
 
-### Fastify type augmentation
-- New `src/lib/fastify-types.ts` — `declare module "fastify"` for `openHaxAuth` + `_otelSpan`
-- Removed 55 ad-hoc type casts across 19 route files
-- Removed `DecoratedAppRequest` local type from `app.ts`
-
-### Model family registry
-- New `src/lib/model-family.ts` — unified `inferModelFamily`/`looksLikeHostedOpenAiFamily`/`requestyModelProvider`
-- Updated `src/lib/provider-strategy/fallback.ts` — removed local `REQUESTY_MODEL_PREFIXES` + `requestyModelPrefix`
-
-### Routing outcome handler extraction
-- New `src/lib/routing-outcome-handler.ts` — shared error-handling block
-- `chat.ts` 498→428, `responses.ts` 434→365, `images.ts` 210→134 (215 lines eliminated)
-
-### App.ts cleanup
-- Batched ~20 inline OPTIONS handlers into a loop
-- Removed `DecoratedAppRequest` type alias
-
-### MCP status fix
-- `src/routes/api/v1/index.ts` — MCP endpoint changed from `"implemented"` to `"planned"`
-
-### Specs
-- `specs/audits/2026-04-02-ad-hoc-routing-code-audit.md` — 9 findings report
-- 6 remediation specs (17 SP total)
+### Working-tree notes
+- Preserved tracked `receipts.log` mutation from session-mycology background activity
+- Dropped untracked accidental `package-lock.json` instead of snapshotting it into the pnpm-managed repo
 
 ## Verification
 
-- TypeScript build: `tsc -p tsconfig.json` ✅ (zero errors)
-- Tests: `schema-migration.test.ts` + `model-routing-helpers.test.ts` ✅ (10/10 pass)
+- Build: `pnpm build` ✅
+- Focused store tests: `npx tsx --test src/tests/request-log-store.test.ts` ✅
+- Focused proxy analytics regressions: targeted `src/tests/proxy.test.ts` prompt-cache summary assertions ✅
+- Broader note: unrelated known-red remains in full filtered proxy run (`glm chat requests skip ollama-cloud when provider catalog does not advertise the requested model`)
 
 ## Deferred
 
-- Token refresh extraction from `app.ts` (needs live OAuth testing)
-- `AppDeps` / `UiRouteDependencies` unification (needs dedicated session)
+- Rebuild live `services/proxx` request-log metadata so running weekly/monthly dashboards stop reading stale cache counters
+- Consider relabeling UI surfaces to distinguish cache hit rate vs cached token share more explicitly
