@@ -1,8 +1,4 @@
 import type { ProviderCredential } from "../../key-pool.js";
-import type { PromptAffinityStore } from "../../prompt-affinity-store.js";
-import type { RequestLogStore } from "../../request-log-store.js";
-import type { QuotaMonitor } from "../../quota-monitor.js";
-import type { ProviderRoute } from "../../provider-routing.js";
 import type { StrategyRequestContext } from "../shared.js";
 import {
   providerAccountsForRequest,
@@ -10,7 +6,7 @@ import {
   reorderAccountsForLatency,
   reorderCandidatesForAffinities,
 } from "./credential-selector.js";
-import type { FallbackCandidate, FallbackDeps, FallbackKeyPool } from "./types.js";
+import type { FallbackCandidate, FallbackDeps } from "./types.js";
 
 function resolveForcedCredentialSelection(context: StrategyRequestContext): {
   readonly providerId?: string;

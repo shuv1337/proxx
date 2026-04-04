@@ -148,13 +148,16 @@
 ## Epics
 
 ### Epic: `contract-deprecation` (8 SP) ✅ DONE
+
 | Sub-spec | SP | Status |
 |----------|----|--------|
 | frontend-migration | 3 | ✅ |
 | deprecation-headers | 3 | ✅ |
 | openapi-cleanup | 2 | ✅ |
 
+
 ### Epic: `fallback-extraction` (8 SP) ✅ DONE
+
 | Sub-spec | SP | Status |
 |----------|----|--------|
 | error-classifier | 2 | ✅ |
@@ -162,7 +165,9 @@
 | response-handler-orchestrator | 3 | ✅ |
 | early-return-strategy | 3 | ✅ |
 
+
 ### Epic: `reasoning-equivalence` (13 SP) — 3/5 done
+
 | Sub-spec | SP | Status |
 |----------|----|--------|
 | stream-payload-check | 2 | ✅ |
@@ -171,33 +176,42 @@
 | responses-true-streaming | 5 | ⬜ Not started |
 | messages-true-streaming | 3 | ⬜ Not started |
 
+
 ### Epic: `federation-slice` (8 SP) — Partial
+
 | Sub-spec | SP | Status |
 |----------|----|--------|
 | advanced-routes | 3 | ⬜ Not started |
 | bridge-relay-lifecycle | 3 | ⬜ Not started |
 | parity-tests | 2 | ⬜ Not started |
 
+
 ### Epic: `mcp-gateway` (8 SP) — Not started
+
 | Sub-spec | SP | Status |
 |----------|----|--------|
 | registry-proxy | 5 | ⬜ |
 | control-plane-config | 3 | ⬜ |
 | lifecycle-tools | 3 | ⬜ |
 
+
 ### Epic: `openplanner-integration` (8 SP) — Not started
+
 | Sub-spec | SP | Status |
 |----------|----|--------|
 | proxy-registry | 5 | ⬜ |
 | config-lifecycle | 3 | ⬜ |
 | session-search-migration | 3 | ⬜ |
 
+
 ### Epic: `opencode-lite-mcp` (8 SP) — Not started
+
 | Sub-spec | SP | Status |
 |----------|----|--------|
 | opencode-lite | 5 | ⬜ |
 | tool-discovery | 3 | ⬜ |
 | agent-loop | 3 | ⬜ |
+
 
 ---
 

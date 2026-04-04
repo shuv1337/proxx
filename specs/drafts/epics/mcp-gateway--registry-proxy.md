@@ -16,11 +16,13 @@ Implement the MCP server registry and reverse proxy that routes `/mcp/<server-na
 - `src/routes/mcp/index.ts` — implement proxy router (currently empty stub) that routes `/mcp/:serverName/*`
 - `src/routes/api/v1/index.ts` — register MCP control-plane routes (list endpoint)
 - `docker-compose.yml` — add `mcp-social-publisher` as first co-deployed MCP server
-- `mcp-social-publisher` — add `/health` endpoint, bind to localhost only
+- `mcp-social-publisher` — add `/health` endpoint, bind to localhost/private network only, and reject direct traffic that does not carry proxy-issued internal auth
 
 ### Auth
 - Proxx handles auth (bearer token or tenant API key)
-- Backend servers trust proxx via `X-Forwarded-User` / `X-Tenant-Id` headers
+- Backend servers must be network-isolated (localhost bind, private bridge network, or equivalent firewall policy) so `/mcp/*` backends are not directly reachable
+- Proxx strips any inbound `X-Forwarded-User` / `X-Tenant-Id` headers, reissues trusted values itself, and attaches an internal auth credential (shared header or mTLS identity)
+- Backend servers trust proxx only after verifying that internal auth credential
 - Unauthenticated requests to `/mcp/*` return 401
 
 ## Verification

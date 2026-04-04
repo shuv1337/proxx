@@ -410,11 +410,13 @@ export function AnalyticsPage(): JSX.Element {
           description="Switch between model, provider, and pair-level views without losing context."
           actions={<FilterToolbar>
             <Input
+              aria-label="Search models"
               value={modelSearch}
               onChange={(event) => setModelSearch(event.currentTarget.value)}
               placeholder="Search models…"
             />
             <Input
+              aria-label="Search providers"
               value={providerSearch}
               onChange={(event) => setProviderSearch(event.currentTarget.value)}
               placeholder="Search providers…"

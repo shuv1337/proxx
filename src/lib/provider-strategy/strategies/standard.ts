@@ -6,6 +6,7 @@ import { copyUpstreamHeaders } from "../../proxy.js";
 import {
   chatRequestToResponsesRequest,
   chatCompletionEventStreamToResponsesEventStream,
+  chatCompletionEventStreamToResponsesResponse,
   chatCompletionToResponsesResponse,
   chatCompletionToSse,
   responsesRequestToChatRequest,
@@ -33,6 +34,16 @@ import {
   type ProviderAttemptOutcome,
   type StrategyRequestContext,
 } from "../shared.js";
+
+function isChatCompletionResponse(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  const choices = value["choices"];
+  const firstChoice = Array.isArray(choices) && choices.length > 0 && isRecord(choices[0]) ? choices[0] : undefined;
+  return Boolean(firstChoice && isRecord(firstChoice["message"]));
+}
 
 export class MessagesProviderStrategy extends TransformedJsonProviderStrategy {
   public readonly mode = "messages" as const;
@@ -320,34 +331,40 @@ export class ResponsesViaChatCompletionsStrategy extends BaseProviderStrategy {
     reply.header("x-open-hax-upstream-provider", context.providerId);
 
     if (context.clientWantsStream) {
-      let translatedStream: string;
-
       if (isEventStream) {
-        const streamText = await upstreamResponse.text();
-        translatedStream = chatCompletionEventStreamToResponsesEventStream(streamText, context.routedModel);
-      } else {
-        let completionBody: unknown;
         try {
-          completionBody = await upstreamResponse.json();
+          const fallbackResponse = chatCompletionEventStreamToResponsesResponse(
+            await upstreamResponse.text(),
+            context.routedModel,
+          );
+          reply.code(200);
+          reply.header("content-type", "application/json");
+          reply.send(fallbackResponse);
+          return { kind: "handled" };
         } catch {
           return { kind: "continue", requestError: true };
         }
+      }
 
-        if (!isRecord(completionBody)) {
-          return { kind: "continue", requestError: true };
-        }
+      let completionBody: unknown;
+      try {
+        completionBody = await upstreamResponse.json();
+      } catch {
+        return { kind: "continue", requestError: true };
+      }
 
-        translatedStream = chatCompletionEventStreamToResponsesEventStream(
-          chatCompletionToSse(completionBody),
-          context.routedModel,
-        );
+      if (!isChatCompletionResponse(completionBody)) {
+        return { kind: "continue", requestError: true };
       }
 
       reply.code(200);
       reply.header("content-type", "text/event-stream; charset=utf-8");
       reply.header("cache-control", "no-cache");
       reply.header("x-accel-buffering", "no");
-      reply.send(translatedStream);
+      reply.send(chatCompletionEventStreamToResponsesEventStream(
+        chatCompletionToSse(completionBody),
+        context.routedModel,
+      ));
       return { kind: "handled" };
     }
 
@@ -362,7 +379,7 @@ export class ResponsesViaChatCompletionsStrategy extends BaseProviderStrategy {
       return { kind: "continue", requestError: true };
     }
 
-    if (!isRecord(completionBody)) {
+    if (!isChatCompletionResponse(completionBody)) {
       return { kind: "continue", requestError: true };
     }
 

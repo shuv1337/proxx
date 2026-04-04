@@ -33,9 +33,7 @@ import {
   recordAttempt,
   updateFailedAttemptDiagnostics,
   updateUsageCountsFromResponse,
-  readHeaderValue,
   type BuildPayloadResult,
-  type FallbackAccumulator,
   type ProviderAttemptContext,
   type ProviderAvailabilitySummary,
   type ProviderFallbackExecutionResult,
@@ -48,15 +46,9 @@ import {
   shouldPermanentlyDisableCredential,
   shouldRetrySameCredentialForServerError,
 } from "./error-classifier.js";
-import {
-  providerAccountsForRequest,
-  providerAccountsForRequestWithPolicy,
-  reorderAccountsForLatency,
-  reorderCandidatesForAffinities,
-} from "./credential-selector.js";
 import { requestyModelProvider } from "../../model-family.js";
 import { buildFallbackCandidates } from "./orchestrator.js";
-import { clampRouteQuality, createAccumulator, emptyResult, type FallbackCandidate, type FallbackDeps, type FallbackKeyPool } from "./types.js";
+import { clampRouteQuality, createAccumulator, emptyResult, type FallbackDeps } from "./types.js";
 
 function shouldUseOpenAiCodexHeaderProfile(
   providerId: string,
@@ -83,7 +75,7 @@ export async function executeProviderRoutingPlan(
     markInFlight(credential: ProviderCredential): () => void;
     markRateLimited(credential: ProviderCredential, retryAfterMs?: number): void;
     isAccountExpired?(credential: ProviderCredential): boolean;
-    clearProviderCooldowns?(providerId: string): void;
+    clearAccountCooldown?(providerId: string, accountId: string): void;
     disableAccount?(providerId: string, accountId: string): void;
   },
   providerRoutes: readonly ProviderRoute[],
@@ -568,8 +560,8 @@ export async function executeProviderRoutingPlan(
             if (healthStore) {
               healthStore.recordSuccess(candidate.account, upstreamResponse.status);
             }
-            if (candidate.account.providerId === "ollama-cloud" && keyPool.clearProviderCooldowns) {
-              keyPool.clearProviderCooldowns("ollama-cloud");
+            if (candidate.account.providerId === "ollama-cloud" && keyPool.clearAccountCooldown) {
+              keyPool.clearAccountCooldown(candidate.account.providerId, candidate.account.accountId);
             }
             await providerRoutePheromoneStore.noteSuccess(
               candidate.providerId,
@@ -595,8 +587,8 @@ export async function executeProviderRoutingPlan(
           if (healthStore && upstreamResponse.ok) {
             healthStore.recordSuccess(candidate.account, upstreamResponse.status);
           }
-          if (upstreamResponse.ok && candidate.account.providerId === "ollama-cloud" && keyPool.clearProviderCooldowns) {
-            keyPool.clearProviderCooldowns("ollama-cloud");
+          if (upstreamResponse.ok && candidate.account.providerId === "ollama-cloud" && keyPool.clearAccountCooldown) {
+            keyPool.clearAccountCooldown(candidate.account.providerId, candidate.account.accountId);
           }
           await providerRoutePheromoneStore.noteSuccess(
             candidate.providerId,
@@ -906,23 +898,31 @@ export const executeProviderFallback = executeProviderRoutingPlan;
 
 export async function inspectProviderAvailability(
   keyPool: {
-    getStatus(providerId: string): Promise<{ readonly totalAccounts: number }>;
+    getStatus(providerId: string): Promise<{ readonly totalAccounts: number; readonly disabledAccounts?: number }>;
   },
   providerRoutes: readonly ProviderRoute[],
   promptCacheKey?: string,
 ): Promise<ProviderAvailabilitySummary> {
   let sawConfiguredProvider = false;
+  let sawEnabledConfiguredProvider = false;
 
   for (const route of providerRoutes) {
     try {
       const status = await keyPool.getStatus(route.providerId);
       if (status.totalAccounts > 0) {
         sawConfiguredProvider = true;
+        if (status.totalAccounts > (status.disabledAccounts ?? 0)) {
+          sawEnabledConfiguredProvider = true;
+        }
       }
     } catch {
       // Ignore status lookup errors and continue collecting provider info.
     }
   }
 
-  return { sawConfiguredProvider, prompt_cache_key: promptCacheKey };
+  return {
+    sawConfiguredProvider,
+    sawOnlyDisabledProviders: sawConfiguredProvider && !sawEnabledConfiguredProvider,
+    prompt_cache_key: promptCacheKey,
+  };
 }

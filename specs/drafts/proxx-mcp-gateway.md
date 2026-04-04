@@ -32,7 +32,7 @@ The name "proxx" is generic enough to own the MCP gateway role. This spec define
 
 ## Non-goals
 - Rewriting individual MCP server tool implementations.
-- Replacing MCP protocol semantics (stdio/SSE/Streamable HTTP remain as-is per server).
+- Replacing MCP protocol semantics; Phase 1 only standardizes HTTP-addressable backends (`streamable-http` / `sse`) and explicitly defers raw `stdio` servers until a dedicated adapter exists.
 - Managing non-MCP services through this surface.
 
 ## Architecture
@@ -50,9 +50,10 @@ Examples:
 
 Rules:
 - proxx handles auth (bearer token from `PROXY_AUTH_TOKEN` or tenant API key)
-- backend MCP servers bind to localhost only, trust proxx as reverse proxy
+- backend MCP servers bind to a private interface only (localhost on bare metal, or `0.0.0.0` on an internal compose network with no published ports)
+- proxx strips inbound `X-Forwarded-User` / `X-Tenant-Id`, then overwrites them with authenticated values
+- proxx adds `X-MCP-Server-Id` and `X-Internal-Auth` headers to downstream requests; backends reject requests without valid internal auth
 - transport is Streamable HTTP or SSE as each server supports
-- proxx adds `X-MCP-Server-Id` header to downstream requests
 
 ### Surface 2: MCP control-plane API
 Management surface for MCP server lifecycle and configuration.
@@ -84,6 +85,10 @@ Every MCP server MUST expose:
 - `GET /health` — health check returning `{ ok: boolean, server: string, version: string }`
 - `GET /api/config` — current configuration (read-only for servers that don't support runtime config)
 - `PUT /api/config` — update configuration (optional, servers can return 405 if config is env-only)
+
+Phase 1 scope note:
+- `transport: "stdio"` is not directly proxyable through this contract; Phase 1 registry entries must be HTTP/SSE/streamable-HTTP backends only.
+- A later phase may add a stdio-to-HTTP sidecar/adapter, but this spec does not assume that bridge already exists.
 
 Standard config envelope:
 ```json
@@ -135,9 +140,10 @@ Each MCP server handles its own auth:
 
 ### Target state
 - Proxx is the single auth gate for all MCP traffic
-- Backend MCP servers bind to `127.0.0.1` only
-- Proxx forwards authenticated requests with `X-Forwarded-User` and `X-Tenant-Id` headers
-- MCP servers trust localhost requests from proxx (no additional auth needed on backend)
+- Backend MCP servers bind only to localhost or a private compose bridge; operators must not publish backend MCP ports publicly
+- Proxx strips/overwrites `X-Forwarded-User` and `X-Tenant-Id` before forwarding
+- Proxx forwards authenticated requests with `X-Forwarded-User`, `X-Tenant-Id`, `X-MCP-Server-Id`, and `X-Internal-Auth`
+- MCP servers trust proxied identity headers only after validating `X-Internal-Auth` (or equivalent mTLS identity)
 - For external MCP clients that connect directly, proxx can issue short-lived bearer tokens
 
 ## Deployment
@@ -197,6 +203,7 @@ services:
 - Implement reverse proxy at `/mcp/<server-name>/*`
 - Add `/api/v1/mcp` list endpoint (read-only, from compose/PM2 discovery)
 - Wire up health checking per server
+- Restrict Phase 1 registry membership to HTTP/SSE/streamable-HTTP services; explicitly exclude raw `stdio` entries until an adapter exists
 - Update `mcp-social-publisher` as the first standardized server (health endpoint, remove standalone auth)
 
 ### Phase 2: Config Management
@@ -240,7 +247,7 @@ services:
 - Fleet hosts can run MCP servers with proxx as gateway
 
 ## Risks
-- MCP protocol version drift between servers (Streamable HTTP vs SSE vs stdio)
+- MCP protocol version drift between servers (Streamable HTTP vs SSE; stdio remains out of Phase 1 scope unless an adapter is added)
 - Some MCP servers may have complex config that doesn't fit the standard envelope
 - Resource contention when running many MCP servers on the same host
 - Backward compatibility for existing direct connections to MCP servers

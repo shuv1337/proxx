@@ -11,10 +11,11 @@
 Migrate the largest and most complex page (1819 lines) using @open-hax/uxx primitives and AI/IDE components.
 
 ### Replacements
+
 | Current | @open-hax/uxx Component |
 |---------|-------------------|
 | Credential cards | `<Card variant="outlined">` with `<Badge>` for status |
-| Account health bars | `<Progress variant="success|warning|error">` |
+| Account health bars | `<Progress variant="success&#124;warning&#124;error">` |
 | Refresh spinners | `<Spinner size="sm">` |
 | Filter/search inputs | `<Input type="search" leftIcon={SearchIcon}>` |
 | Confirmation dialogs | `<Modal>` with `<Button variant="danger">` |
@@ -22,6 +23,7 @@ Migrate the largest and most complex page (1819 lines) using @open-hax/uxx primi
 | Tab navigation | `<Tabs variant="enclosed">` |
 | Toast notifications | `useToast().addToast()` |
 | Manual refresh button | `<Button variant="primary" loading={refreshing}>` |
+
 
 ### Structural changes
 - Split monolithic CredentialsPage into sub-components:

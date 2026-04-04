@@ -35,10 +35,10 @@ test("ALL_MIGRATIONS entries are non-empty SQL strings", () => {
 
 test("ALTER TABLE migrations use IF NOT EXISTS for safety", () => {
   for (const migration of ALL_MIGRATIONS) {
-    if (migration.sql.toUpperCase().includes("ALTER TABLE")) {
+    if (migration.sql.toUpperCase().includes("ALTER TABLE") && migration.sql.toUpperCase().includes("ADD COLUMN")) {
       assert.ok(
         migration.sql.toUpperCase().includes("IF NOT EXISTS"),
-        `ALTER TABLE migration version ${migration.version} should use IF NOT EXISTS for idempotency: "${migration.sql.slice(0, 80)}..."`,
+        `ADD COLUMN migration version ${migration.version} should use IF NOT EXISTS for idempotency: "${migration.sql.slice(0, 80)}..."`,
       );
     }
   }

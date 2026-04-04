@@ -57,9 +57,9 @@ Endpoints (proxied from OpenPlanner):
 - `POST /api/v1/lake/jobs/import/chatgpt` — import ChatGPT data
 
 Rules:
-- proxx handles auth, OpenPlanner trusts proxx
+- proxx handles auth, signs forwarded identity context, and OpenPlanner trusts only authenticated proxx traffic
 - OpenPlanner binds to localhost only within the compose network
-- proxx adds `X-Tenant-Id` header for multi-tenant event segregation
+- proxx strips inbound `X-Forwarded-User` / `X-Tenant-Id`, then reissues `X-Forwarded-User`, `X-Tenant-Id`, and `X-Internal-Auth` (or HMAC signature) for multi-tenant event segregation
 - existing proxx session search (`/api/v1/sessions/*`) progressively delegates to OpenPlanner
 
 ### Surface 2: Lake control-plane API
@@ -137,8 +137,10 @@ interface OpenPlannerDescriptor {
 ### Target state
 - Proxx is the single auth gate for all lake traffic
 - OpenPlanner binds to `127.0.0.1` or compose internal network only
-- Proxx forwards authenticated requests with `X-Forwarded-User` and `X-Tenant-Id` headers
-- OpenPlanner trusts localhost/internal requests from proxx (no additional auth needed)
+- Proxx strips any client-supplied `X-Forwarded-User` / `X-Tenant-Id` headers before forwarding
+- Proxx forwards authenticated requests with `X-Forwarded-User`, `X-Tenant-Id`, and `X-Internal-Auth` (or equivalent HMAC signature)
+- OpenPlanner verifies that internal auth credential before trusting forwarded identity headers
+- Deployments must verify OpenPlanner is not externally exposed and should additionally validate source IP / private-network origin as defense in depth
 
 ## Deployment
 
@@ -154,7 +156,8 @@ services:
     networks:
       - gateway
     depends_on:
-      - openplanner
+      openplanner:
+        condition: service_healthy
 
   openplanner:
     build: ../../services/openplanner
@@ -165,6 +168,12 @@ services:
     environment:
       - OPENPLANNER_STORAGE_BACKEND=duckdb
       - CHROMA_URL=http://chroma:8000
+      - OPENPLANNER_INTERNAL_AUTH=${OPENPLANNER_INTERNAL_AUTH}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7777/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
 
   chroma:
     image: chromadb/chroma
@@ -184,6 +193,12 @@ services:
 - ChromaDB: vector data on host volume
 - Proxx: SQL database (PostgreSQL) for config, credentials, and lake registry
 
+### Operational requirements
+- Proxx wraps all OpenPlanner calls in an `OpenPlannerProxy` component with explicit timeout, retry-with-backoff, and circuit-breaker settings
+- When `OPENPLANNER_ENABLED=true` and OpenPlanner is unavailable, session search must degrade in a documented way (cached/empty results plus operator-visible error) instead of hanging indefinitely
+- Operators must define backup + restore procedures for DuckDB/blob volumes and Chroma volumes, including verification after restore
+- Health, latency, error-rate, and queue-depth metrics must be emitted for both proxx and OpenPlanner, with alert thresholds for sustained failures
+
 ## Session search migration
 
 ### Current state
@@ -201,10 +216,11 @@ Proxx delegates all session search to OpenPlanner:
 - Proxx's `/api/v1/sessions/*` routes become thin proxies to OpenPlanner
 
 ### Migration path
-1. Dual-write: proxx writes to both local Chroma and OpenPlanner events
-2. Read-switch: proxx reads from OpenPlanner, writes still dual
-3. Local deprecation: proxx stops writing to local Chroma
-4. Cleanup: local Chroma dependency removed from proxx
+1. Dual-write: proxx writes to both local Chroma and OpenPlanner events using an explicit failure policy (either fail-fast or queue-and-retry; do not silently drop one side)
+2. Reconciliation: run a reconciliation job/API that compares local and OpenPlanner state, repairs divergences, and reports error budgets
+3. Read-switch: proxx reads from OpenPlanner only after reconciliation + consistency verification gates pass, while writes may remain dual during soak
+4. Local deprecation: proxx stops writing to local Chroma after dual-write failure rate and reconciliation backlog stay below threshold
+5. Cleanup: local Chroma dependency removed from proxx
 
 ## Affected files
 
@@ -249,6 +265,7 @@ Proxx delegates all session search to OpenPlanner:
 
 ### Phase 4: Session Search Migration
 - Dual-write: proxx ingests events into OpenPlanner while keeping local Chroma
+- Add reconciliation + observability for dual-write mismatches before changing reads
 - Read-switch: proxx session search delegates to OpenPlanner
 - Update `/api/v1/sessions/*` routes to proxy OpenPlanner search
 - Update web console session search page to use OpenPlanner

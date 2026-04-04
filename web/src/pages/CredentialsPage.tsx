@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Badge, Card, Input, Modal, Progress, Spinner, StatusChipStack, type StatusChipItem, Tabs, Tooltip, useToast } from "@open-hax/uxx";
+import { Badge, Spinner, StatusChipStack, type StatusChipItem } from "@open-hax/uxx";
 import {
   addApiKeyCredential,
   disableAccount,
@@ -194,48 +194,12 @@ function formatQuotaRateLimitStatus(rateLimit: CredentialQuotaRateLimit | null):
   return "Unknown";
 }
 
-function quotaRateLimitBadgeClass(rateLimit: CredentialQuotaRateLimit | null): string {
-  if (rateLimit?.allowed === true) {
-    return "credentials-badge-accent";
-  }
-
-  if (rateLimit?.allowed === false || rateLimit?.limitReached === true) {
-    return "credentials-badge-danger";
-  }
-
-  return "credentials-badge-muted";
-}
-
-function probeBadgeClass(result: OpenAiAccountProbeResult | undefined): string {
-  if (!result) {
-    return "credentials-badge-muted";
-  }
-
-  return result.ok ? "credentials-badge-accent" : "credentials-badge-danger";
-}
-
 function formatAggregatePercent(value: number | null): string {
   if (value === null || !Number.isFinite(value)) {
     return "No data";
   }
 
   return value >= 10 ? `${Math.round(value)}%` : `${value.toFixed(1)}%`;
-}
-
-function quotaBadgeClassFromPercent(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) {
-    return "credentials-badge-muted";
-  }
-
-  if (value <= 15) {
-    return "credentials-badge-danger";
-  }
-
-  if (value <= 40) {
-    return "credentials-badge-warning";
-  }
-
-  return "credentials-badge-accent";
 }
 
 function quotaToneClass(remainingPercent: number | null): string {

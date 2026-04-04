@@ -22,7 +22,7 @@
     :build "pass (pnpm build)"
     :store-tests "pass (npx tsx --test src/tests/request-log-store.test.ts)"
     :proxy-analytics "pass (targeted src/tests/proxy.test.ts cache-hit summary regressions)"
-    :known-red "unrelated proxy.test failure remains: glm chat requests skip ollama-cloud when provider catalog does not advertise the requested model"))
+    :known-red "unrelated proxy.test failure remains: glm chat requests skip ollama-cloud when provider catalog does not advertise the requested model")
 
   :deferred (
     :metadata-rebuild "Rebuild live services/proxx request-log metadata to refresh stale weekly/monthly cache counters"

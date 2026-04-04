@@ -4,13 +4,12 @@ export function orderProvidersByRule(
   providerIds: readonly ProviderId[],
   rule: ModelRoutingRule | undefined,
 ): ProviderId[] {
-  if (providerIds.length <= 1) {
-    return [...providerIds];
-  }
-
   const originalOrder = new Map(providerIds.map((providerId, index) => [providerId, index]));
   const excludedProviders = new Set(rule?.excludedProviders ?? []);
   const filteredProviderIds = providerIds.filter((providerId) => !excludedProviders.has(providerId));
+  if (filteredProviderIds.length <= 1) {
+    return [...filteredProviderIds];
+  }
   const preferredProviders = rule?.preferredProviders ?? [];
   if (preferredProviders.length === 0) {
     return [...filteredProviderIds];

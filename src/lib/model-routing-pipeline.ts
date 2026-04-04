@@ -14,7 +14,6 @@ import { sendOpenAiError } from "./provider-utils.js";
 import { resolveCatalogAndAlias } from "./catalog-alias-resolver.js";
 import {
   resolvableConcreteModelIds,
-  resolvableConcreteModelIdsForProviders,
 } from "./model-routing-helpers.js";
 import { isAutoModel, rankAutoModels } from "./auto-model-selector.js";
 import { isCephalonAutoModel, buildCephalonModelCandidates } from "./provider-strategy/strategies/cephalon.js";

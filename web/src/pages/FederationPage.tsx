@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { ActionStrip, Badge, Button, Card, FilterToolbar, Input, PanelHeader, Spinner, SurfaceHero, Tabs, type TabItem } from "@open-hax/uxx";
+import { ActionStrip, Badge, Button, Card, FilterToolbar, Input, PanelHeader, SurfaceHero, Tabs, type TabItem } from "@open-hax/uxx";
 import {
   addFederationPeer,
   getFederationAccounts,
