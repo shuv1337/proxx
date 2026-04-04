@@ -1846,6 +1846,7 @@ test("fetches live OpenAI Codex quota windows and persists refreshed OAuth token
     await withProxyApp(
       {
         keys: [],
+        models: ["gpt-5.2"],
         keysPayload: {
           providers: {
             openai: {
@@ -7286,6 +7287,9 @@ test("/api/tools/websearch falls back to Exa when OpenAI fails", async () => {
         })}\n\n`,
         { status: 200, headers: { "content-type": "text/event-stream" } }
       );
+    }
+    if (typeof url === "string" && url.startsWith("http://127.0.0.1:")) {
+      return originalFetch(input, init);
     }
     throw new Error(`Unexpected fetch URL: ${url}`);
   }) as typeof fetch;

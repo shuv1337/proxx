@@ -4,6 +4,7 @@ import type { ProviderRoute, ResolvedModelCatalog } from "./provider-routing.js"
 import { parseModelIdsFromCatalogPayload, buildLargestModelAliases, dedupeModelIds } from "./provider-routing.js";
 import { fetchWithResponseTimeout } from "./provider-utils.js";
 import { loadDeclaredModels, loadModelPreferences, type ModelPreferences } from "./models.js";
+import { joinUrl } from "./request-utils.js";
 
 const DEFAULT_CATALOG_ROUTE_TIMEOUT_MS = 15_000;
 
@@ -283,9 +284,7 @@ export class ProviderCatalogStore {
         if (signal?.aborted) {
           return [];
         }
-        const normalizedBase = route.baseUrl.replace(/\/+$/, "");
-        const normalizedPath = candidatePath.startsWith("/") ? candidatePath : `/${candidatePath}`;
-        const url = `${normalizedBase}${normalizedPath}`;
+        const url = joinUrl(route.baseUrl, candidatePath);
         let response: Response;
         try {
           response = await fetchWithResponseTimeout(url, {
