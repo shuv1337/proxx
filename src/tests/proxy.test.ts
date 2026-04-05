@@ -8600,7 +8600,7 @@ test("bridges native /api/chat requests through the OpenAI-compatible upstream c
   );
 });
 
-test("serves /v1/embeddings from local ollama-compatible upstream", async () => {
+test("serves /v1/embeddings from local ollama-compatible upstream and expands embedding num_ctx to the model context window", async () => {
   let observedPath = "";
   let observedBody: unknown;
 
@@ -8609,7 +8609,20 @@ test("serves /v1/embeddings from local ollama-compatible upstream", async () => 
       keys: [],
       upstreamHandler: async (request, body) => {
         observedPath = request.url ?? "";
-        observedBody = JSON.parse(body);
+        observedBody = body.length > 0 ? JSON.parse(body) : undefined;
+
+        if (observedPath === "/api/show") {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model_info: {
+                "qwen3.context_length": 40960,
+              },
+            }),
+          };
+        }
+
         return {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -8633,6 +8646,8 @@ test("serves /v1/embeddings from local ollama-compatible upstream", async () => 
       assert.equal(observedPath, "/api/embed");
       assert.ok(isRecord(observedBody));
       assert.equal(observedBody.model, "qwen3-embedding:0.6b");
+      assert.ok(isRecord(observedBody.options));
+      assert.equal(observedBody.options.num_ctx, 40960);
       const payload: unknown = response.json();
       assert.ok(isRecord(payload));
       assert.ok(Array.isArray(payload.data));
@@ -8665,14 +8680,29 @@ test("rejects auto models for /v1/embeddings", async () => {
   );
 });
 
-test("proxies native /api/embed and /api/embeddings to their matching upstream ollama endpoints", async () => {
+test("proxies native /api/embed and /api/embeddings to their matching upstream ollama endpoints with full embedding context", async () => {
   let observedPath = "";
+  let observedBody: unknown;
 
   await withProxyApp(
     {
       keys: [],
-      upstreamHandler: async (request) => {
+      upstreamHandler: async (request, body) => {
         observedPath = request.url ?? "";
+        observedBody = body.length > 0 ? JSON.parse(body) : undefined;
+
+        if (observedPath === "/api/show") {
+          return {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model_info: {
+                "qwen3.context_length": 40960,
+              },
+            }),
+          };
+        }
+
         if (observedPath === "/api/embeddings") {
           return {
             status: 200,
@@ -8700,6 +8730,9 @@ test("proxies native /api/embed and /api/embeddings to their matching upstream o
       });
       assert.equal(batchResponse.statusCode, 200);
       assert.equal(observedPath, "/api/embed");
+      assert.ok(isRecord(observedBody));
+      assert.ok(isRecord(observedBody.options));
+      assert.equal(observedBody.options.num_ctx, 40960);
       const batchPayload: unknown = batchResponse.json();
       assert.ok(isRecord(batchPayload));
       assert.deepEqual(batchPayload.embeddings, [[1, 2, 3], [4, 5, 6]]);
@@ -8714,6 +8747,9 @@ test("proxies native /api/embed and /api/embeddings to their matching upstream o
       });
       assert.equal(singleResponse.statusCode, 200);
       assert.equal(observedPath, "/api/embed");
+      assert.ok(isRecord(observedBody));
+      assert.ok(isRecord(observedBody.options));
+      assert.equal(observedBody.options.num_ctx, 40960);
       const singlePayload: unknown = singleResponse.json();
       assert.ok(isRecord(singlePayload));
       assert.deepEqual(singlePayload.embedding, [1, 2, 3]);
