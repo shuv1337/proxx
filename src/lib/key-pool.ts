@@ -7,14 +7,29 @@ import { loadFactoryAuthV2, parseJwtExpiry } from "./factory-auth.js";
 
 export type ProviderAuthType = "api_key" | "oauth_bearer";
 
+export interface CooldownStore {
+  loadCooldowns(): Promise<Map<string, number>>;
+  persistCooldown(providerId: string, accountId: string, cooldownUntil: number): Promise<void>;
+  clearCooldown(providerId: string, accountId: string): Promise<void>;
+}
+
+export interface DisabledStore {
+  loadDisabledAccounts(): Promise<Set<string>>;
+  setAccountDisabled(providerId: string, accountId: string, disabled: boolean): Promise<void>;
+}
+
 export interface KeyPoolConfig {
   readonly keysFilePath: string;
   readonly reloadIntervalMs: number;
   readonly defaultCooldownMs: number;
   readonly defaultProviderId: string;
   readonly accountStore?: ProviderAccountStore;
+  readonly cooldownStore?: CooldownStore;
+  readonly disabledStore?: DisabledStore;
   readonly preferAccountStoreProviders?: boolean;
   readonly expiryBufferMs?: number;
+  readonly cooldownJitterFactor?: number;
+  readonly enableRandomWalk?: boolean;
 }
 
 export interface ProviderCredential {
@@ -34,6 +49,7 @@ export interface KeyPoolStatus {
   readonly totalAccounts: number;
   readonly availableAccounts: number;
   readonly cooldownAccounts: number;
+  readonly disabledAccounts: number;
   readonly inFlightAccounts: number;
   readonly nextReadyInMs: number;
 }
@@ -402,6 +418,14 @@ function readProvidersFromEnv(): Map<string, ProviderState> {
     );
   }
 
+  const rotussyKey = (process.env.ROTUSSY_API_KEY ?? "").trim();
+  if (rotussyKey) {
+    providers.set(
+      normalizeProviderId(process.env.ROTUSSY_PROVIDER_ID ?? "rotussy"),
+      createEnvProviderState(process.env.ROTUSSY_PROVIDER_ID ?? "rotussy", rotussyKey),
+    );
+  }
+
   return providers;
 }
 
@@ -495,7 +519,11 @@ async function readProvidersFromSources(
   accountStore?: ProviderAccountStore,
   preferAccountStoreProviders = false,
 ): Promise<Map<string, ProviderState>> {
-  const envProviders = readProvidersFromEnv();
+  // With a DB-backed account store, env vars are bootstrap inputs only.
+  // Runtime provider state should come from the persisted account store.
+  const envProviders = accountStore && preferAccountStoreProviders
+    ? new Map<string, ProviderState>()
+    : readProvidersFromEnv();
   const inlineJsonProviders = accountStore
     ? new Map<string, ProviderState>()
     : readProvidersFromJsonEnv(defaultProviderId);
@@ -574,14 +602,37 @@ function resolveExpiryBufferMs(expiryBufferMs: unknown): number {
 export class KeyPool {
   private readonly cooldownByAccountKey = new Map<string, number>();
   private readonly inFlightByAccountKey = new Map<string, number>();
+  private readonly failureStreakByAccountKey = new Map<string, number>();
+  private readonly disabledAccountKeys = new Set<string>();
   private providers = new Map<string, ProviderState>();
   private lastReloadAt = 0;
   private reloadInFlight: Promise<void> | null = null;
+  private readonly rng: () => number;
 
-  public constructor(private readonly config: KeyPoolConfig) {}
+  public constructor(
+    private readonly config: KeyPoolConfig,
+    rng?: () => number,
+  ) {
+    this.rng = rng ?? Math.random;
+  }
 
   public async warmup(): Promise<void> {
     await this.ensureFreshProviders(true);
+    if (this.config.cooldownStore) {
+      const persisted = await this.config.cooldownStore.loadCooldowns();
+      const now = Date.now();
+      for (const [key, cooldownUntil] of persisted) {
+        if (cooldownUntil > now) {
+          this.cooldownByAccountKey.set(key, cooldownUntil);
+        }
+      }
+    }
+    if (this.config.disabledStore) {
+      const disabled = await this.config.disabledStore.loadDisabledAccounts();
+      for (const key of disabled) {
+        this.disabledAccountKeys.add(key);
+      }
+    }
   }
 
   public async getRequestOrder(providerId: string = this.config.defaultProviderId): Promise<ProviderCredential[]> {
@@ -595,15 +646,22 @@ export class KeyPool {
 
     const accountCount = providerState.accounts.length;
     const now = Date.now();
-    const startOffset = providerState.nextOffset % accountCount;
-    providerState.nextOffset = (providerState.nextOffset + 1) % accountCount;
-
     const expiryBuffer = resolveExpiryBufferMs(this.config.expiryBufferMs);
+
     const idle: ProviderCredential[] = [];
     const busy: ProviderCredential[] = [];
-    for (let index = 0; index < accountCount; index += 1) {
-      const credential = providerState.accounts[(startOffset + index) % accountCount];
+    const cooldownSoon: ProviderCredential[] = [];
+
+    const startOffset = providerState.nextOffset % accountCount;
+
+    for (let i = 0; i < accountCount; i += 1) {
+      const index = (startOffset + i) % accountCount;
+      const credential = providerState.accounts[index];
       if (!credential) {
+        continue;
+      }
+
+      if (this.disabledAccountKeys.has(accountStateKey(credential))) {
         continue;
       }
 
@@ -619,10 +677,84 @@ export class KeyPool {
         } else {
           idle.push(credential);
         }
+      } else {
+        cooldownSoon.push(credential);
       }
     }
 
+    providerState.nextOffset = (startOffset + 1) % accountCount;
+
+    if (this.config.enableRandomWalk) {
+      return this.randomWalkOrder(idle, busy, cooldownSoon);
+    }
+
     return [...idle, ...busy];
+  }
+
+  private randomWalkOrder(
+    idle: ProviderCredential[],
+    busy: ProviderCredential[],
+    cooldownSoon: ProviderCredential[],
+  ): ProviderCredential[] {
+    const now = Date.now();
+    const jitterFactor = this.config.cooldownJitterFactor ?? 0.4;
+
+    const shuffledIdle = this.weightedShuffle(idle);
+    const shuffledBusy = this.weightedShuffle(busy);
+
+    const readyCooldown = cooldownSoon
+      .map((cred) => ({
+        cred,
+        jitteredUntil: this.applyCooldownJitter(
+          this.cooldownByAccountKey.get(accountStateKey(cred)) ?? 0,
+          jitterFactor,
+        ),
+      }))
+      .sort((a, b) => a.jitteredUntil - b.jitteredUntil)
+      .filter((entry) => entry.jitteredUntil <= now)
+      .map((entry) => entry.cred);
+
+    return [...shuffledIdle, ...shuffledBusy, ...readyCooldown];
+  }
+
+  private weightedShuffle<T>(items: T[]): T[] {
+    if (items.length <= 1) {
+      return [...items];
+    }
+
+    const result: T[] = [];
+    const remaining = items.map((item) => ({ item, weight: 0.5 + this.rng() }));
+
+    while (remaining.length > 0) {
+      const remainingTotal = remaining.reduce((sum, entry) => sum + entry.weight, 0);
+      const target = this.rng() * remainingTotal;
+      let selectedIndex = 0;
+      let cumulativeWeight = 0;
+
+      for (let i = 0; i < remaining.length; i++) {
+        cumulativeWeight += remaining[i]!.weight;
+        if (target <= cumulativeWeight) {
+          selectedIndex = i;
+          break;
+        }
+      }
+
+      result.push(remaining.splice(selectedIndex, 1)[0]!.item);
+    }
+
+    return result;
+  }
+
+  private applyCooldownJitter(cooldownUntil: number, jitterFactor: number): number {
+    if (cooldownUntil <= 0) {
+      return 0;
+    }
+    const remaining = cooldownUntil - Date.now();
+    if (remaining <= 0) {
+      return 0;
+    }
+    const jitter = remaining * jitterFactor * (this.rng() - 0.5) * 2;
+    return cooldownUntil + jitter;
   }
 
   public async getAllAccounts(providerId: string = this.config.defaultProviderId): Promise<ProviderCredential[]> {
@@ -666,23 +798,27 @@ export class KeyPool {
 
     const accountCount = providerState.accounts.length;
     const now = Date.now();
-    const startOffset = providerState.nextOffset % accountCount;
-    providerState.nextOffset = (providerState.nextOffset + 1) % accountCount;
 
     const expiryBuffer = resolveExpiryBufferMs(this.config.expiryBufferMs);
 
     const idle: ProviderCredential[] = [];
     const busy: ProviderCredential[] = [];
+    const cooldownSoon: ProviderCredential[] = [];
     const refreshCandidates: ProviderCredential[] = [];
 
     for (let index = 0; index < accountCount; index += 1) {
-      const credential = providerState.accounts[(startOffset + index) % accountCount];
+      const credential = providerState.accounts[index];
       if (!credential) {
+        continue;
+      }
+
+      if (this.disabledAccountKeys.has(accountStateKey(credential))) {
         continue;
       }
 
       const cooldownUntil = this.cooldownByAccountKey.get(accountStateKey(credential)) ?? 0;
       if (cooldownUntil > now) {
+        cooldownSoon.push(credential);
         continue;
       }
 
@@ -713,6 +849,11 @@ export class KeyPool {
       } catch {
         // Skip accounts that fail refresh.
       }
+    }
+
+    if (this.config.enableRandomWalk) {
+      const ordered = this.randomWalkOrder(idle, busy, cooldownSoon);
+      return [...ordered, ...refreshed];
     }
 
     return [...idle, ...busy, ...refreshed];
@@ -802,26 +943,61 @@ export class KeyPool {
   }
 
   public markRateLimited(credential: ProviderCredential, retryAfterMs?: number): void {
-    const cooldown = Math.max(retryAfterMs ?? this.config.defaultCooldownMs, 1000);
-    this.cooldownByAccountKey.set(accountStateKey(credential), Date.now() + cooldown);
+    const baseCooldown = Math.max(retryAfterMs ?? this.config.defaultCooldownMs, 1000);
+    const jitterFactor = this.config.cooldownJitterFactor ?? 0.4;
+    const jitteredCooldown = this.applyJitterToCooldown(baseCooldown, jitterFactor);
+    const cooldownUntil = Date.now() + jitteredCooldown;
+    this.cooldownByAccountKey.set(accountStateKey(credential), cooldownUntil);
+
+    const streakKey = accountStateKey(credential);
+    const currentStreak = this.failureStreakByAccountKey.get(streakKey) ?? 0;
+    this.failureStreakByAccountKey.set(streakKey, currentStreak + 1);
+
     getTelemetry().recordMetric("proxy.key_pool.rate_limited", 1, {
       "proxy.provider_id": credential.providerId ?? this.config.defaultProviderId,
       "proxy.account_id": credential.accountId,
     });
+
+    this.persistCooldownAsync(credential.providerId, credential.accountId, cooldownUntil);
+  }
+
+  private applyJitterToCooldown(baseCooldownMs: number, jitterFactor: number): number {
+    const jitterRange = baseCooldownMs * jitterFactor;
+    const jitter = (this.rng() - 0.5) * 2 * jitterRange;
+    return Math.max(1000, baseCooldownMs + jitter);
   }
 
   public setAccountCooldownUntil(providerId: string, accountId: string, cooldownUntil: number): void {
     const key = accountStateKeyFromIds(normalizeProviderId(providerId), accountId);
     if (!Number.isFinite(cooldownUntil) || cooldownUntil <= Date.now()) {
       this.cooldownByAccountKey.delete(key);
+      this.persistCooldownAsync(providerId, accountId, 0);
       return;
     }
 
     this.cooldownByAccountKey.set(key, cooldownUntil);
+    this.persistCooldownAsync(providerId, accountId, cooldownUntil);
   }
 
   public clearAccountCooldown(providerId: string, accountId: string): void {
-    this.cooldownByAccountKey.delete(accountStateKeyFromIds(normalizeProviderId(providerId), accountId));
+    const key = accountStateKeyFromIds(normalizeProviderId(providerId), accountId);
+    this.cooldownByAccountKey.delete(key);
+    this.failureStreakByAccountKey.delete(key);
+    this.clearCooldownAsync(providerId, accountId);
+  }
+
+  public clearProviderCooldowns(providerId: string): void {
+    const normalizedProviderId = normalizeProviderId(providerId);
+    for (const [key, _cooldownUntil] of this.cooldownByAccountKey) {
+      if (key.startsWith(`${normalizedProviderId}\0`)) {
+        this.cooldownByAccountKey.delete(key);
+        this.failureStreakByAccountKey.delete(key);
+        const [_p, accountId] = key.split("\0", 2);
+        if (accountId) {
+          this.clearCooldownAsync(normalizedProviderId, accountId);
+        }
+      }
+    }
   }
 
   public async msUntilAnyKeyReady(providerId: string = this.config.defaultProviderId): Promise<number> {
@@ -841,6 +1017,7 @@ export class KeyPool {
         totalAccounts: 0,
         availableAccounts: 0,
         cooldownAccounts: 0,
+        disabledAccounts: 0,
         inFlightAccounts: 0,
         nextReadyInMs: 0
       };
@@ -848,10 +1025,17 @@ export class KeyPool {
 
     const now = Date.now();
     let availableAccounts = 0;
+    let cooldownAccounts = 0;
+    let disabledAccounts = 0;
     let inFlightAccounts = 0;
     let minDelay = Number.POSITIVE_INFINITY;
 
     for (const credential of providerState.accounts) {
+      if (this.disabledAccountKeys.has(accountStateKey(credential))) {
+        disabledAccounts += 1;
+        continue;
+      }
+
       const cooldownUntil = this.cooldownByAccountKey.get(accountStateKey(credential)) ?? 0;
       if ((this.inFlightByAccountKey.get(accountStateKey(credential)) ?? 0) > 0) {
         inFlightAccounts += 1;
@@ -861,6 +1045,7 @@ export class KeyPool {
         continue;
       }
 
+      cooldownAccounts += 1;
       minDelay = Math.min(minDelay, cooldownUntil - now);
     }
 
@@ -873,13 +1058,14 @@ export class KeyPool {
 
     return {
       providerId: normalizedProviderId,
-        authType: providerState.authType,
-        totalAccounts,
-        availableAccounts,
-        cooldownAccounts: Math.max(totalAccounts - availableAccounts, 0),
-        inFlightAccounts,
-        nextReadyInMs
-      };
+      authType: providerState.authType,
+      totalAccounts,
+      availableAccounts,
+      cooldownAccounts,
+      disabledAccounts,
+      inFlightAccounts,
+      nextReadyInMs,
+    };
   }
 
   public async getAllStatuses(): Promise<Record<string, KeyPoolStatus>> {
@@ -992,5 +1178,61 @@ export class KeyPool {
         this.inFlightByAccountKey.delete(key);
       }
     }
+
+    for (const key of this.failureStreakByAccountKey.keys()) {
+      if (!activeKeys.has(key)) {
+        this.failureStreakByAccountKey.delete(key);
+      }
+    }
+  }
+
+  private persistCooldownAsync(providerId: string, accountId: string, cooldownUntil: number): void {
+    if (!this.config.cooldownStore) {
+      return;
+    }
+    if (cooldownUntil <= Date.now()) {
+      this.config.cooldownStore.clearCooldown(providerId, accountId).catch(() => undefined);
+    } else {
+      this.config.cooldownStore.persistCooldown(providerId, accountId, cooldownUntil).catch(() => undefined);
+    }
+  }
+
+  private clearCooldownAsync(providerId: string, accountId: string): void {
+    if (!this.config.cooldownStore) {
+      return;
+    }
+    this.config.cooldownStore.clearCooldown(providerId, accountId).catch(() => undefined);
+  }
+
+  public disableAccount(providerId: string, accountId: string): void {
+    const key = accountStateKeyFromIds(normalizeProviderId(providerId), accountId);
+    this.disabledAccountKeys.add(key);
+    if (this.config.disabledStore) {
+      this.config.disabledStore.setAccountDisabled(providerId, accountId, true).catch(() => undefined);
+    }
+  }
+
+  public enableAccount(providerId: string, accountId: string): void {
+    const key = accountStateKeyFromIds(normalizeProviderId(providerId), accountId);
+    this.disabledAccountKeys.delete(key);
+    if (this.config.disabledStore) {
+      this.config.disabledStore.setAccountDisabled(providerId, accountId, false).catch(() => undefined);
+    }
+  }
+
+  public isAccountDisabled(providerId: string, accountId: string): boolean {
+    const key = accountStateKeyFromIds(normalizeProviderId(providerId), accountId);
+    return this.disabledAccountKeys.has(key);
+  }
+
+  public getDisabledAccounts(): Array<{ providerId: string; accountId: string }> {
+    const result: Array<{ providerId: string; accountId: string }> = [];
+    for (const key of this.disabledAccountKeys) {
+      const [providerId, accountId] = key.split("\0", 2);
+      if (providerId && accountId) {
+        result.push({ providerId, accountId });
+      }
+    }
+    return result;
   }
 }

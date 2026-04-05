@@ -4,6 +4,8 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import fastifySwagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
 
+import "./lib/fastify-types.js";
+
 import { DEFAULT_MODELS, type ProxyConfig } from "./lib/config.js";
 import {
   PROXY_AUTH_COOKIE_NAME,
@@ -17,12 +19,9 @@ import {
 
 import { KeyPool, type ProviderCredential } from "./lib/key-pool.js";
 import { CredentialStore } from "./lib/credential-store.js";
-import { OpenAiOAuthManager, isTerminalOpenAiRefreshError, type OAuthTokens } from "./lib/openai-oauth.js";
+import { OpenAiOAuthManager } from "./lib/openai-oauth.js";
 import {
   factoryCredentialNeedsRefresh,
-  parseJwtExpiry,
-  persistFactoryAuthV2,
-  refreshFactoryOAuthToken,
 } from "./lib/factory-auth.js";
 import { ProviderCatalogStore } from "./lib/provider-catalog.js";
 import { initializePolicyEngine, createPolicyEngine, type PolicyEngine } from "./lib/policy/index.js";
@@ -39,13 +38,13 @@ import {
   sendOpenAiError,
   toErrorMessage,
 } from "./lib/provider-utils.js";
-import { getTelemetry, type TelemetrySpan } from "./lib/telemetry/otel.js";
+import { getTelemetry } from "./lib/telemetry/otel.js";
 import { RequestLogStore } from "./lib/request-log-store.js";
 import { PromptAffinityStore } from "./lib/prompt-affinity-store.js";
 import { ProviderRoutePheromoneStore } from "./lib/provider-route-pheromone-store.js";
 import { ProxySettingsStore } from "./lib/proxy-settings-store.js";
 import { QuotaMonitor } from "./lib/quota-monitor.js";
-import { registerUiRoutes } from "./lib/ui-routes.js";
+import { registerWebSocketRoutes } from "./routes/api/ui/ws.js";
 import { registerApiV1Routes } from "./routes/api/v1/index.js";
 import { modelIdsToNativeTags } from "./lib/ollama-native.js";
 import { createSqlConnection, closeConnection, type Sql } from "./lib/db/index.js";
@@ -57,9 +56,9 @@ import { SqlRequestUsageStore } from "./lib/db/sql-request-usage-store.js";
 import { SqlFederationStore } from "./lib/db/sql-federation-store.js";
 import { SqlTenantProviderPolicyStore } from "./lib/db/sql-tenant-provider-policy-store.js";
 import { SqlAuthPersistence } from "./lib/auth/sql-persistence.js";
-import { seedFromJsonFile, seedFromJsonValue, seedFactoryAuthFromFiles, seedModelsFromFile } from "./lib/db/json-seeder.js";
+import { seedApiKeyProvidersFromEnv, seedFromJsonFile, seedFromJsonValue, seedFactoryAuthFromFiles, seedModelsFromFile } from "./lib/db/json-seeder.js";
 import { RuntimeCredentialStore } from "./lib/runtime-credential-store.js";
-import { TokenRefreshManager } from "./lib/token-refresh-manager.js";
+import { createTokenRefreshManager } from "./lib/token-refresh-handlers.js";
 import { DEFAULT_TENANT_ID } from "./lib/tenant-api-key.js";
 import { resolveRequestAuth, type ResolvedRequestAuth } from "./lib/request-auth.js";
 import { createEnvFederationBridgeAgent } from "./lib/federation/bridge-agent-autostart.js";
@@ -191,6 +190,15 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
         }
       }
 
+      try {
+        const envSeedResult = await seedApiKeyProvidersFromEnv(sql);
+        if (envSeedResult.providers > 0 || envSeedResult.accounts > 0) {
+          app.log.info({ providers: envSeedResult.providers, accounts: envSeedResult.accounts }, "seeded api-key providers from env into database");
+        }
+      } catch (error) {
+        app.log.warn({ error: toErrorMessage(error) }, "failed to seed api-key providers from env; continuing with existing data");
+      }
+
       // Seed Factory OAuth credentials from encrypted auth.v2 files into the DB.
       // Only imports on first boot when no factory accounts exist in the DB yet.
       try {
@@ -234,7 +242,11 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     defaultCooldownMs: config.keyCooldownMs,
     defaultProviderId: config.upstreamProviderId,
     accountStore: sqlCredentialStore,
+    cooldownStore: sqlCredentialStore,
+    disabledStore: sqlCredentialStore,
     preferAccountStoreProviders: sqlCredentialStore !== undefined,
+    cooldownJitterFactor: config.keyCooldownJitterFactor,
+    enableRandomWalk: config.enableKeyRandomWalk,
   });
   try {
     await keyPool.warmup();
@@ -279,181 +291,29 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     clientSecret: config.openaiOauthClientSecret,
   });
 
-  const tokenRefreshManager = new TokenRefreshManager(
-    async (credential) => {
-      if (!credential.refreshToken) {
-        return null;
-      }
-
-      // Factory OAuth credentials use WorkOS refresh, not OpenAI OAuth
-      if (credential.providerId === "factory") {
-        return refreshFactoryAccount(credential);
-      }
-
-      app.log.info({ accountId: credential.accountId, providerId: credential.providerId }, "refreshing expired OAuth token");
-
-      let newTokens: OAuthTokens;
-      try {
-        newTokens = await oauthManager.refreshToken(credential.refreshToken);
-      } catch (error) {
-        if (isTerminalOpenAiRefreshError(error)) {
-          const disabledCredential: ProviderCredential = {
-            ...credential,
-            refreshToken: undefined,
-          };
-
-          keyPool.updateAccountCredential(credential.providerId, credential, disabledCredential);
-          if (typeof credential.expiresAt === "number" && credential.expiresAt <= Date.now()) {
-            keyPool.markRateLimited(disabledCredential, 24 * 60 * 60 * 1000);
-          }
-
-          await runtimeCredentialStore.upsertOAuthAccount(
-            credential.providerId,
-            disabledCredential.accountId,
-            disabledCredential.token,
-            undefined,
-            disabledCredential.expiresAt,
-            disabledCredential.chatgptAccountId,
-            undefined,
-            undefined,
-            disabledCredential.planType,
-          );
-
-          app.log.warn({
-            accountId: credential.accountId,
-            providerId: credential.providerId,
-            code: error.code,
-            status: error.status,
-          }, "disabled terminally invalid OpenAI refresh token; full reauth required");
-        }
-
-        throw error;
-      }
-
-      const newCredential: ProviderCredential = {
-        providerId: credential.providerId,
-        accountId: newTokens.accountId,
-        token: newTokens.accessToken,
-        authType: "oauth_bearer",
-        chatgptAccountId: newTokens.chatgptAccountId ?? credential.chatgptAccountId,
-        planType: newTokens.planType,
-        refreshToken: newTokens.refreshToken ?? credential.refreshToken,
-        expiresAt: newTokens.expiresAt,
-      };
-
-      keyPool.updateAccountCredential(credential.providerId, credential, newCredential);
-
-      await runtimeCredentialStore.upsertOAuthAccount(
-        credential.providerId,
-        newCredential.accountId,
-        newCredential.token,
-        newCredential.refreshToken,
-        newCredential.expiresAt,
-        newCredential.chatgptAccountId,
-        newTokens.email,
-        newTokens.subject,
-        newTokens.planType,
-      );
-
-      app.log.info({
-        accountId: newCredential.accountId,
-        providerId: newCredential.providerId,
-        expiresAt: newCredential.expiresAt,
-      }, "OAuth token refreshed successfully");
-
-      return newCredential;
-    },
-    app.log,
-    {
+  const tokenRefreshManager = createTokenRefreshManager({
+    keyPool,
+    runtimeCredentialStore,
+    oauthManager,
+    sqlCredentialStore,
+    log: app.log,
+    config: {
       maxConcurrency: config.oauthRefreshMaxConcurrency,
       backgroundIntervalMs: config.oauthRefreshBackgroundIntervalMs,
       expiryBufferMs: 60_000,
       proactiveRefreshWindowMs: config.oauthRefreshProactiveWindowMs,
       maxConsecutiveFailures: 3,
     },
-  );
-
-  async function refreshExpiredOAuthAccount(credential: ProviderCredential): Promise<ProviderCredential | null> {
-    return tokenRefreshManager.refresh(credential);
-  }
-
-  async function refreshFactoryAccount(credential: ProviderCredential): Promise<ProviderCredential | null> {
-    if (!credential.refreshToken) {
-      return null;
-    }
-
-    try {
-      app.log.info({ accountId: credential.accountId, providerId: "factory" }, "refreshing Factory OAuth token via WorkOS");
-
-      const refreshed = await refreshFactoryOAuthToken(credential.refreshToken);
-      const expiresAt = refreshed.expiresAt ?? parseJwtExpiry(refreshed.accessToken) ?? undefined;
-
-      const newCredential: ProviderCredential = {
-        providerId: "factory",
-        accountId: credential.accountId,
-        token: refreshed.accessToken,
-        authType: "oauth_bearer",
-        refreshToken: refreshed.refreshToken,
-        expiresAt,
-      };
-
-      // Update the credential in the KeyPool's in-memory state
-      keyPool.updateAccountCredential("factory", credential, newCredential);
-
-      // Persist to the credential store (file or SQL)
-      await runtimeCredentialStore.upsertOAuthAccount(
-        "factory",
-        newCredential.accountId,
-        newCredential.token,
-        newCredential.refreshToken,
-        newCredential.expiresAt,
-      );
-
-      if (!sqlCredentialStore) {
-        try {
-          await persistFactoryAuthV2(refreshed.accessToken, refreshed.refreshToken);
-        } catch {
-          // Expected to fail on read-only container filesystems; DB has the data.
-        }
-      }
-
-      app.log.info({
-        accountId: newCredential.accountId,
-        providerId: "factory",
-        expiresAt: newCredential.expiresAt,
-      }, "Factory OAuth token refreshed successfully");
-
-      return newCredential;
-    } catch (error) {
-      app.log.warn({
-        error: toErrorMessage(error),
-        accountId: credential.accountId,
-        providerId: "factory",
-      }, "failed to refresh Factory OAuth token");
-      return null;
-    }
-  }
-
-  async function ensureFreshAccounts(providerId: string): Promise<void> {
-    const expiredAccounts = keyPool.getExpiredAccountsWithRefreshTokens(providerId);
-
-    if (expiredAccounts.length > 0) {
-      await tokenRefreshManager.refreshBatch(expiredAccounts);
-    }
-
-    // Factory OAuth: proactively refresh tokens within 30-min window (before they expire)
-    if (providerId === "factory") {
-      const allFactoryAccounts = await keyPool.getAllAccounts("factory").catch(() => [] as ProviderCredential[]);
-      for (const account of allFactoryAccounts) {
-        if (factoryCredentialNeedsRefresh(account)) {
-          await tokenRefreshManager.refresh(account);
-        }
-      }
-    }
-  }
+  });
 
   const FEDERATION_OWNER_SUBJECT_HEADER = "x-open-hax-federation-owner-subject";
   const FEDERATION_BRIDGE_TENANT_HEADER = "x-open-hax-bridge-tenant-id";
+
+  tokenRefreshManager.startBackgroundRefresh(() => {
+    const expiring = keyPool.getExpiringAccounts(config.oauthRefreshProactiveWindowMs);
+    const expired = keyPool.getAllExpiredWithRefreshTokens();
+    return [...expired, ...expiring];
+  });
 
   function inferWebConsoleUrl(request: FastifyRequest): string {
     const forwardedHost = readSingleHeader(request.headers as Record<string, unknown>, "x-forwarded-host")?.trim();
@@ -509,8 +369,6 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
 </html>`;
   }
 
-
-
   async function refreshOpenAiOauthAccounts(accountId?: string): Promise<{
     readonly totalAccounts: number;
     readonly refreshedCount: number;
@@ -546,12 +404,6 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       failedCount: candidates.length - refreshedCount,
     };
   }
-
-  tokenRefreshManager.startBackgroundRefresh(() => {
-    const expiring = keyPool.getExpiringAccounts(config.oauthRefreshProactiveWindowMs);
-    const expired = keyPool.getAllExpiredWithRefreshTokens();
-    return [...expired, ...expiring];
-  });
 
   const quotaMonitor = new QuotaMonitor(
     runtimeCredentialStore,
@@ -666,15 +518,9 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     app.log.warn("proxy auth disabled via PROXY_ALLOW_UNAUTHENTICATED=true");
   }
 
-  type DecoratedAppRequest = FastifyRequest & {
-    openHaxAuth: ResolvedRequestAuth | null;
-    _otelSpan: TelemetrySpan | null;
-  };
-
   app.decorateRequest("openHaxAuth", null);
 
   app.addHook("onRequest", async (request, reply) => {
-    const decoratedRequest = request as DecoratedAppRequest;
     const origin = request.headers.origin;
     reply.header("Access-Control-Allow-Origin", origin ?? "*");
     reply.header("Vary", "Origin");
@@ -748,7 +594,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
-    decoratedRequest.openHaxAuth = resolvedAuth;
+    request.openHaxAuth = resolvedAuth;
 
     const enforceTenantQuotaRoute = request.method === "POST" && (
       rawPath === "/v1/chat/completions"
@@ -798,11 +644,11 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       "http.method": request.method,
       "http.path": (request.raw.url ?? request.url).split("?")[0],
     });
-    (request as DecoratedAppRequest)._otelSpan = span;
+    request._otelSpan = span;
   });
 
   app.addHook("onResponse", async (request, reply) => {
-    const span = (request as DecoratedAppRequest)._otelSpan;
+    const span = request._otelSpan;
     if (!span) return;
     span.setAttribute("http.status_code", reply.statusCode);
     if (reply.statusCode >= 400) span.setStatus("error", `HTTP ${reply.statusCode}`);
@@ -810,9 +656,28 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     span.end();
   });
 
-  app.options("/", async (_request, reply) => {
-    reply.code(204).send();
-  });
+  const OPTIONS_PATHS = [
+    "/",
+    "/health",
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/v1/images/generations",
+    "/v1/embeddings",
+    "/v1/models",
+    "/v1/models/:model",
+    "/api/chat",
+    "/api/generate",
+    "/api/embed",
+    "/api/embeddings",
+    "/api/tags",
+    "/api/ui",
+    "/api/ui/*",
+    "/api/v1",
+    "/api/v1/*",
+  ];
+  for (const path of OPTIONS_PATHS) {
+    app.options(path, async (_request, reply) => { reply.code(204).send(); });
+  }
 
   app.get("/", async (request, reply) => {
     reply.header("content-type", "text/html; charset=utf-8");
@@ -820,70 +685,6 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   });
 
   app.get("/favicon.ico", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/health", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/v1/chat/completions", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/v1/responses", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/v1/images/generations", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/v1/embeddings", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/v1/models", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/v1/models/:model", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/api/chat", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/api/generate", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/api/embed", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/api/embeddings", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/api/tags", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/api/ui", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/api/ui/*", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/api/v1", async (_request, reply) => {
-    reply.code(204).send();
-  });
-
-  app.options("/api/v1/*", async (_request, reply) => {
     reply.code(204).send();
   });
 
@@ -895,9 +696,22 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     dynamicProviderBaseUrlGetter: dynamicProviderBaseUrlGetter
       ? async (id: string) => (await dynamicProviderBaseUrlGetter(id)) ?? undefined
       : async () => undefined, bridgeRelay, quotaMonitor,
-    refreshFactoryAccount: async (c) => { await refreshFactoryAccount(c as never); },
-    ensureFreshAccounts,
-    refreshExpiredOAuthAccount: async (c) => await refreshExpiredOAuthAccount(c as never),
+    refreshExpiredOAuthAccount: async (c) => tokenRefreshManager.refresh(c),
+    refreshFactoryAccount: async (c) => { await tokenRefreshManager.refresh(c); return null; },
+    ensureFreshAccounts: async (providerId) => {
+      const expired = keyPool.getExpiredAccountsWithRefreshTokens(providerId);
+      if (expired.length > 0) {
+        await tokenRefreshManager.refreshBatch(expired);
+      }
+      if (providerId === "factory") {
+        const allFactoryAccounts = await keyPool.getAllAccounts("factory").catch(() => [] as ProviderCredential[]);
+        for (const account of allFactoryAccounts) {
+          if (factoryCredentialNeedsRefresh(account)) {
+            await tokenRefreshManager.refresh(account);
+          }
+        }
+      }
+    },
     getMergedModelIds,
     executeFederatedRequestFallback: async (input) => executeFederatedRequestFallback(fedDeps, input),
     injectNativeBridge: async (url, payload, headers) => injectNativeBridge(getBridgeDeps(), url, payload, headers),
@@ -912,7 +726,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
   registerEmbeddingsRoutes(deps, app);
   registerNativeOllamaRoutes(deps, app);
 
-  const uiBridgeRelay = await registerUiRoutes(app, {
+  const { bridgeRelay: wsBridgeRelay } = await registerWebSocketRoutes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -924,11 +738,10 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     authPersistence: sqlAuthPersistence,
     proxySettingsStore,
     eventStore,
-    refreshOpenAiOauthAccounts,
   });
 
-  bridgeRelay = uiBridgeRelay;
-  (deps as { bridgeRelay: FederationBridgeRelay | undefined }).bridgeRelay = uiBridgeRelay;
+  bridgeRelay = wsBridgeRelay;
+  (deps as { bridgeRelay: FederationBridgeRelay | undefined }).bridgeRelay = wsBridgeRelay;
 
   await registerApiV1Routes(app, {
     config,
@@ -943,7 +756,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     proxySettingsStore,
     eventStore,
     refreshOpenAiOauthAccounts,
-    bridgeRelay: uiBridgeRelay,
+    bridgeRelay: wsBridgeRelay,
   });
 
   app.get("/api/tags", async (_request, reply) => {

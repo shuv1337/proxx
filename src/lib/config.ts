@@ -74,6 +74,9 @@ export interface ProxyConfig {
   readonly settingsFilePath: string;
   readonly keyReloadMs: number;
   readonly keyCooldownMs: number;
+  readonly keyCooldownJitterFactor: number;
+  readonly enableKeyRandomWalk: boolean;
+  readonly ollamaWeeklyCooldownMultiplier: number;
   readonly requestTimeoutMs: number;
   readonly streamBootstrapTimeoutMs: number;
   readonly upstreamTransientRetryCount: number;
@@ -133,11 +136,13 @@ export const DEFAULT_MODELS: readonly string[] = [
   "gpt-5-mini",
   "gemini-2.5-flash",
   "gemini-2.5-pro",
+  "glm-5v-turbo",
   "glm-5",
   "Kimi-K2.5",
   "gemini-3.1-pro-preview",
   "qwen3.5:4b-q8_0",
   "qwen3.5:2b-bf16",
+  "auto:vision",
   "auto:cheapest",
   "auto:fastest",
   "auto:smartest",
@@ -337,6 +342,8 @@ function defaultProviderBaseUrl(providerId: string): string {
       return (process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta").replace(/\/+$/, "");
     case "zai":
       return (process.env.ZAI_BASE_URL ?? process.env.ZHIPU_BASE_URL ?? "https://api.z.ai/api/paas/v4").replace(/\/+$/, "");
+    case "rotussy":
+      return (process.env.ROTUSSY_BASE_URL ?? "https://api.ussyco.de/v1").replace(/\/+$/, "");
     case "mistral":
       return (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/+$/, "");
     case "ollama-cloud":
@@ -383,6 +390,7 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     zen: defaultProviderBaseUrl("zen"),
     gemini: defaultProviderBaseUrl("gemini"),
     zai: defaultProviderBaseUrl("zai"),
+    rotussy: defaultProviderBaseUrl("rotussy"),
     mistral: defaultProviderBaseUrl("mistral"),
     factory: defaultProviderBaseUrl("factory"),
     "ollama-stealth": defaultProviderBaseUrl("ollama-stealth"),
@@ -533,7 +541,10 @@ export function loadConfig(cwd: string = process.cwd()): ProxyConfig {
     promptAffinityFlushMs: nonNegativeNumberFromEnvAliases(["PROXY_PROMPT_AFFINITY_FLUSH_MS"], 250),
     settingsFilePath: filePathFromEnvAliases(["PROXY_SETTINGS_FILE"], "./data/proxy-settings.json", cwd),
     keyReloadMs: numberFromEnvAliases(["PROXY_KEY_RELOAD_MS", "VIVGRID_KEY_RELOAD_MS"], 5000),
-    keyCooldownMs: numberFromEnvAliases(["PROXY_KEY_COOLDOWN_MS", "VIVGRID_KEY_COOLDOWN_MS"], 300_000),
+    keyCooldownMs: numberFromEnvAliases(["PROXY_KEY_COOLDOWN_MS", "VIVGRID_KEY_COOLDOWN_MS"], 4 * 60 * 60 * 1000),
+    keyCooldownJitterFactor: numberFromEnvAliases(["PROXY_KEY_COOLDOWN_JITTER_FACTOR"], 0.4),
+    enableKeyRandomWalk: booleanFromEnvAliases(["PROXY_KEY_RANDOM_WALK"], true),
+    ollamaWeeklyCooldownMultiplier: numberFromEnvAliases(["OLLAMA_WEEKLY_COOLDOWN_MULTIPLIER"], 24),
     requestTimeoutMs: numberFromEnvAliases(["UPSTREAM_REQUEST_TIMEOUT_MS"], 180000),
     streamBootstrapTimeoutMs: numberFromEnvAliases(["UPSTREAM_STREAM_BOOTSTRAP_TIMEOUT_MS"], 8000),
     upstreamTransientRetryCount: nonNegativeNumberFromEnvAliases(["UPSTREAM_TRANSIENT_RETRY_COUNT"], 2),

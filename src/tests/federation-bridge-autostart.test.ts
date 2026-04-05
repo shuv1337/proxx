@@ -121,6 +121,9 @@ function buildConfig(input: {
     settingsFilePath: input.paths.settingsPath,
     keyReloadMs: 50,
     keyCooldownMs: 10_000,
+    keyCooldownJitterFactor: 0.4,
+    enableKeyRandomWalk: true,
+    ollamaWeeklyCooldownMultiplier: 24,
     requestTimeoutMs: 2_000,
     streamBootstrapTimeoutMs: 2_000,
     upstreamTransientRetryCount: 1,
@@ -210,16 +213,17 @@ test("createApp auto-starts the federation bridge agent from env", async () => {
       await waitFor(async () => {
         const response = await relayApp!.inject({
           method: "GET",
-          url: "/api/ui/federation/bridges",
+          url: "/api/v1/federation/bridges",
           headers: { authorization: "Bearer bridge-admin-token" },
         });
+        assert.equal(response.statusCode, 200);
         const payload = response.json() as { readonly sessions: ReadonlyArray<{ state: string }> };
         return payload.sessions.some((session) => session.state === "connected");
       }, 5_000);
 
       const connectedResponse = await relayApp!.inject({
         method: "GET",
-        url: "/api/ui/federation/bridges",
+        url: "/api/v1/federation/bridges",
         headers: { authorization: "Bearer bridge-admin-token" },
       });
       assert.equal(connectedResponse.statusCode, 200);
@@ -235,9 +239,10 @@ test("createApp auto-starts the federation bridge agent from env", async () => {
       await waitFor(async () => {
         const response = await relayApp!.inject({
           method: "GET",
-          url: "/api/ui/federation/bridges",
+          url: "/api/v1/federation/bridges",
           headers: { authorization: "Bearer bridge-admin-token" },
         });
+        assert.equal(response.statusCode, 200);
         const payload = response.json() as { readonly sessions: ReadonlyArray<Record<string, unknown>> };
         return payload.sessions[0]?.state === "disconnected";
       });
@@ -340,9 +345,10 @@ test("relay /v1/models merges bridged model inventory from an attached enclave a
       await waitFor(async () => {
         const response = await relayApp!.inject({
           method: "GET",
-          url: "/api/ui/federation/bridges",
+          url: "/api/v1/federation/bridges",
           headers: { authorization: "Bearer bridge-admin-token" },
         });
+        assert.equal(response.statusCode, 200);
         const payload = response.json() as { readonly sessions: ReadonlyArray<Record<string, unknown>> };
         return payload.sessions[0]?.state === "connected";
       });
@@ -493,9 +499,10 @@ test("relay /v1/chat/completions can bridge a real completion request to an atta
         await waitFor(async () => {
           const response = await relayApp!.inject({
             method: "GET",
-            url: "/api/ui/federation/bridges",
+            url: "/api/v1/federation/bridges",
             headers: { authorization: "Bearer bridge-admin-token" },
           });
+          assert.equal(response.statusCode, 200);
           const payload = response.json() as { readonly sessions: ReadonlyArray<Record<string, unknown>> };
           const session = payload.sessions[0];
           return session?.state === "connected"

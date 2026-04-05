@@ -889,6 +889,29 @@ function sumCount(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+function isRequestLogEntryError(entry: {
+  readonly status: number;
+  readonly error?: string;
+}): boolean {
+  return entry.status >= 400 || typeof entry.error === "string";
+}
+
+function countsTowardCacheKeyUse(entry: {
+  readonly promptCacheKeyUsed?: boolean;
+  readonly status: number;
+  readonly error?: string;
+}): boolean {
+  return entry.promptCacheKeyUsed === true && !isRequestLogEntryError(entry);
+}
+
+function countsTowardCacheHit(entry: {
+  readonly cacheHit?: boolean;
+  readonly status: number;
+  readonly error?: string;
+}): boolean {
+  return entry.cacheHit === true && !isRequestLogEntryError(entry);
+}
+
 type MutableAccountAccumulator = {
   tenantId?: string;
   issuer?: string;
@@ -1654,8 +1677,8 @@ export class RequestLogStore {
     acc.costUsd += sanitizeOptionalCost(entry.costUsd) ?? 0;
     acc.energyJoules += sanitizeOptionalCost(entry.energyJoules) ?? 0;
     acc.waterEvaporatedMl += sanitizeOptionalCost(entry.waterEvaporatedMl) ?? 0;
-    if (entry.cacheHit) acc.cacheHitCount += 1;
-    if (entry.promptCacheKeyUsed) acc.cacheKeyUseCount += 1;
+    if (countsTowardCacheHit(entry)) acc.cacheHitCount += 1;
+    if (countsTowardCacheKeyUse(entry)) acc.cacheKeyUseCount += 1;
     if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs)) { acc.ttftSum += entry.ttftMs; acc.ttftCount += 1; }
     if (typeof entry.tps === "number" && Number.isFinite(entry.tps)) { acc.tpsSum += entry.tps; acc.tpsCount += 1; }
     if (typeof entry.endToEndTps === "number" && Number.isFinite(entry.endToEndTps)) { acc.endToEndTpsSum += entry.endToEndTps; acc.endToEndTpsCount += 1; }
@@ -1676,8 +1699,8 @@ export class RequestLogStore {
     acc.costUsd += (sanitizeOptionalCost(next.costUsd) ?? 0) - (sanitizeOptionalCost(prev.costUsd) ?? 0);
     acc.energyJoules += (sanitizeOptionalCost(next.energyJoules) ?? 0) - (sanitizeOptionalCost(prev.energyJoules) ?? 0);
     acc.waterEvaporatedMl += (sanitizeOptionalCost(next.waterEvaporatedMl) ?? 0) - (sanitizeOptionalCost(prev.waterEvaporatedMl) ?? 0);
-    if (next.cacheHit && !prev.cacheHit) acc.cacheHitCount += 1;
-    if (next.promptCacheKeyUsed && !prev.promptCacheKeyUsed) acc.cacheKeyUseCount += 1;
+    if (countsTowardCacheHit(next) !== countsTowardCacheHit(prev)) acc.cacheHitCount += countsTowardCacheHit(next) ? 1 : -1;
+    if (countsTowardCacheKeyUse(next) !== countsTowardCacheKeyUse(prev)) acc.cacheKeyUseCount += countsTowardCacheKeyUse(next) ? 1 : -1;
     if (typeof next.ttftMs === "number" && Number.isFinite(next.ttftMs) && (prev.ttftMs === undefined || prev.ttftMs === null)) {
       acc.ttftSum += next.ttftMs; acc.ttftCount += 1;
     }
@@ -1699,7 +1722,7 @@ export class RequestLogStore {
 
     bucket.requestCount += 1;
 
-    const isError = entry.status >= 400 || typeof entry.error === "string";
+    const isError = isRequestLogEntryError(entry);
     if (isError) {
       bucket.errorCount += 1;
     }
@@ -1722,11 +1745,11 @@ export class RequestLogStore {
     bucket.energyJoules += sumCount(entry.energyJoules);
     bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl);
 
-    if (entry.promptCacheKeyUsed) {
+    if (countsTowardCacheKeyUse(entry)) {
       bucket.cacheKeyUseCount += 1;
     }
 
-    if (entry.cacheHit) {
+    if (countsTowardCacheHit(entry)) {
       bucket.cacheHitCount += 1;
     }
 
@@ -1739,7 +1762,7 @@ export class RequestLogStore {
 
     bucket.requestCount += 1;
 
-    const isError = entry.status >= 400 || typeof entry.error === "string";
+    const isError = isRequestLogEntryError(entry);
     if (isError) {
       bucket.errorCount += 1;
     }
@@ -1762,11 +1785,11 @@ export class RequestLogStore {
     bucket.energyJoules += sumCount(entry.energyJoules);
     bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl);
 
-    if (entry.promptCacheKeyUsed) {
+    if (countsTowardCacheKeyUse(entry)) {
       bucket.cacheKeyUseCount += 1;
     }
 
-    if (entry.cacheHit) {
+    if (countsTowardCacheHit(entry)) {
       bucket.cacheHitCount += 1;
     }
 
@@ -1779,7 +1802,7 @@ export class RequestLogStore {
 
     bucket.requestCount += 1;
 
-    const isError = entry.status >= 400 || typeof entry.error === "string";
+    const isError = isRequestLogEntryError(entry);
     if (isError) {
       bucket.errorCount += 1;
     }
@@ -1802,11 +1825,11 @@ export class RequestLogStore {
     bucket.energyJoules += sumCount(entry.energyJoules);
     bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl);
 
-    if (entry.promptCacheKeyUsed) {
+    if (countsTowardCacheKeyUse(entry)) {
       bucket.cacheKeyUseCount += 1;
     }
 
-    if (entry.cacheHit) {
+    if (countsTowardCacheHit(entry)) {
       bucket.cacheHitCount += 1;
     }
 
@@ -1844,7 +1867,7 @@ export class RequestLogStore {
 
     bucket.requestCount += 1;
 
-    const isError = entry.status >= 400 || typeof entry.error === "string";
+    const isError = isRequestLogEntryError(entry);
     if (isError) {
       bucket.errorCount += 1;
     }
@@ -1867,11 +1890,11 @@ export class RequestLogStore {
     bucket.energyJoules += sumCount(entry.energyJoules);
     bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl);
 
-    if (entry.promptCacheKeyUsed) {
+    if (countsTowardCacheKeyUse(entry)) {
       bucket.cacheKeyUseCount += 1;
     }
 
-    if (entry.cacheHit) {
+    if (countsTowardCacheHit(entry)) {
       bucket.cacheHitCount += 1;
     }
 
@@ -1908,13 +1931,12 @@ export class RequestLogStore {
     bucket.energyJoules += sumCount(entry.energyJoules) - sumCount(previous.energyJoules);
     bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl) - sumCount(previous.waterEvaporatedMl);
 
-    // promptCacheKeyUsed / cacheHit are only ever expected to flip false->true.
-    if (entry.promptCacheKeyUsed && !previous.promptCacheKeyUsed) {
-      bucket.cacheKeyUseCount += 1;
+    if (countsTowardCacheKeyUse(entry) !== countsTowardCacheKeyUse(previous)) {
+      bucket.cacheKeyUseCount += countsTowardCacheKeyUse(entry) ? 1 : -1;
     }
 
-    if (entry.cacheHit && !previous.cacheHit) {
-      bucket.cacheHitCount += 1;
+    if (countsTowardCacheHit(entry) !== countsTowardCacheHit(previous)) {
+      bucket.cacheHitCount += countsTowardCacheHit(entry) ? 1 : -1;
     }
 
     this.pruneHourlyBuckets(entry.timestamp);
@@ -1934,13 +1956,12 @@ export class RequestLogStore {
     bucket.energyJoules += sumCount(entry.energyJoules) - sumCount(previous.energyJoules);
     bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl) - sumCount(previous.waterEvaporatedMl);
 
-    // promptCacheKeyUsed / cacheHit are only ever expected to flip false->true.
-    if (entry.promptCacheKeyUsed && !previous.promptCacheKeyUsed) {
-      bucket.cacheKeyUseCount += 1;
+    if (countsTowardCacheKeyUse(entry) !== countsTowardCacheKeyUse(previous)) {
+      bucket.cacheKeyUseCount += countsTowardCacheKeyUse(entry) ? 1 : -1;
     }
 
-    if (entry.cacheHit && !previous.cacheHit) {
-      bucket.cacheHitCount += 1;
+    if (countsTowardCacheHit(entry) !== countsTowardCacheHit(previous)) {
+      bucket.cacheHitCount += countsTowardCacheHit(entry) ? 1 : -1;
     }
 
     this.pruneDailyBuckets(entry.timestamp);
@@ -1960,12 +1981,12 @@ export class RequestLogStore {
     bucket.energyJoules += sumCount(entry.energyJoules) - sumCount(previous.energyJoules);
     bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl) - sumCount(previous.waterEvaporatedMl);
 
-    if (entry.promptCacheKeyUsed && !previous.promptCacheKeyUsed) {
-      bucket.cacheKeyUseCount += 1;
+    if (countsTowardCacheKeyUse(entry) !== countsTowardCacheKeyUse(previous)) {
+      bucket.cacheKeyUseCount += countsTowardCacheKeyUse(entry) ? 1 : -1;
     }
 
-    if (entry.cacheHit && !previous.cacheHit) {
-      bucket.cacheHitCount += 1;
+    if (countsTowardCacheHit(entry) !== countsTowardCacheHit(previous)) {
+      bucket.cacheHitCount += countsTowardCacheHit(entry) ? 1 : -1;
     }
 
     if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs) && (previous.ttftMs === undefined || previous.ttftMs === null)) {
@@ -2010,12 +2031,12 @@ export class RequestLogStore {
     bucket.energyJoules += sumCount(entry.energyJoules) - sumCount(previous.energyJoules);
     bucket.waterEvaporatedMl += sumCount(entry.waterEvaporatedMl) - sumCount(previous.waterEvaporatedMl);
 
-    if (entry.promptCacheKeyUsed && !previous.promptCacheKeyUsed) {
-      bucket.cacheKeyUseCount += 1;
+    if (countsTowardCacheKeyUse(entry) !== countsTowardCacheKeyUse(previous)) {
+      bucket.cacheKeyUseCount += countsTowardCacheKeyUse(entry) ? 1 : -1;
     }
 
-    if (entry.cacheHit && !previous.cacheHit) {
-      bucket.cacheHitCount += 1;
+    if (countsTowardCacheHit(entry) !== countsTowardCacheHit(previous)) {
+      bucket.cacheHitCount += countsTowardCacheHit(entry) ? 1 : -1;
     }
 
     if (typeof entry.ttftMs === "number" && Number.isFinite(entry.ttftMs) && (previous.ttftMs === undefined || previous.ttftMs === null)) {

@@ -2,34 +2,33 @@ import type { FastifyInstance } from "fastify";
 
 import { type ChatCompletionRequest, extractPromptCacheKey } from "../lib/request-utils.js";
 import { isRecord } from "../lib/provider-utils.js";
+import { resolveModelRouting } from "../lib/model-routing-pipeline.js";
 import {
-  resolvableConcreteModelIds,
+  catalogHasDynamicOllamaModel,
   filterProviderRoutesByCatalogAvailability,
   filterProviderRoutesByModelSupport,
   shouldRejectModelFromProviderCatalog,
 } from "../lib/model-routing-helpers.js";
 import {
   tenantProviderAllowed,
-  tenantModelAllowed,
   filterTenantProviderRoutes,
-  resolveExplicitTenantProviderId,
 } from "../lib/tenant-policy-helpers.js";
 import {
   selectProviderStrategy,
-  executeProviderFallback,
+  executeProviderRoutingPlan,
   inspectProviderAvailability,
 } from "../lib/provider-strategy.js";
 import { executeLocalStrategy } from "../lib/provider-strategy.js";
 import {
   buildProviderRoutesWithDynamicBaseUrls,
   resolveProviderRoutesForModel,
-  minMsUntilAnyProviderKeyReady,
   type ProviderRoute,
 } from "../lib/provider-routing.js";
 import { orderProviderRoutesByPolicy } from "../lib/provider-policy.js";
 import { sendOpenAiError, toErrorMessage } from "../lib/provider-utils.js";
-import { isAutoModel, rankAutoModels } from "../lib/auto-model-selector.js";
-import { isCephalonAutoModel, buildCephalonModelCandidates, reorderCephalonProviderRoutes } from "../lib/provider-strategy/strategies/cephalon.js";
+import { handleRoutingOutcome } from "../lib/routing-outcome-handler.js";
+import { isCephalonAutoModel, reorderCephalonProviderRoutes } from "../lib/provider-strategy/strategies/cephalon.js";
+import { isVisionAutoModel, reorderVisionProviderRoutes } from "../lib/provider-strategy/strategies/vision.js";
 import { resolveFederationOwnerSubject } from "../lib/federation/federation-helpers.js";
 import { requestHasExplicitNumCtx } from "../lib/ollama-compat.js";
 import { ensureOllamaContextFits } from "../lib/ollama-context.js";
@@ -46,7 +45,7 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
     }
 
     const proxySettings = await deps.proxySettingsStore.getForTenant(
-      ((request as { readonly openHaxAuth?: { readonly tenantId?: string } }).openHaxAuth?.tenantId) ?? "default",
+      (request.openHaxAuth?.tenantId) ?? "default",
     );
     const requestBody = proxySettings.fastMode
       ? {
@@ -62,82 +61,24 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
       reply.header("x-open-hax-fast-mode", "priority");
     }
 
-    const requestedModelInput = typeof requestBody.model === "string" ? requestBody.model : "";
-    if (!tenantModelAllowed(proxySettings, requestedModelInput)) {
-      sendOpenAiError(reply, 403, `Model is disabled for this tenant: ${requestedModelInput || "unknown"}`, "invalid_request_error", "model_not_allowed");
+    const modelRouting = await resolveModelRouting(
+      {
+        config: deps.config,
+        proxySettings,
+        providerCatalogStore: deps.providerCatalogStore,
+        requestLogStore: deps.requestLogStore,
+        accountHealthStore: deps.accountHealthStore,
+      },
+      requestBody,
+      reply,
+      request.log,
+      { preserveExplicitOllama: true },
+    );
+    if (!modelRouting) {
       return;
     }
-    const explicitlyBlockedProviderId = resolveExplicitTenantProviderId(deps.config, requestedModelInput, proxySettings);
-    if (explicitlyBlockedProviderId) {
-      sendOpenAiError(reply, 403, `Provider is disabled for this tenant: ${explicitlyBlockedProviderId}`, "invalid_request_error", "provider_not_allowed");
-      return;
-    }
-
-    let routingModelInput = requestedModelInput;
-    let resolvedModelCatalog = null;
-    try {
-      const catalogBundle = await deps.providerCatalogStore.getCatalog();
-      const catalog = catalogBundle.catalog;
-      resolvedModelCatalog = catalog;
-      const disabledModelSet = new Set(catalogBundle.preferences.disabled);
-      if (disabledModelSet.has(requestedModelInput) || disabledModelSet.has(catalog.aliasTargets[requestedModelInput] ?? "")) {
-        sendOpenAiError(reply, 403, `Model is disabled: ${requestedModelInput}`, "invalid_request_error", "model_disabled");
-        return;
-      }
-      const aliasTarget = catalog.aliasTargets[requestedModelInput];
-      if (typeof aliasTarget === "string" && aliasTarget.length > 0) {
-        const requestedLower = requestedModelInput.trim().toLowerCase();
-        const aliasLower = aliasTarget.trim().toLowerCase();
-        const requestedWasExplicitOllama = requestedLower.startsWith("ollama/") || requestedLower.startsWith("ollama:");
-        const aliasIsExplicitOllama = aliasLower.startsWith("ollama/") || aliasLower.startsWith("ollama:");
-
-        routingModelInput = requestedWasExplicitOllama && !aliasIsExplicitOllama
-          ? requestedModelInput
-          : aliasTarget;
-        if (routingModelInput !== requestedModelInput) {
-          reply.header("x-open-hax-model-alias", `${requestedModelInput}->${routingModelInput}`);
-        }
-      }
-    } catch (error) {
-      request.log.warn({ error: toErrorMessage(error) }, "failed to resolve dynamic model aliases; using requested model as-is");
-    }
-
-    const concreteModelIds = resolvableConcreteModelIds(resolvedModelCatalog);
+    const { requestedModelInput, routingModelInput, resolvedModelCatalog, routingModelCandidates } = modelRouting;
     const dynamicOllamaModelIds = resolvedModelCatalog?.dynamicOllamaModelIds;
-
-    const routingModelCandidates = (() => {
-      if (isCephalonAutoModel(routingModelInput)) {
-        return buildCephalonModelCandidates({
-          routingModelInput,
-          requestBody,
-          catalog: resolvedModelCatalog,
-          availableModels: concreteModelIds,
-          providerId: deps.config.upstreamProviderId,
-          requestLogStore: deps.requestLogStore,
-          accountHealthStore: deps.accountHealthStore,
-        });
-      }
-      if (isAutoModel(routingModelInput)) {
-        return rankAutoModels(
-          routingModelInput,
-          requestBody,
-          concreteModelIds,
-          deps.config.upstreamProviderId,
-          deps.requestLogStore,
-          deps.accountHealthStore,
-        ).map((entry) => entry.modelId);
-      }
-      return [routingModelInput];
-    })();
-
-    if (routingModelCandidates.length === 0) {
-      sendOpenAiError(reply, 404, `Model not found: ${requestedModelInput}`, "invalid_request_error", "model_not_found");
-      return;
-    }
-
-    if (isAutoModel(routingModelInput)) {
-      reply.header("x-open-hax-auto-model-candidates", routingModelCandidates.slice(0, 12).join(","));
-    }
 
     for (const [candidateIndex, candidateRoutingModel] of routingModelCandidates.entries()) {
       const hasMoreModelCandidates = candidateIndex < routingModelCandidates.length - 1;
@@ -147,10 +88,10 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
         requestBody,
         requestedModelInput,
         candidateRoutingModel,
-        (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly tenantId?: string; readonly keyId?: string; readonly subject?: string } }).openHaxAuth,
+        request.openHaxAuth ?? undefined,
       );
       reply.header("x-open-hax-upstream-mode", strategy.mode);
-      const requestAuth = (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly tenantId?: string; readonly keyId?: string; readonly subject?: string } }).openHaxAuth;
+      const requestAuth = request.openHaxAuth ?? undefined;
       const federationOwnerSubject = resolveFederationOwnerSubject({
         headers: request.headers as Record<string, unknown>,
         requestAuth,
@@ -176,15 +117,16 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
       }
       const wantsDynamicOllamaRoutes = context.localOllama
         || isCephalonAutoModel(requestedModelInput)
-        || isCephalonAutoModel(routingModelInput);
+        || isCephalonAutoModel(routingModelInput)
+        || catalogHasDynamicOllamaModel(resolvedModelCatalog, context.routedModel);
       const dynamicOllamaRoutes = wantsDynamicOllamaRoutes
         ? await discoverDynamicOllamaRoutes(deps.sqlCredentialStore, deps.sqlFederationStore, federationOwnerSubject)
         : [];
 
-      if (context.localOllama && dynamicOllamaRoutes.length > 0) {
+      if (wantsDynamicOllamaRoutes && dynamicOllamaRoutes.length > 0) {
         providerRoutes = prependDynamicOllamaRoutes(providerRoutes, dynamicOllamaRoutes);
       }
-      if (context.localOllama || isCephalonAutoModel(requestedModelInput) || isCephalonAutoModel(routingModelInput)) {
+      if (wantsDynamicOllamaRoutes) {
         const dedicatedOllamaRoutes = filterDedicatedOllamaRoutes(providerRoutes);
         if (dedicatedOllamaRoutes.length > 0) {
           providerRoutes = dedicatedOllamaRoutes;
@@ -206,6 +148,9 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
           })
           : dynamicOllamaRoutes;
         providerRoutes = reorderCephalonProviderRoutes(providerRoutes, prioritizedDynamicOllamaRoutes);
+      }
+      if (isVisionAutoModel(requestedModelInput) || isVisionAutoModel(routingModelInput)) {
+        providerRoutes = reorderVisionProviderRoutes(providerRoutes, context.routedModel);
       }
 
       if (providerRoutes.length === 0) {
@@ -231,8 +176,8 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
           return;
         }
 
-        if (context.localOllama || isCephalonAutoModel(requestedModelInput) || isCephalonAutoModel(routingModelInput)) {
-          providerRoutes = filterProviderRoutesByCatalogAvailability(providerRoutes, context.routedModel, catalogBundle);
+        providerRoutes = filterProviderRoutesByCatalogAvailability(providerRoutes, context.routedModel, catalogBundle);
+        if (wantsDynamicOllamaRoutes) {
           const ranked = await rankProviderRoutesWithAco({
             providerRoutes,
             model: context.routedModel,
@@ -333,7 +278,7 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
         }
       }
 
-      const execution = await executeProviderFallback(
+      const execution = await executeProviderRoutingPlan(
         strategy,
         reply,
         deps.requestLogStore,
@@ -378,7 +323,7 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
       }, {
         requestHeaders: request.headers,
         requestBody,
-        requestAuth: (request as { readonly openHaxAuth?: { readonly kind: "legacy_admin" | "tenant_api_key" | "ui_session" | "unauthenticated"; readonly subject?: string } }).openHaxAuth,
+        requestAuth: request.openHaxAuth ?? undefined,
         upstreamPath: "/v1/chat/completions",
         reply,
         timeoutMs: context.upstreamAttemptTimeoutMs,
@@ -391,89 +336,19 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
         continue;
       }
 
-      if (execution.candidateCount === 0) {
-        const retryInMs = await minMsUntilAnyProviderKeyReady(deps.keyPool, providerRoutes);
-        if (retryInMs > 0) {
-          reply.header("retry-after", Math.ceil(retryInMs / 1000));
-        }
-
-        if (!availability.sawConfiguredProvider) {
-          sendOpenAiError(reply, 500, "Proxy is missing upstream account configuration", "server_error", "keys_unavailable");
-          return;
-        }
-
-        sendOpenAiError(
-          reply,
-          429,
-          "All upstream accounts are currently rate-limited. Retry after the cooldown window.",
-          "rate_limit_error",
-          "all_keys_rate_limited"
-        );
+      const sent = await handleRoutingOutcome({
+        keyPool: deps.keyPool,
+        reply,
+        execution,
+        availability,
+        providerRoutes,
+        strategyMode: strategy.mode,
+        routedModel: context.routedModel,
+        log: app.log,
+      });
+      if (sent) {
         return;
       }
-
-      const { summary } = execution;
-
-      if (summary.sawUpstreamInvalidRequest) {
-        app.log.warn({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode }, "all attempts exhausted due to upstream invalid-request responses");
-        sendOpenAiError(
-          reply,
-          400,
-          "No upstream account accepted the request payload. Check model availability and request parameters.",
-          "invalid_request_error",
-          "upstream_rejected_request"
-        );
-        return;
-      }
-
-      if (summary.sawRateLimit) {
-        const retryInMs = await minMsUntilAnyProviderKeyReady(deps.keyPool, providerRoutes);
-        if (retryInMs > 0) {
-          reply.header("retry-after", Math.ceil(retryInMs / 1000));
-        }
-
-        app.log.warn({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode }, "all attempts exhausted due to upstream rate limits");
-        sendOpenAiError(
-          reply,
-          429,
-          "No upstream account succeeded. Accounts may be rate-limited, quota-exhausted, or have outstanding balances.",
-          "rate_limit_error",
-          "no_available_key"
-        );
-        return;
-      }
-
-      if (summary.sawUpstreamServerError) {
-        app.log.warn({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode }, "all attempts exhausted due to upstream server errors");
-        sendOpenAiError(
-          reply,
-          502,
-          "Upstream returned transient server errors across all available accounts.",
-          "server_error",
-          "upstream_server_error"
-        );
-        return;
-      }
-
-      if (summary.sawModelNotFound && !summary.sawRequestError) {
-        app.log.warn({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode }, "all attempts exhausted due to model-not-found responses");
-        sendOpenAiError(
-          reply,
-          404,
-          `Model not found across available upstream providers: ${context.routedModel}`,
-          "invalid_request_error",
-          "model_not_found"
-        );
-        return;
-      }
-
-      const message = summary.sawRequestError
-        ? "All upstream attempts failed due to network/transport errors."
-        : "Upstream rejected the request with no successful fallback.";
-
-      app.log.error({ providerRoutes, attempts: summary.attempts, upstreamMode: strategy.mode, sawRequestError: summary.sawRequestError }, "all upstream attempts exhausted");
-      sendOpenAiError(reply, 502, message, "server_error", "upstream_unavailable");
-      return;
     }
 
     sendOpenAiError(reply, 502, "Upstream rejected the request with no successful fallback.", "server_error", "upstream_unavailable");

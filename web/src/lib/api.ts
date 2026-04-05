@@ -114,6 +114,7 @@ export interface PromptCacheAuditOverview {
   readonly crossAccountHashCount: number;
   readonly crossSuccessfulAccountHashCount: number;
   readonly rows: readonly PromptCacheAuditRow[];
+  readonly watchRows: readonly PromptCacheAuditRow[];
 }
 
 export interface KeyPoolStatus {
@@ -797,6 +798,32 @@ export async function removeCredential(providerId: string, accountId: string): P
     },
     body: JSON.stringify({ providerId, accountId }),
   });
+}
+
+export async function disableAccount(providerId: string, accountId: string): Promise<void> {
+  await requestJson("/api/v1/credentials/account/disable", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ providerId, accountId }),
+  });
+}
+
+export async function enableAccount(providerId: string, accountId: string): Promise<void> {
+  await requestJson("/api/v1/credentials/account/enable", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ providerId, accountId }),
+  });
+}
+
+export async function getDisabledAccounts(): Promise<{
+  readonly disabledAccounts: Array<{ readonly providerId: string; readonly accountId: string }>;
+}> {
+  return requestJson("/api/v1/credentials/accounts/disabled");
 }
 
 export async function getOpenAiCredentialQuota(accountId?: string): Promise<CredentialQuotaOverview> {

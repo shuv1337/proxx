@@ -1,5 +1,7 @@
+import React from "react";
 import { FormEvent, useState } from "react";
 
+import { Button, Card, Input, Spinner, Textarea } from "@open-hax/uxx";
 import { runImageGeneration } from "../lib/api";
 import { useStoredState } from "../lib/use-stored-state";
 
@@ -93,20 +95,20 @@ export function ImagesPage(): JSX.Element {
         </header>
 
         <form className="chat-input-form" onSubmit={(event) => void submit(event)}>
-          <input
+          <Input
             value={model}
             onChange={(event) => setModel(event.currentTarget.value)}
             placeholder="model (e.g. gpt-image-1)"
           />
-          <textarea
+          <Textarea
             value={prompt}
             onChange={(event) => setPrompt(event.currentTarget.value)}
             rows={4}
             placeholder="prompt"
           />
-          <button type="submit" disabled={sending}>
+          <Button type="submit" variant="primary" loading={sending}>
             {sending ? "Generating…" : "Generate"}
-          </button>
+          </Button>
         </form>
 
         {error && <p className="error-text">{error}</p>}
@@ -114,9 +116,9 @@ export function ImagesPage(): JSX.Element {
         {imageUrls.length > 0 && (
           <div className="credentials-provider-grid">
             {imageUrls.map((url) => (
-              <article key={url} className="credentials-card">
+              <Card key={url} variant="outlined" padding="sm">
                 <img src={url} alt="generated" style={{ width: "100%", borderRadius: 12 }} />
-              </article>
+              </Card>
             ))}
           </div>
         )}
@@ -131,7 +133,8 @@ export function ImagesPage(): JSX.Element {
           <h2>Raw response</h2>
           <p>Rendered from the proxied upstream response (useful for debugging provider quirks).</p>
         </header>
-        <textarea readOnly value={rawResponse} rows={24} placeholder="(response will appear here)" />
+        {sending && rawResponse.length === 0 ? <Spinner size="md" label="Waiting for image response…" /> : null}
+        <Textarea readOnly value={rawResponse} rows={24} placeholder="(response will appear here)" />
       </section>
     </div>
   );

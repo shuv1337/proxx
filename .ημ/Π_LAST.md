@@ -1,49 +1,36 @@
-# Π Snapshot: Federation sync + dynamic Ollama routing merge handoff
+# Π Snapshot: request-log cache analytics rollup fix
 
 - **Repo:** `open-hax/proxx`
-- **Branch:** `feat/federation-sync-and-dynamic-ollama`
-- **Pre-snapshot HEAD:** `471d28a`
-- **Previous tag:** `Π/20260330-205903-aco-route-quota-cooldowns`
-- **Intended Π tag:** `Π/20260330-235123-federation-sync-dynamic-ollama`
-- **Generated:** `2026-03-30T23:51:23Z`
+- **Branch:** `fork-tax/20260330-205903-aco-route-quota-cooldowns`
+- **Previous tag:** `Π/20260402-184515-migration-pipeline-routing-cleanup`
+- **Intended Π tag:** `Π/20260404-010801-request-log-cache-rollup-failure-exclusion`
+- **Generated:** `2026-04-04T01:08:01Z`
 
 ## What this snapshot preserves
 
-This Π handoff captures the completion of the federation sync and dynamic Ollama routing feature branch, merging upstream changes and reconciling route refactoring with provider strategy.
+This Π handoff captures the request-log cache analytics correction for persisted rollups. The bug was that hourly/daily/model/account rollups counted `promptCacheKeyUsed` and `cacheHit` even when the request later classified as an error, so weekly/monthly dashboard-style cache hit percentages could be badly understated relative to the direct entry-based analytics path.
 
-Included work categories:
-- Federation sync and dynamic Ollama routing: `src/lib/ollama-compat.ts`, `src/lib/provider-strategy/strategies/ollama.ts`, federation bridge autostart/fallback wiring
-- Provider strategy refactor: consolidated routing logic in `src/lib/provider-strategy/base.ts` and `src/lib/provider-strategy/shared.ts`
-- Route simplification: `src/app.ts`, `src/lib/ui-routes.ts`, `src/routes/chat.ts` cleaned up
-- Test coverage expansion: `src/tests/proxy.test.ts` expanded with provider catalog, Factory, and credential tests
+### Rollup accounting fix
+- `src/lib/request-log-store.ts` — added shared error-aware cache counter predicates
+- Hourly, daily, daily-model, daily-account, and account-accumulator rollups now exclude failed prompt-cache attempts
+- Delta/update paths now decrement cache counters if an entry is later reclassified as errored
 
-## Dirty state before commit
+### Regression coverage
+- `src/tests/request-log-store.test.ts` — covers both initial failed-attempt exclusion and late reclassification removal
+- Existing proxy analytics regression tests still pass for the direct API surfaces
 
-### Modified (staged)
-- `src/app.ts`
-- `src/lib/app-deps.ts`
-- `src/lib/federation/bridge-agent-autostart.ts`
-- `src/lib/federation/bridge-fallback.ts`
-- `src/lib/ollama-compat.ts`
-- `src/lib/provider-strategy/base.ts`
-- `src/lib/provider-strategy/shared.ts`
-- `src/lib/provider-strategy/strategies/cephalon.ts`
-- `src/lib/provider-strategy/strategies/ollama.ts`
-- `src/lib/ui-routes.ts`
-- `src/routes/api/ui/analytics/usage.ts`
-- `src/routes/api/ui/hosts/index.ts`
-- `src/routes/chat.ts`
-- `src/routes/credentials/get-credentials-ui.ts`
-- `src/routes/embeddings.ts`
-- `src/routes/responses.ts`
-- `src/tests/proxy.test.ts`
+### Working-tree notes
+- Preserved tracked `receipts.log` mutation from session-mycology background activity
+- Dropped untracked accidental `package-lock.json` instead of snapshotting it into the pnpm-managed repo
 
 ## Verification
 
-- TypeScript typecheck: `tsc -p tsconfig.json --noEmit` ✅
-- Full test suite: `pnpm run build && node --test --test-concurrency=1 dist/tests/*.test.js` ✅ (185/187 passed)
-- 2 pre-existing federation bridge integration tests fail (require live enclave infrastructure)
+- Build: `pnpm build` ✅
+- Focused store tests: `npx tsx --test src/tests/request-log-store.test.ts` ✅
+- Focused proxy analytics regressions: targeted `src/tests/proxy.test.ts` prompt-cache summary assertions ✅
+- Broader note: unrelated known-red remains in full filtered proxy run (`glm chat requests skip ollama-cloud when provider catalog does not advertise the requested model`)
 
-## Operator note
+## Deferred
 
-This snapshot captures the feature-branch merge point. The federation bridge integration tests (146-147) are environment-dependent and fail without live enclave infrastructure — this is pre-existing and not introduced by this merge.
+- Rebuild live `services/proxx` request-log metadata so running weekly/monthly dashboards stop reading stale cache counters
+- Consider relabeling UI surfaces to distinguish cache hit rate vs cached token share more explicitly

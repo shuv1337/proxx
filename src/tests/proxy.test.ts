@@ -147,6 +147,7 @@ async function withProxyApp(
       gemini: `http://127.0.0.1:${address.port}`,
       zai: `http://127.0.0.1:${address.port}/api/paas/v4`,
       mistral: `http://127.0.0.1:${address.port}/v1`,
+      rotussy: `http://127.0.0.1:${address.port}/v1`,
     },
     upstreamBaseUrl: `http://127.0.0.1:${address.port}`,
     openaiProviderId: "openai",
@@ -183,6 +184,9 @@ async function withProxyApp(
     settingsFilePath: settingsPath,
     keyReloadMs: 50,
     keyCooldownMs: 10000,
+    keyCooldownJitterFactor: 0,
+    enableKeyRandomWalk: false,
+    ollamaWeeklyCooldownMultiplier: 24,
     requestTimeoutMs: 2000,
     streamBootstrapTimeoutMs: 2000,
     upstreamTransientRetryCount: 2,
@@ -278,6 +282,8 @@ async function withPatchedFetch(
 async function withClearedAmbientProviders(fn: () => Promise<void>): Promise<void> {
   await withEnv(
     {
+      ROTUSSY_API_KEY: undefined,
+      ROTUSSY_PROVIDER_ID: undefined,
       FACTORY_API_KEY: undefined,
       FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
       FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
@@ -303,6 +309,8 @@ async function withZaiProxyApp(
     {
       ZAI_API_KEY: "zai-key-1", // pragma: allowlist secret
       ZAI_PROVIDER_ID: undefined,
+      ROTUSSY_API_KEY: undefined,
+      ROTUSSY_PROVIDER_ID: undefined,
       GEMINI_API_KEY: undefined,
       OPENROUTER_API_KEY: undefined,
       REQUESTY_API_TOKEN: undefined,
@@ -1451,7 +1459,7 @@ test("records z.ai chat-completions usage in request logs", { concurrency: false
 
       const logsResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?providerId=zai&limit=1"
+        url: "/api/v1/request-logs?providerId=zai&limit=1"
       });
       assert.equal(logsResponse.statusCode, 200);
 
@@ -1710,7 +1718,7 @@ test("persists request logs with usage counts for dashboard surfaces", async () 
 
       const overviewResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview",
+        url: "/api/v1/dashboard/overview",
       });
       assert.equal(overviewResponse.statusCode, 200);
       const overviewPayload: unknown = overviewResponse.json();
@@ -1723,7 +1731,7 @@ test("persists request logs with usage counts for dashboard surfaces", async () 
 
       const overviewWeeklyResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview?window=weekly",
+        url: "/api/v1/dashboard/overview?window=weekly",
       });
       assert.equal(overviewWeeklyResponse.statusCode, 200);
       const weeklyPayload: unknown = overviewWeeklyResponse.json();
@@ -1838,6 +1846,7 @@ test("fetches live OpenAI Codex quota windows and persists refreshed OAuth token
     await withProxyApp(
       {
         keys: [],
+        models: ["gpt-5.2"],
         keysPayload: {
           providers: {
             openai: {
@@ -1880,7 +1889,7 @@ test("fetches live OpenAI Codex quota windows and persists refreshed OAuth token
       async ({ app, tempDir }) => {
         const response = await app.inject({
           method: "GET",
-          url: "/api/ui/credentials/openai/quota",
+          url: "/api/v1/credentials/openai/quota",
         });
 
         assert.equal(response.statusCode, 200);
@@ -2007,7 +2016,7 @@ test("probes an OpenAI account with a minimal hello request", async () => {
       async ({ app }) => {
         const response = await app.inject({
           method: "POST",
-          url: "/api/ui/credentials/openai/probe",
+          url: "/api/v1/credentials/openai/probe",
           payload: {
             accountId: "openai-probe-a",
           },
@@ -3669,6 +3678,91 @@ test("returns 429 when every key is rate-limited", async () => {
   );
 });
 
+test("ollama weekly limit applies the multiplied cooldown until it expires", async () => {
+  const baseCooldownMs = 10_000;
+  const weeklyCooldownMs = baseCooldownMs * 24;
+  let upstreamCalls = 0;
+  const originalNow = Date.now;
+  let now = 1_700_000_000_000;
+  Date.now = () => now;
+
+  try {
+    await withProxyApp(
+      {
+        keys: [],
+        keysPayload: {
+          providers: {
+            "ollama-cloud": ["ollama-weekly-key"],
+          },
+        },
+        configOverrides: {
+          upstreamProviderId: "ollama-cloud",
+          upstreamFallbackProviderIds: [],
+        },
+        upstreamHandler: async () => {
+          upstreamCalls += 1;
+          return {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              error: "you (weekly-test) have reached your weekly usage limit, upgrade for higher limits: https://ollama.com/upgrade",
+            }),
+          };
+        },
+      },
+      async ({ app }) => {
+        const payload = {
+          model: "gemma3:12b",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false,
+        };
+
+        const first = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { "content-type": "application/json" },
+          payload,
+        });
+        assert.equal(first.statusCode, 429);
+        assert.equal(upstreamCalls, 1);
+
+        const second = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { "content-type": "application/json" },
+          payload,
+        });
+        assert.equal(second.statusCode, 429);
+        assert.equal(upstreamCalls, 1, "cooled weekly-limited account should be skipped immediately");
+
+        now += weeklyCooldownMs - 1;
+        const third = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { "content-type": "application/json" },
+          payload,
+        });
+        assert.equal(third.statusCode, 429);
+        assert.equal(upstreamCalls, 1, "weekly cooldown should still block before multiplied interval expires");
+
+        now += 1;
+        const fourth = await app.inject({
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: { "content-type": "application/json" },
+          payload,
+        });
+        assert.equal(fourth.statusCode, 429);
+        assert.equal(upstreamCalls, 2, "provider should be retried once the multiplied cooldown expires");
+      },
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("permanently disables api_key accounts on 402 (payment required)", async () => {
   let requestCount = 0;
 
@@ -4281,7 +4375,7 @@ test("applies global fast mode to responses requests through proxy settings", as
     async ({ app }) => {
       const settingsResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           "content-type": "application/json"
         },
@@ -4312,7 +4406,7 @@ test("applies global fast mode to responses requests through proxy settings", as
 
       const requestLogsPayload = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?limit=1",
+        url: "/api/v1/request-logs?limit=1",
       });
       assert.equal(requestLogsPayload.statusCode, 200);
       const requestLogsBody: unknown = requestLogsPayload.json();
@@ -4324,7 +4418,7 @@ test("applies global fast mode to responses requests through proxy settings", as
 
       const overviewResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview",
+        url: "/api/v1/dashboard/overview",
       });
       assert.equal(overviewResponse.statusCode, 200);
       const overviewPayload: unknown = overviewResponse.json();
@@ -4365,7 +4459,7 @@ test("request-level service tier overrides global fast mode", async () => {
     async ({ app }) => {
       await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           "content-type": "application/json"
         },
@@ -4394,7 +4488,7 @@ test("request-level service tier overrides global fast mode", async () => {
 
       const requestLogsPayload = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?limit=1",
+        url: "/api/v1/request-logs?limit=1",
       });
       assert.equal(requestLogsPayload.statusCode, 200);
       const requestLogsBody: unknown = requestLogsPayload.json();
@@ -4406,7 +4500,7 @@ test("request-level service tier overrides global fast mode", async () => {
 
       const overviewResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview",
+        url: "/api/v1/dashboard/overview",
       });
       assert.equal(overviewResponse.statusCode, 200);
       const overviewPayload: unknown = overviewResponse.json();
@@ -4448,7 +4542,7 @@ test("tenant requests per minute quota blocks excess requests", async () => {
     async ({ app }) => {
       const settingsResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           authorization: "Bearer tenant-admin-token",
           "content-type": "application/json",
@@ -4525,7 +4619,7 @@ test("tenant allowedProviderIds blocks disallowed upstream providers", async () 
     async ({ app }) => {
       const settingsResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           authorization: "Bearer tenant-admin-token",
           "content-type": "application/json",
@@ -4570,7 +4664,7 @@ test("tenant disabledProviderIds blocks local ollama usage", async () => {
     async ({ app }) => {
       const settingsResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/settings",
+        url: "/api/v1/settings",
         headers: {
           authorization: "Bearer tenant-admin-token",
           "content-type": "application/json",
@@ -4815,7 +4909,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview?window=weekly&sort=tokens",
+        url: "/api/v1/dashboard/overview?window=weekly&sort=tokens",
       });
 
       assert.equal(response.statusCode, 200);
@@ -4834,7 +4928,7 @@ test("weekly dashboard uses persisted daily model/account aggregates and reports
   );
 });
 
-test("/api/ui/me exposes resolved auth context for legacy admin token", async () => {
+test("/api/v1/me exposes resolved auth context for legacy admin token", async () => {
   await withProxyApp(
     {
       keys: ["key-a"],
@@ -4848,7 +4942,7 @@ test("/api/ui/me exposes resolved auth context for legacy admin token", async ()
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/me",
+        url: "/api/v1/me",
         headers: {
           authorization: "Bearer ui-token",
         },
@@ -4964,8 +5058,8 @@ test("/api/v1 root labels planned migration targets separately from implemented 
       const payload: any = response.json();
       assert.equal(payload.migration.legacyPrefix, "/api/ui");
       assert.equal(payload.migration.targetPrefix, "/api/v1");
-      assert.equal(payload.summary.planned, 1);
-      assert.equal(payload.summary.implemented, 7);
+      assert.equal(payload.summary.planned, 2);
+      assert.equal(payload.summary.implemented, 6);
       assert.equal(payload.endpoints.sessions.path, "/api/v1/sessions");
       assert.equal(payload.endpoints.sessions.legacyPath, "/api/ui/sessions");
       assert.equal(payload.endpoints.sessions.status, "implemented");
@@ -4974,7 +5068,7 @@ test("/api/v1 root labels planned migration targets separately from implemented 
       assert.equal(payload.endpoints.hosts.status, "implemented");
       assert.equal(payload.endpoints.events.status, "implemented");
       assert.equal(payload.endpoints.observability.status, "implemented");
-      assert.equal(payload.endpoints.mcp.status, "implemented");
+      assert.equal(payload.endpoints.mcp.status, "planned");
       assert.equal(payload.documentation.path, "/api/v1/openapi.json");
       assert.equal(payload.documentation.status, "implemented");
     },
@@ -5086,7 +5180,7 @@ test("provider-model analytics summarizes global models, providers, and provider
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/analytics/provider-model?window=weekly&sort=tokens",
+        url: "/api/v1/analytics/provider-model?window=weekly&sort=tokens",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5204,7 +5298,7 @@ test("dashboard overview scopes usage to the requested tenant", async () => {
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview?window=weekly&tenantId=acme",
+        url: "/api/v1/dashboard/overview?window=weekly&tenantId=acme",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5311,7 +5405,7 @@ test("provider-model analytics scopes rollups to the requested tenant", async ()
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/analytics/provider-model?window=weekly&tenantId=acme",
+        url: "/api/v1/analytics/provider-model?window=weekly&tenantId=acme",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5411,7 +5505,7 @@ test("provider-model analytics excludes failed prompt-cache attempts from cache-
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/analytics/provider-model?window=daily",
+        url: "/api/v1/analytics/provider-model?window=daily",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5509,7 +5603,7 @@ test("dashboard overview excludes failed prompt-cache attempts from cache-hit su
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/dashboard/overview?window=daily",
+        url: "/api/v1/dashboard/overview?window=daily",
       });
 
       assert.equal(response.statusCode, 200);
@@ -5579,7 +5673,7 @@ test("does not tag non-responses requests with a service tier", async () => {
 
       const requestLogsPayload = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?limit=1",
+        url: "/api/v1/request-logs?limit=1",
       });
       assert.equal(requestLogsPayload.statusCode, 200);
       const requestLogsBody: unknown = requestLogsPayload.json();
@@ -6818,6 +6912,194 @@ test("groups prompt cache audit rows by hash and distinct accounts touched", asy
   );
 });
 
+test("prompt cache audit respects configured openai provider id and keeps latest model from newest entry", async () => {
+  await withProxyApp(
+    {
+      keys: [],
+      requestLogsPayload: {
+        entries: [
+          {
+            id: "custom-openai-older",
+            timestamp: Date.UTC(2026, 3, 4, 12, 0, 0),
+            providerId: "chatgpt-oauth",
+            accountId: "acct-1",
+            authType: "oauth_bearer",
+            model: "gpt-4.1",
+            upstreamMode: "responses",
+            upstreamPath: "/v1/responses",
+            status: 200,
+            latencyMs: 110,
+            promptCacheKeyHash: "sha256:custom-openai-hash",
+            promptTokens: 100,
+            completionTokens: 20,
+            totalTokens: 120,
+          },
+          {
+            id: "custom-openai-newer",
+            timestamp: Date.UTC(2026, 3, 4, 12, 5, 0),
+            providerId: "chatgpt-oauth",
+            accountId: "acct-1",
+            authType: "oauth_bearer",
+            model: "gpt-5.4",
+            upstreamMode: "responses",
+            upstreamPath: "/v1/responses",
+            status: 200,
+            latencyMs: 105,
+            promptCacheKeyHash: "sha256:custom-openai-hash",
+            promptTokens: 120,
+            completionTokens: 25,
+            totalTokens: 145,
+            cacheHit: true,
+            promptCacheKeyUsed: true,
+            cachedPromptTokens: 90,
+          },
+          {
+            id: "wrong-provider",
+            timestamp: Date.UTC(2026, 3, 4, 12, 10, 0),
+            providerId: "openai",
+            accountId: "acct-2",
+            authType: "oauth_bearer",
+            model: "gpt-5.4",
+            upstreamMode: "responses",
+            upstreamPath: "/v1/responses",
+            status: 200,
+            latencyMs: 100,
+            promptCacheKeyHash: "sha256:wrong-provider-hash",
+            promptTokens: 200,
+            completionTokens: 30,
+            totalTokens: 230,
+          },
+        ],
+        hourlyBuckets: [],
+        dailyBuckets: [],
+        dailyModelBuckets: [],
+        dailyAccountBuckets: [],
+        accountAccumulators: [],
+      },
+      configOverrides: {
+        openaiProviderId: "chatgpt-oauth",
+        upstreamProviderId: "chatgpt-oauth",
+        upstreamFallbackProviderIds: [],
+      },
+      upstreamHandler: async () => ({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ok: true }),
+      }),
+    },
+    async ({ app }) => {
+      const auditResponse = await app.inject({
+        method: "GET",
+        url: "/api/v1/credentials/openai/prompt-cache-audit?limit=10&scanLimit=100",
+      });
+
+      assert.equal(auditResponse.statusCode, 200);
+      const payloadJson: unknown = auditResponse.json();
+      assert.ok(isRecord(payloadJson));
+      assert.ok(Array.isArray(payloadJson.rows));
+      assert.equal(payloadJson.rows.length, 1);
+      assert.ok(isRecord(payloadJson.rows[0]));
+      assert.equal(payloadJson.rows[0].providerId, "chatgpt-oauth");
+      assert.equal(payloadJson.rows[0].latestModel, "gpt-5.4");
+      assert.equal(payloadJson.rows[0].promptCacheKeyHash, "sha256:custom-openai-hash");
+    },
+  );
+});
+
+test("prompt cache audit watchlist is computed from all grouped hashes, not only truncated rows", async () => {
+  const stableEntries = Array.from({ length: 4 }, (_, index) => ({
+    id: `stable-${index}`,
+    timestamp: Date.UTC(2026, 3, 4, 13, index, 0),
+    providerId: "openai",
+    accountId: "acct-stable",
+    authType: "oauth_bearer" as const,
+    model: "gpt-5.4",
+    upstreamMode: "responses" as const,
+    upstreamPath: "/v1/responses",
+    status: 200,
+    latencyMs: 100,
+    promptCacheKeyHash: "sha256:stable-watch-hash",
+    promptTokens: 3_000,
+    completionTokens: 100,
+    totalTokens: 3_100,
+    cachedPromptTokens: index === 0 ? 0 : 150,
+    cacheHit: false,
+    promptCacheKeyUsed: true,
+    factoryDiagnostics: {
+      shapeFingerprint: "shape-stable",
+    },
+  }));
+
+  await withProxyApp(
+    {
+      keys: [],
+      requestLogsPayload: {
+        entries: [
+          {
+            id: "cross-newer",
+            timestamp: Date.UTC(2026, 3, 4, 14, 0, 0),
+            providerId: "openai",
+            accountId: "acct-a",
+            authType: "oauth_bearer",
+            model: "gpt-5.4",
+            upstreamMode: "responses",
+            upstreamPath: "/v1/responses",
+            status: 200,
+            latencyMs: 120,
+            promptCacheKeyHash: "sha256:cross-account-hash",
+            promptTokens: 500,
+            completionTokens: 50,
+            totalTokens: 550,
+          },
+          {
+            id: "cross-older",
+            timestamp: Date.UTC(2026, 3, 4, 13, 59, 0),
+            providerId: "openai",
+            accountId: "acct-b",
+            authType: "oauth_bearer",
+            model: "gpt-5.4",
+            upstreamMode: "responses",
+            upstreamPath: "/v1/responses",
+            status: 200,
+            latencyMs: 118,
+            promptCacheKeyHash: "sha256:cross-account-hash",
+            promptTokens: 500,
+            completionTokens: 50,
+            totalTokens: 550,
+          },
+          ...stableEntries,
+        ],
+        hourlyBuckets: [],
+        dailyBuckets: [],
+        dailyModelBuckets: [],
+        dailyAccountBuckets: [],
+        accountAccumulators: [],
+      },
+      upstreamHandler: async () => ({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ok: true }),
+      }),
+    },
+    async ({ app }) => {
+      const auditResponse = await app.inject({
+        method: "GET",
+        url: "/api/v1/credentials/openai/prompt-cache-audit?limit=1&scanLimit=100",
+      });
+
+      assert.equal(auditResponse.statusCode, 200);
+      const payloadJson: unknown = auditResponse.json();
+      assert.ok(isRecord(payloadJson));
+      assert.ok(Array.isArray(payloadJson.rows));
+      assert.ok(Array.isArray(payloadJson.watchRows));
+      assert.equal(payloadJson.rows.length, 1);
+      assert.equal(payloadJson.rows[0]?.promptCacheKeyHash, "sha256:cross-account-hash");
+      assert.equal(payloadJson.watchRows.length, 1);
+      assert.equal(payloadJson.watchRows[0]?.promptCacheKeyHash, "sha256:stable-watch-hash");
+    },
+  );
+});
+
 test("injects instructions for gpt-5.2 routed through openai oauth (regression: codex instructions required)", async () => {
   let observedPath = "";
   let observedBody: Record<string, unknown> | undefined;
@@ -7156,12 +7438,105 @@ test("/api/tools/websearch proxies via Responses web_search and extracts url cit
       assert.ok(Array.isArray(payload.sources));
       assert.equal(payload.responseId, "resp_ws");
       assert.equal(payload.model, "gpt-5.2");
+      assert.equal(payload.backend, "openai");
 
       const sources = payload.sources as unknown[];
       assert.ok(isRecord(sources[0]));
       assert.equal((sources[0] as any).url, "https://example.com");
     }
   );
+});
+
+test("/api/tools/websearch falls back to Exa when OpenAI fails", async () => {
+  const originalFetch = globalThis.fetch;
+  let exaCalled = false;
+  const callOrder: string[] = [];
+
+  globalThis.fetch = (async (input: any, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url?.includes("mcp.exa.ai")) {
+      callOrder.push("exa");
+      exaCalled = true;
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      assert.equal(body.method, "tools/call");
+      assert.equal(body.params.name, "web_search_exa");
+
+      return new Response(
+        `data: ${JSON.stringify({
+          jsonrpc: "2.0",
+          result: {
+            content: [
+              {
+                type: "text",
+                text: "- [Exa Result](https://exa.example.com) — Found via Exa fallback.",
+              },
+            ],
+          },
+        })}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+    }
+    if (typeof url === "string" && url.startsWith("http://127.0.0.1:")) {
+      return originalFetch(input, init);
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    await withProxyApp(
+      {
+        keys: [],
+        keysPayload: {
+          providers: {
+            openai: {
+              auth: "oauth_bearer",
+              accounts: [{ id: "openai-a", access_token: "oa-token-a", chatgpt_account_id: "chatgpt-a" }],
+            },
+          },
+        },
+        proxyAuthToken: "proxy-token",
+        configOverrides: {
+          upstreamProviderId: "openai",
+          upstreamFallbackProviderIds: [],
+        },
+        upstreamHandler: async () => {
+          callOrder.push("openai");
+          return {
+            status: 500,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ error: { message: "OpenAI web search unavailable" } }),
+          };
+        },
+      },
+      async ({ app }) => {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/tools/websearch",
+          headers: {
+            authorization: "Bearer proxy-token",
+            "content-type": "application/json",
+          },
+          payload: {
+            query: "test query",
+            numResults: 5,
+          },
+        });
+
+        assert.equal(response.statusCode, 200);
+        assert.ok(exaCalled, "Exa MCP should have been called");
+        assert.deepEqual(callOrder, ["openai", "exa"]);
+
+        const payload: unknown = response.json();
+        assert.ok(isRecord(payload));
+        assert.equal(payload.backend, "exa");
+        assert.ok(typeof payload.output === "string");
+        assert.ok(payload.output.includes("Exa Result"));
+        assert.ok(Array.isArray(payload.sources));
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("records token usage from codex SSE responses with missing content-type (regression)", async () => {
@@ -7212,7 +7587,7 @@ test("records token usage from codex SSE responses with missing content-type (re
 
       const logsResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?limit=1",
+        url: "/api/v1/request-logs?limit=1",
       });
 
       assert.equal(logsResponse.statusCode, 200);
@@ -7275,7 +7650,7 @@ test("extracts cached prompt tokens from messages usage cache_read_input_tokens"
 
       const logsResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?providerId=vivgrid&limit=1",
+        url: "/api/v1/request-logs?providerId=vivgrid&limit=1",
       });
 
       assert.equal(logsResponse.statusCode, 200);
@@ -7293,7 +7668,7 @@ test("extracts cached prompt tokens from messages usage cache_read_input_tokens"
   );
 });
 
-test("openai chat completions strategy converts to responses format for codex path (regression)", async () => {
+test("openai chat completions strategy converts GPT requests to responses format for codex path (regression)", async () => {
   let observedPath = "";
   let observedBody: Record<string, unknown> | undefined;
 
@@ -7310,7 +7685,7 @@ test("openai chat completions strategy converts to responses format for codex pa
           }
         }
       },
-      models: ["glm-5"],
+      models: ["gpt-5.4"],
       configOverrides: {
         upstreamProviderId: "openai",
         upstreamFallbackProviderIds: [],
@@ -7324,16 +7699,16 @@ test("openai chat completions strategy converts to responses format for codex pa
           status: 200,
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            id: "resp_glm5",
+            id: "resp_gpt54",
             object: "response",
             created_at: 1772516810,
-            model: "glm-5",
+            model: "gpt-5.4",
             output: [
               {
-                id: "msg_glm5",
+                id: "msg_gpt54",
                 type: "message",
                 role: "assistant",
-                content: [{ type: "output_text", text: "GLM response" }]
+                content: [{ type: "output_text", text: "GPT response" }]
               }
             ],
             usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11 }
@@ -7347,7 +7722,7 @@ test("openai chat completions strategy converts to responses format for codex pa
         url: "/v1/chat/completions",
         headers: { "content-type": "application/json" },
         payload: {
-          model: "glm-5",
+          model: "gpt-5.4",
           messages: [{ role: "user", content: "hello" }],
           stream: false
         }
@@ -7366,6 +7741,322 @@ test("openai chat completions strategy converts to responses format for codex pa
       assert.ok(isRecord(payload));
       assert.equal(payload.object, "chat.completion");
     }
+  );
+});
+
+test("glm chat requests route to rotussy instead of ollama-cloud or the openai provider when rotussy is configured", { concurrency: false }, async () => {
+  await withEnv(
+    {
+      ROTUSSY_API_KEY: "rotussy-key-1", // pragma: allowlist secret
+      ROTUSSY_PROVIDER_ID: undefined,
+      REQUESTY_API_TOKEN: undefined,
+      REQUESTY_API_KEY: undefined,
+      OPENROUTER_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+      ZAI_API_KEY: undefined,
+    },
+    async () => {
+      const observedAttempts: Array<{ path: string; auth: string | undefined }> = [];
+      let observedBody: Record<string, unknown> | undefined;
+
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: {
+            providers: {
+              openai: {
+                auth: "oauth_bearer",
+                accounts: [
+                  { id: "openai-a", access_token: "oa-token-a", chatgpt_account_id: "chatgpt-a" },
+                ],
+              },
+            },
+          },
+          models: ["glm-5"],
+          configOverrides: {
+            upstreamProviderId: "openai",
+            upstreamFallbackProviderIds: ["ollama-cloud", "rotussy", "zai"],
+            localOllamaEnabled: false,
+          },
+          upstreamHandler: async (request, body) => {
+            if (request.method === "GET" && request.url === "/models") {
+              return {
+                status: 200,
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ object: "list", data: [{ id: "glm-5" }] }),
+              };
+            }
+
+            observedAttempts.push({
+              path: request.url ?? "",
+              auth: typeof request.headers.authorization === "string"
+                ? request.headers.authorization
+                : undefined,
+            });
+            observedBody = JSON.parse(body) as Record<string, unknown>;
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: "chatcmpl_rotussy_glm",
+                object: "chat.completion",
+                created: 1772516811,
+                model: "glm-5",
+                choices: [{
+                  index: 0,
+                  message: { role: "assistant", content: "rotussy-glm-routed" },
+                  finish_reason: "stop",
+                }],
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: { "content-type": "application/json" },
+            payload: {
+              model: "glm-5",
+              messages: [{ role: "user", content: "hello" }],
+              stream: false,
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          assert.deepEqual(observedAttempts, [
+            { path: "/v1/chat/completions", auth: "Bearer rotussy-key-1" },
+          ]);
+          assert.ok(isRecord(observedBody));
+          assert.equal(observedBody.model, "glm-5");
+          assert.equal(response.headers["x-open-hax-upstream-provider"], "rotussy");
+
+          const payload: unknown = response.json();
+          assert.ok(isRecord(payload));
+          assert.equal((payload.choices as any)[0].message.content, "rotussy-glm-routed");
+        },
+      );
+    },
+  );
+});
+
+test("glm chat requests skip ollama-cloud when provider catalog does not advertise the requested model", { concurrency: false }, async () => {
+  await withEnv(
+    {
+      ROTUSSY_API_KEY: "rotussy-key-1", // pragma: allowlist secret
+      ROTUSSY_PROVIDER_ID: undefined,
+      REQUESTY_API_TOKEN: undefined,
+      REQUESTY_API_KEY: undefined,
+      OPENROUTER_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+      ZAI_API_KEY: undefined,
+    },
+    async () => {
+      const upstreamAuths: string[] = [];
+
+      await withProxyApp(
+        {
+          keys: [],
+          handleModelCatalog: true,
+          keysPayload: {
+            providers: {
+              openai: {
+                auth: "oauth_bearer",
+                accounts: [
+                  { id: "openai-a", access_token: "oa-token-a", chatgpt_account_id: "chatgpt-a" },
+                ],
+              },
+              "ollama-cloud": ["ollama-cloud-key"],
+            },
+          },
+          models: ["glm-4.7-flash"],
+          configOverrides: {
+            upstreamProviderId: "openai",
+            upstreamFallbackProviderIds: ["ollama-cloud", "rotussy", "zai"],
+            localOllamaEnabled: false,
+          },
+          upstreamHandler: async (request, body) => {
+            const auth = request.headers.authorization;
+
+            if (request.method === "GET" && (request.url === "/v1/models" || request.url === "/models")) {
+              if (auth === "Bearer ollama-cloud-key") {
+                return {
+                  status: 200,
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ object: "list", data: [{ id: "Kimi-K2.5" }] }),
+                };
+              }
+
+              if (auth === "Bearer rotussy-key-1") {
+                return {
+                  status: 200,
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ object: "list", data: [{ id: "glm-4.7-flash" }] }),
+                };
+              }
+
+              return {
+                status: 200,
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ object: "list", data: [{ id: "gpt-5.4" }] }),
+              };
+            }
+
+            upstreamAuths.push(auth ?? "");
+            assert.notEqual(auth, "Bearer ollama-cloud-key");
+            assert.equal(auth, "Bearer rotussy-key-1");
+            const observedBody = JSON.parse(body) as Record<string, unknown>;
+            assert.equal(observedBody.model, "glm-4.7-flash");
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: "chatcmpl_rotussy_glm_skip_ollama",
+                object: "chat.completion",
+                created: 1772516811,
+                model: "glm-4.7-flash",
+                choices: [{
+                  index: 0,
+                  message: { role: "assistant", content: "rotussy-only" },
+                  finish_reason: "stop",
+                }],
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/chat/completions",
+            headers: { "content-type": "application/json" },
+            payload: {
+              model: "glm-4.7-flash",
+              messages: [{ role: "user", content: "hello" }],
+              stream: false,
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          assert.equal(response.headers["x-open-hax-upstream-provider"], "rotussy");
+          assert.deepEqual(upstreamAuths, ["Bearer rotussy-key-1"]);
+        },
+      );
+    },
+  );
+});
+
+test("glm /v1/responses requests route through rotussy chat-completions compatibility when rotussy is configured", { concurrency: false }, async () => {
+  await withEnv(
+    {
+      ROTUSSY_API_KEY: "rotussy-key-1", // pragma: allowlist secret
+      ROTUSSY_PROVIDER_ID: undefined,
+      OPENROUTER_API_KEY: undefined,
+      GEMINI_API_KEY: undefined,
+      ZAI_API_KEY: undefined,
+      ZHIPU_API_KEY: undefined,
+      REQUESTY_API_TOKEN: undefined,
+      REQUESTY_API_KEY: undefined,
+    },
+    async () => {
+      const observedAttempts: Array<{ path: string; auth: string | undefined }> = [];
+      let observedBody: Record<string, unknown> | undefined;
+
+      await withProxyApp(
+        {
+          keys: [],
+          keysPayload: {
+            providers: {
+              openai: {
+                auth: "oauth_bearer",
+                accounts: [
+                  { id: "openai-a", access_token: "oa-token-a", chatgpt_account_id: "chatgpt-a" },
+                ],
+              },
+            },
+          },
+          models: ["glm-5"],
+          configOverrides: {
+            upstreamProviderId: "openai",
+            upstreamFallbackProviderIds: ["rotussy", "requesty"],
+            localOllamaEnabled: false,
+          },
+          upstreamHandler: async (request, body) => {
+            if (request.method === "GET" && request.url === "/models") {
+              return {
+                status: 200,
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ object: "list", data: [{ id: "glm-5" }] }),
+              };
+            }
+
+            observedAttempts.push({
+              path: request.url ?? "",
+              auth: typeof request.headers.authorization === "string"
+                ? request.headers.authorization
+                : undefined,
+            });
+            observedBody = JSON.parse(body) as Record<string, unknown>;
+
+            return {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                id: "chatcmpl_rotussy_glm5",
+                object: "chat.completion",
+                created: 1772516812,
+                model: "glm-5",
+                choices: [{
+                  index: 0,
+                  message: { role: "assistant", content: "rotussy-responses-routed", reasoning_content: "brief reasoning" },
+                  finish_reason: "stop",
+                }],
+                usage: {
+                  prompt_tokens: 6,
+                  completion_tokens: 3,
+                  total_tokens: 9,
+                  completion_tokens_details: { reasoning_tokens: 2 },
+                },
+              }),
+            };
+          },
+        },
+        async ({ app }) => {
+          const response = await app.inject({
+            method: "POST",
+            url: "/v1/responses",
+            headers: {
+              authorization: "Bearer local-test",
+              "content-type": "application/json",
+            },
+            payload: {
+              model: "glm-5",
+              input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+              instructions: "",
+              stream: false,
+            },
+          });
+
+          assert.equal(response.statusCode, 200);
+          assert.deepEqual(observedAttempts, [
+            { path: "/v1/chat/completions", auth: "Bearer rotussy-key-1" },
+          ]);
+          assert.ok(isRecord(observedBody));
+          assert.equal(observedBody.model, "glm-5");
+          assert.ok(Array.isArray(observedBody.messages));
+          assert.equal(response.headers["x-open-hax-upstream-provider"], "rotussy");
+          assert.equal(response.headers["x-open-hax-upstream-mode"], "chat_completions");
+
+          const payload: unknown = response.json();
+          assert.ok(isRecord(payload));
+          assert.equal(payload.object, "response");
+          assert.equal(payload.model, "glm-5");
+          assert.ok(Array.isArray(payload.output));
+          assert.equal((payload.output as any)[1].content[0].text, "rotussy-responses-routed");
+        },
+      );
+    },
   );
 });
 
@@ -7782,7 +8473,7 @@ test("records ollama token usage in request logs", async () => {
 
       const logsResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/request-logs?providerId=ollama&limit=1"
+        url: "/api/v1/request-logs?providerId=ollama&limit=1"
       });
       assert.equal(logsResponse.statusCode, 200);
 
@@ -10270,7 +10961,7 @@ test("persists stable prompt cache keys on sessions and exposes them via UI API"
     async ({ app }) => {
       const createResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/sessions",
+        url: "/api/v1/sessions",
         headers: {
           "content-type": "application/json"
         },
@@ -10290,7 +10981,7 @@ test("persists stable prompt cache keys on sessions and exposes them via UI API"
       assert.ok(sessionId.length > 0);
       const cacheKeyResponse = await app.inject({
         method: "GET",
-        url: `/api/ui/sessions/${sessionId}/cache-key`
+        url: `/api/v1/sessions/${sessionId}/cache-key`
       });
 
       assert.equal(cacheKeyResponse.statusCode, 200);
@@ -10300,7 +10991,7 @@ test("persists stable prompt cache keys on sessions and exposes them via UI API"
 
       const getSessionResponse = await app.inject({
         method: "GET",
-        url: `/api/ui/sessions/${sessionId}`
+        url: `/api/v1/sessions/${sessionId}`
       });
       const getSessionPayload: unknown = getSessionResponse.json();
       assert.ok(isRecord(getSessionPayload));
@@ -10325,7 +11016,7 @@ test("session UI routes support append, fork, and search after extraction from u
     async ({ app }) => {
       const createResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/sessions",
+        url: "/api/v1/sessions",
         headers: {
           "content-type": "application/json"
         },
@@ -10343,7 +11034,7 @@ test("session UI routes support append, fork, and search after extraction from u
 
       const appendResponse = await app.inject({
         method: "POST",
-        url: `/api/ui/sessions/${sessionId}/messages`,
+        url: `/api/v1/sessions/${sessionId}/messages`,
         headers: {
           "content-type": "application/json"
         },
@@ -10362,7 +11053,7 @@ test("session UI routes support append, fork, and search after extraction from u
 
       const forkResponse = await app.inject({
         method: "POST",
-        url: `/api/ui/sessions/${sessionId}/fork`,
+        url: `/api/v1/sessions/${sessionId}/fork`,
         headers: {
           "content-type": "application/json"
         },
@@ -10379,7 +11070,7 @@ test("session UI routes support append, fork, and search after extraction from u
 
       const searchResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/sessions/search",
+        url: "/api/v1/sessions/search",
         headers: {
           "content-type": "application/json"
         },
@@ -10593,7 +11284,7 @@ test("credential summary route works after extraction from ui-routes monolith", 
       async ({ app }) => {
         const hiddenResponse = await app.inject({
           method: "GET",
-          url: "/api/ui/credentials"
+          url: "/api/v1/credentials"
         });
 
         assert.equal(hiddenResponse.statusCode, 200);
@@ -10611,7 +11302,7 @@ test("credential summary route works after extraction from ui-routes monolith", 
 
         const revealResponse = await app.inject({
           method: "GET",
-          url: "/api/ui/credentials?reveal=1"
+          url: "/api/v1/credentials?reveal=1"
         });
 
         assert.equal(revealResponse.statusCode, 200);
@@ -10958,7 +11649,7 @@ test("federation self route stays wired after extraction from ui-routes monolith
       async ({ app }) => {
         const response = await app.inject({
           method: "GET",
-          url: "/api/ui/federation/self",
+          url: "/api/v1/federation/self",
           headers: {
             authorization: "Bearer ui-token"
           }
@@ -11057,7 +11748,7 @@ test("federation peer routes stay wired after extraction and report missing stor
     async ({ app }) => {
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/ui/federation/peers?ownerSubject=owner-1",
+        url: "/api/v1/federation/peers?ownerSubject=owner-1",
         headers: {
           authorization: "Bearer ui-token"
         }
@@ -11070,7 +11761,7 @@ test("federation peer routes stay wired after extraction and report missing stor
 
       const createResponse = await app.inject({
         method: "POST",
-        url: "/api/ui/federation/peers",
+        url: "/api/v1/federation/peers",
         headers: {
           authorization: "Bearer ui-token",
           "content-type": "application/json"
@@ -11197,7 +11888,7 @@ test("federation diff-events route stays wired after extraction and reports miss
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/federation/diff-events?ownerSubject=owner-1&afterSeq=5&limit=2",
+        url: "/api/v1/federation/diff-events?ownerSubject=owner-1&afterSeq=5&limit=2",
         headers: {
           authorization: "Bearer ui-token"
         }
@@ -11227,7 +11918,7 @@ test("federation accounts route stays wired after extraction and reports missing
     async ({ app }) => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/federation/accounts?ownerSubject=owner-1",
+        url: "/api/v1/federation/accounts?ownerSubject=owner-1",
         headers: {
           authorization: "Bearer ui-token"
         }
@@ -11257,7 +11948,7 @@ test("federation projected-account import route stays wired after extraction and
     async ({ app }) => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/ui/federation/projected-accounts/import",
+        url: "/api/v1/federation/projected-accounts/import",
         headers: {
           authorization: "Bearer ui-token",
           "content-type": "application/json"
@@ -11298,7 +11989,7 @@ test("federation projected-account imported route stays wired after extraction a
     async ({ app }) => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/ui/federation/projected-accounts/imported",
+        url: "/api/v1/federation/projected-accounts/imported",
         headers: {
           authorization: "Bearer ui-token",
           "content-type": "application/json"

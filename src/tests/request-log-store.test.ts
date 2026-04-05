@@ -447,3 +447,138 @@ test("request log store mirrors records and updates into the shared usage sink",
     assert.equal(mirroredEntries[1]?.cacheHit, true);
   });
 });
+
+test("request log rollups exclude failed prompt-cache attempts from cache counters", async () => {
+  await withTempDir(async (tempDir) => {
+    const filePath = path.join(tempDir, "request-logs.jsonl");
+    const store = new RequestLogStore(filePath, 100);
+    await store.warmup();
+
+    const timestamp = Date.UTC(2026, 3, 4, 12, 0, 0);
+
+    store.record({
+      timestamp,
+      providerId: "openai",
+      accountId: "acct-1",
+      authType: "oauth_bearer",
+      model: "gpt-5.4",
+      upstreamMode: "responses",
+      upstreamPath: "/v1/responses",
+      status: 200,
+      latencyMs: 120,
+      promptTokens: 800,
+      completionTokens: 200,
+      totalTokens: 1000,
+      promptCacheKeyUsed: true,
+      cacheHit: false,
+      cachedPromptTokens: 0,
+    });
+
+    store.record({
+      timestamp: timestamp + 5_000,
+      providerId: "openai",
+      accountId: "acct-1",
+      authType: "oauth_bearer",
+      model: "gpt-5.4",
+      upstreamMode: "responses",
+      upstreamPath: "/v1/responses",
+      status: 200,
+      latencyMs: 110,
+      promptTokens: 700,
+      completionTokens: 300,
+      totalTokens: 1000,
+      promptCacheKeyUsed: true,
+      cacheHit: true,
+      cachedPromptTokens: 600,
+    });
+
+    store.record({
+      timestamp: timestamp + 10_000,
+      providerId: "openai",
+      accountId: "acct-1",
+      authType: "oauth_bearer",
+      model: "gpt-5.4",
+      upstreamMode: "responses",
+      upstreamPath: "/v1/responses",
+      status: 429,
+      latencyMs: 40,
+      promptCacheKeyUsed: true,
+      cacheHit: false,
+      error: "rate limit",
+    });
+
+    const hourlyBuckets = store.snapshotHourlyBuckets();
+    assert.equal(hourlyBuckets.length, 1);
+    assert.equal(hourlyBuckets[0]?.cacheKeyUseCount, 2);
+    assert.equal(hourlyBuckets[0]?.cacheHitCount, 1);
+
+    const dailyBuckets = store.snapshotDailyBuckets();
+    assert.equal(dailyBuckets.length, 1);
+    assert.equal(dailyBuckets[0]?.cacheKeyUseCount, 2);
+    assert.equal(dailyBuckets[0]?.cacheHitCount, 1);
+
+    const dailyModelBuckets = store.snapshotDailyModelBuckets();
+    assert.equal(dailyModelBuckets.length, 1);
+    assert.equal(dailyModelBuckets[0]?.cacheKeyUseCount, 2);
+    assert.equal(dailyModelBuckets[0]?.cacheHitCount, 1);
+
+    const dailyAccountBuckets = store.snapshotDailyAccountBuckets();
+    assert.equal(dailyAccountBuckets.length, 1);
+    assert.equal(dailyAccountBuckets[0]?.cacheKeyUseCount, 2);
+    assert.equal(dailyAccountBuckets[0]?.cacheHitCount, 1);
+
+    const accumulators = store.snapshotAccountAccumulators();
+    assert.equal(accumulators.length, 1);
+    assert.equal(accumulators[0]?.cacheKeyUseCount, 2);
+    assert.equal(accumulators[0]?.cacheHitCount, 1);
+
+    await store.close();
+  });
+});
+
+test("request log rollups remove cache counters when an updated entry becomes an error", async () => {
+  await withTempDir(async (tempDir) => {
+    const filePath = path.join(tempDir, "request-logs.jsonl");
+    const store = new RequestLogStore(filePath, 100);
+    await store.warmup();
+
+    const entry = store.record({
+      timestamp: Date.UTC(2026, 3, 4, 13, 0, 0),
+      providerId: "openai",
+      accountId: "acct-1",
+      authType: "oauth_bearer",
+      model: "gpt-5.4",
+      upstreamMode: "responses",
+      upstreamPath: "/v1/responses",
+      status: 200,
+      latencyMs: 120,
+      promptCacheKeyUsed: true,
+      cacheHit: true,
+      cachedPromptTokens: 500,
+      promptTokens: 700,
+      completionTokens: 300,
+      totalTokens: 1000,
+    });
+
+    store.update(entry.id, {
+      error: "late upstream failure classification",
+    });
+
+    const hourlyBuckets = store.snapshotHourlyBuckets();
+    assert.equal(hourlyBuckets.length, 1);
+    assert.equal(hourlyBuckets[0]?.cacheKeyUseCount, 0);
+    assert.equal(hourlyBuckets[0]?.cacheHitCount, 0);
+
+    const dailyModelBuckets = store.snapshotDailyModelBuckets();
+    assert.equal(dailyModelBuckets.length, 1);
+    assert.equal(dailyModelBuckets[0]?.cacheKeyUseCount, 0);
+    assert.equal(dailyModelBuckets[0]?.cacheHitCount, 0);
+
+    const accumulators = store.snapshotAccountAccumulators();
+    assert.equal(accumulators.length, 1);
+    assert.equal(accumulators[0]?.cacheKeyUseCount, 0);
+    assert.equal(accumulators[0]?.cacheHitCount, 0);
+
+    await store.close();
+  });
+});
