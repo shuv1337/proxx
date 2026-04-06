@@ -1,49 +1,32 @@
-# Π Snapshot: Federation sync + dynamic Ollama routing merge handoff
+# Π Snapshot: Proxx dashboard Night Owl completion
 
 - **Repo:** `open-hax/proxx`
-- **Branch:** `feat/federation-sync-and-dynamic-ollama`
-- **Pre-snapshot HEAD:** `471d28a`
-- **Previous tag:** `Π/20260330-205903-aco-route-quota-cooldowns`
-- **Intended Π tag:** `Π/20260330-235123-federation-sync-dynamic-ollama`
-- **Generated:** `2026-03-30T23:51:23Z`
+- **Branch:** `fork-tax/20260404-033121-proxx-night-owl-dashboard-finish`
+- **Base branch:** `fix/prompt-cache-audit-followups`
+- **Previous tag:** `Π/20260404-010801-request-log-cache-rollup-failure-exclusion`
+- **Intended Π tag:** `Π/20260404-033121-proxx-night-owl-dashboard-finish`
+- **Generated:** `2026-04-04T03:31:21Z`
 
 ## What this snapshot preserves
 
-This Π handoff captures the completion of the federation sync and dynamic Ollama routing feature branch, merging upstream changes and reconciling route refactoring with provider strategy.
+This Π handoff captures the downstream Proxx integration of the published UXX theming runtime. The app now persists a theme preference, exposes a Monokai/Night Owl toggle, and themes the full dashboard surface instead of only the UXX metric cards.
 
-Included work categories:
-- Federation sync and dynamic Ollama routing: `src/lib/ollama-compat.ts`, `src/lib/provider-strategy/strategies/ollama.ts`, federation bridge autostart/fallback wiring
-- Provider strategy refactor: consolidated routing logic in `src/lib/provider-strategy/base.ts` and `src/lib/provider-strategy/shared.ts`
-- Route simplification: `src/app.ts`, `src/lib/ui-routes.ts`, `src/routes/chat.ts` cleaned up
-- Test coverage expansion: `src/tests/proxy.test.ts` expanded with provider catalog, Factory, and credential tests
+### App wiring
+- `package.json` — upgraded to `@open-hax/uxx@0.1.3`
+- `web/src/App.tsx` — `ThemeProvider` wrapper plus persisted theme toggle
 
-## Dirty state before commit
+### Consumer CSS alignment
+- `web/src/styles.css` — moved theme-derived aliases and page background from `:root` to `.app-theme-root`
+- This fixes the scoped-variable mismatch where UXX primitives updated but Proxx-owned panels, nav, and inputs kept default-theme values
 
-### Modified (staged)
-- `src/app.ts`
-- `src/lib/app-deps.ts`
-- `src/lib/federation/bridge-agent-autostart.ts`
-- `src/lib/federation/bridge-fallback.ts`
-- `src/lib/ollama-compat.ts`
-- `src/lib/provider-strategy/base.ts`
-- `src/lib/provider-strategy/shared.ts`
-- `src/lib/provider-strategy/strategies/cephalon.ts`
-- `src/lib/provider-strategy/strategies/ollama.ts`
-- `src/lib/ui-routes.ts`
-- `src/routes/api/ui/analytics/usage.ts`
-- `src/routes/api/ui/hosts/index.ts`
-- `src/routes/chat.ts`
-- `src/routes/credentials/get-credentials-ui.ts`
-- `src/routes/embeddings.ts`
-- `src/routes/responses.ts`
-- `src/tests/proxy.test.ts`
+### Runtime validation
+- Local build and web build pass
+- `services/proxx` recreated successfully
+- Browser verification confirmed Night Owl across dashboard cards, panels, nav, and controls
 
 ## Verification
 
-- TypeScript typecheck: `tsc -p tsconfig.json --noEmit` ✅
-- Full test suite: `pnpm run build && node --test --test-concurrency=1 dist/tests/*.test.js` ✅ (185/187 passed)
-- 2 pre-existing federation bridge integration tests fail (require live enclave infrastructure)
-
-## Operator note
-
-This snapshot captures the feature-branch merge point. The federation bridge integration tests (146-147) are environment-dependent and fail without live enclave infrastructure — this is pre-existing and not introduced by this merge.
+- Build: `pnpm build` ✅
+- Web build: `pnpm web:build` ✅
+- Service recreate: `docker compose up -d --build --force-recreate` ✅
+- Runtime: `docker compose ps` healthy on `http://127.0.0.1:5174` ✅

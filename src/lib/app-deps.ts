@@ -56,18 +56,9 @@ export interface AppDeps {
   readonly dynamicProviderBaseUrlGetter: (providerId: string) => Promise<string | undefined>;
   readonly bridgeRelay: FederationBridgeRelay | undefined;
   readonly quotaMonitor: QuotaMonitor;
-  readonly refreshFactoryAccount: (credential: {
-    readonly providerId: string;
-    readonly accountId: string;
-    readonly refreshToken?: string;
-    readonly expiresAt?: number;
-  }) => Promise<void>;
+  readonly refreshFactoryAccount: (credential: ProviderCredential) => Promise<ProviderCredential | null>;
   readonly ensureFreshAccounts: (providerId: string) => Promise<void>;
-  readonly refreshExpiredOAuthAccount: (credential: {
-    readonly providerId: string;
-    readonly accountId: string;
-    readonly refreshToken?: string;
-  }) => Promise<ProviderCredential | null>;
+  readonly refreshExpiredOAuthAccount: (credential: ProviderCredential) => Promise<ProviderCredential | null>;
   readonly getMergedModelIds: (forceRefresh?: boolean) => Promise<string[]>;
   readonly executeFederatedRequestFallback: (input: ExecuteFederatedRequestFallbackInput) => Promise<boolean>;
   readonly injectNativeBridge: (url: string, payload: Record<string, unknown>, requestHeaders: Record<string, unknown>) => Promise<InjectNativeBridgeResult>;

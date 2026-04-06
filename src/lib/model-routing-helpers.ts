@@ -1,11 +1,25 @@
 import type { ProxyConfig } from "./config.js";
 import { isAutoModel } from "./auto-model-selector.js";
-import type { ProviderRoute } from "./provider-routing.js";
+import { looksLikeHostedOpenAiFamily, providerIdLooksLikeOllama, type ProviderRoute } from "./provider-routing.js";
 import type { ResolvedCatalogWithPreferences } from "./provider-catalog.js";
 
 interface ResolvedModelCatalog {
   readonly modelIds: readonly string[];
   readonly aliasTargets: Readonly<Record<string, string>>;
+  readonly dynamicOllamaModelIds: readonly string[];
+}
+
+function normalizeModelId(modelId: string): string {
+  return modelId.trim().toLowerCase();
+}
+
+export function catalogHasDynamicOllamaModel(
+  catalog: Pick<ResolvedModelCatalog, "dynamicOllamaModelIds"> | null | undefined,
+  modelId: string,
+): boolean {
+  const normalizedModelId = normalizeModelId(modelId);
+  return normalizedModelId.length > 0
+    && (catalog?.dynamicOllamaModelIds ?? []).some((candidateModelId) => normalizeModelId(candidateModelId) === normalizedModelId);
 }
 
 export function resolvableConcreteModelIds(catalog: ResolvedModelCatalog | null): string[] | undefined {
@@ -66,9 +80,14 @@ export function openAiProviderUsesCodexSurface(config: ProxyConfig): boolean {
 export function providerRouteSupportsModel(config: ProxyConfig, providerId: string, modelId: string): boolean {
   const normalizedProviderId = providerId.trim().toLowerCase();
   const normalizedModelId = modelId.trim().toLowerCase();
+  const normalizedOpenAiProviderId = config.openaiProviderId.trim().toLowerCase();
+
+  if (normalizedProviderId === normalizedOpenAiProviderId && !looksLikeHostedOpenAiFamily(normalizedModelId)) {
+    return false;
+  }
 
   if (
-    normalizedProviderId === config.openaiProviderId.trim().toLowerCase()
+    normalizedProviderId === normalizedOpenAiProviderId
     && normalizedModelId === "gpt-5.4-nano"
     && openAiProviderUsesCodexSurface(config)
   ) {
@@ -91,18 +110,20 @@ export function filterProviderRoutesByCatalogAvailability(
   routedModel: string,
   catalogBundle: ResolvedCatalogWithPreferences,
 ): ProviderRoute[] {
-  if (catalogBundle.catalog.declaredModelIds.includes(routedModel)) {
-    return [...providerRoutes];
-  }
-
   const catalogMatchedRoutes = providerRoutes.filter((route) => {
     const entry = catalogBundle.providerCatalogs[route.providerId];
     return entry?.modelIds.includes(routedModel) ?? false;
   });
 
-  return catalogMatchedRoutes.length > 0
-    ? catalogMatchedRoutes
-    : [...providerRoutes];
+  if (catalogMatchedRoutes.length > 0) {
+    return catalogMatchedRoutes;
+  }
+
+  if (catalogHasDynamicOllamaModel(catalogBundle.catalog, routedModel)) {
+    return providerRoutes.filter((route) => providerIdLooksLikeOllama(route.providerId));
+  }
+
+  return [...providerRoutes];
 }
 
 export function shouldRejectModelFromProviderCatalog(

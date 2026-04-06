@@ -1,55 +1,54 @@
 import type { FastifyReply } from "fastify";
 
-import type { AccountHealthStore } from "../db/account-health-store.js";
-import type { EventStore } from "../db/event-store.js";
-import type { ProviderCredential } from "../key-pool.js";
-import type { PolicyEngine } from "../policy/index.js";
-import type { PromptAffinityStore } from "../prompt-affinity-store.js";
-import type { ProviderRoutePheromoneStore } from "../provider-route-pheromone-store.js";
-import type { RequestLogStore } from "../request-log-store.js";
-import type { QuotaMonitor } from "../quota-monitor.js";
-import { buildUpstreamHeadersForCredential, extractRateLimitCooldownMs, isRateLimitResponse } from "../proxy.js";
+import type { AccountHealthStore } from "../../db/account-health-store.js";
+import type { EventStore } from "../../db/event-store.js";
+import type { ProviderCredential } from "../../key-pool.js";
+import type { PolicyEngine } from "../../policy/index.js";
+import type { PromptAffinityStore } from "../../prompt-affinity-store.js";
+import type { ProviderRoutePheromoneStore } from "../../provider-route-pheromone-store.js";
+import type { RequestLogStore } from "../../request-log-store.js";
+import type { QuotaMonitor } from "../../quota-monitor.js";
+import { buildUpstreamHeadersForCredential, detectOllamaLimitKind, extractRateLimitCooldownMs, isRateLimitResponse } from "../../proxy.js";
 import {
   responsesEventStreamToErrorPayload,
-} from "../responses-compat.js";
-import type { ProviderRoute } from "../provider-routing.js";
+} from "../../responses-compat.js";
+import type { ProviderRoute } from "../../provider-routing.js";
 import {
   fetchWithResponseTimeout,
   responseIndicatesQuotaError,
   summarizeUpstreamError,
   toErrorMessage,
-} from "../provider-utils.js";
-import { getTelemetry } from "../telemetry/otel.js";
-import { selectRemoteProviderStrategyForRoute } from "./registry.js";
+} from "../../provider-utils.js";
+import { getTelemetry } from "../../telemetry/otel.js";
+import { selectRemoteProviderStrategyForRoute } from "../registry.js";
 import {
-  PERMANENT_DISABLE_COOLDOWN_MS,
   buildCodexResponsesImagesBody,
   buildFactory4xxDiagnostics,
   extractImagesFromCodexEventStream,
   extractImagesFromCodexResponse,
   joinUrl,
-  providerAccountsForRequest,
-  providerAccountsForRequestWithPolicy,
-  reorderAccountsForLatency,
-  reorderCandidatesForAffinities,
   responseLooksLikeEventStream,
-  shouldCooldownCredentialOnAuthFailure,
-  shouldPermanentlyDisableCredential,
-  shouldRetrySameCredentialForServerError,
   sleep,
   transientRetryDelayMs,
   recordAttempt,
   updateFailedAttemptDiagnostics,
   updateUsageCountsFromResponse,
-  readHeaderValue,
   type BuildPayloadResult,
-  type FallbackAccumulator,
   type ProviderAttemptContext,
   type ProviderAvailabilitySummary,
   type ProviderFallbackExecutionResult,
   type ProviderStrategy,
   type StrategyRequestContext,
-} from "./shared.js";
+} from "../shared.js";
+import {
+  PERMANENT_DISABLE_COOLDOWN_MS,
+  shouldCooldownCredentialOnAuthFailure,
+  shouldPermanentlyDisableCredential,
+  shouldRetrySameCredentialForServerError,
+} from "./error-classifier.js";
+import { requestyModelProvider } from "../../model-family.js";
+import { buildFallbackCandidates } from "./orchestrator.js";
+import { clampRouteQuality, createAccumulator, emptyResult, type FallbackDeps } from "./types.js";
 
 function shouldUseOpenAiCodexHeaderProfile(
   providerId: string,
@@ -59,54 +58,13 @@ function shouldUseOpenAiCodexHeaderProfile(
   return providerId === openaiProviderId && account.authType === "oauth_bearer";
 }
 
-const REQUESTY_MODEL_PREFIXES: ReadonlyArray<readonly [string, string]> = [
-  ["gpt-", "openai"],
-  ["o1", "openai"],
-  ["o3", "openai"],
-  ["o4", "openai"],
-  ["chatgpt-", "openai"],
-  ["claude-", "anthropic"],
-  ["gemini-", "google"],
-  ["deepseek", "deepseek"],
-  ["glm-", "zhipu"],
-  ["kimi-", "moonshotai"],
-  ["qwen", "qwen"],
-];
-
 const MAX_STICKY_TRANSPORT_FAILURE_CANDIDATES = 4;
 
-function clampRouteQuality(latencyMs: number): number {
-  const clampedLatency = Math.min(Math.max(latencyMs, 250), 30_000);
-  return Math.max(0.05, 1 - ((clampedLatency - 250) / (30_000 - 250)));
-}
-
 function requestyModelPrefix(model: string): string {
-  const lower = model.toLowerCase();
-  for (const [prefix, provider] of REQUESTY_MODEL_PREFIXES) {
-    if (lower.startsWith(prefix)) {
-      return provider;
-    }
-  }
-  return "openai";
+  return requestyModelProvider(model);
 }
 
-function resolveForcedCredentialSelection(context: StrategyRequestContext): {
-  readonly providerId?: string;
-  readonly accountId?: string;
-} {
-  if (context.requestAuth?.kind !== "legacy_admin") {
-    return {};
-  }
-
-  const providerId = readHeaderValue(context.clientHeaders, "x-open-hax-forced-provider")?.trim().toLowerCase();
-  const accountId = readHeaderValue(context.clientHeaders, "x-open-hax-forced-account-id")?.trim();
-  return {
-    providerId: providerId && providerId.length > 0 ? providerId : undefined,
-    accountId: accountId && accountId.length > 0 ? accountId : undefined,
-  };
-}
-
-export async function executeProviderFallback(
+export async function executeProviderRoutingPlan(
   strategy: ProviderStrategy,
   reply: FastifyReply,
   requestLogStore: RequestLogStore,
@@ -117,6 +75,8 @@ export async function executeProviderFallback(
     markInFlight(credential: ProviderCredential): () => void;
     markRateLimited(credential: ProviderCredential, retryAfterMs?: number): void;
     isAccountExpired?(credential: ProviderCredential): boolean;
+    clearAccountCooldown?(providerId: string, accountId: string): void;
+    disableAccount?(providerId: string, accountId: string): void;
   },
   providerRoutes: readonly ProviderRoute[],
   context: StrategyRequestContext,
@@ -128,109 +88,18 @@ export async function executeProviderFallback(
   eventStore?: EventStore,
   quotaMonitor?: QuotaMonitor,
 ): Promise<ProviderFallbackExecutionResult> {
-  const accumulator: FallbackAccumulator = {
-    sawRateLimit: false,
-    sawRequestError: false,
-    sawUpstreamServerError: false,
-    sawUpstreamInvalidRequest: false,
-    sawModelNotFound: false,
-    sawModelNotSupportedForAccount: false,
-    attempts: 0,
+  const accumulator = createAccumulator();
+
+  const deps: FallbackDeps = {
+    strategy, reply, requestLogStore, promptAffinityStore, providerRoutePheromoneStore,
+    keyPool, providerRoutes, context, payload, promptCacheKey, refreshExpiredToken,
+    policy, healthStore, eventStore, quotaMonitor,
   };
 
-  const candidatesByProvider: Record<string, Array<{ readonly providerId: string; readonly baseUrl: string; readonly account: ProviderCredential }>> = {};
-  const forcedCredentialSelection = resolveForcedCredentialSelection(context);
-
-  for (const route of providerRoutes) {
-    if (forcedCredentialSelection.providerId && route.providerId !== forcedCredentialSelection.providerId) {
-      continue;
-    }
-
-    let routeAccounts: ProviderCredential[];
-    try {
-      const rawAccounts = await keyPool.getRequestOrder(route.providerId);
-      routeAccounts = policy
-        ? providerAccountsForRequestWithPolicy(policy, rawAccounts, route.providerId, context.routedModel, {
-            openAiPrefixed: context.openAiPrefixed,
-            localOllama: context.localOllama,
-            explicitOllama: context.explicitOllama,
-          }, healthStore)
-        : providerAccountsForRequest(rawAccounts, route.providerId, context.routedModel);
-    } catch {
-      continue;
-    }
-
-    routeAccounts = reorderAccountsForLatency(requestLogStore, route.providerId, routeAccounts, context.routedModel, strategy.mode);
-
-    if (forcedCredentialSelection.accountId) {
-      routeAccounts = routeAccounts.filter((account) => account.accountId === forcedCredentialSelection.accountId);
-    }
-
-    const routeCandidates = routeAccounts.map((account) => ({
-      providerId: route.providerId,
-      baseUrl: route.baseUrl,
-      account,
-    }));
-
-    if (routeCandidates.length > 0) {
-      candidatesByProvider[route.providerId] = routeCandidates;
-    }
-  }
-
-  const affinityRecord = promptCacheKey
-    ? await promptAffinityStore.get(promptCacheKey)
-    : undefined;
-  const preferredAffinity = affinityRecord
-    ? { providerId: affinityRecord.providerId, accountId: affinityRecord.accountId }
-    : undefined;
-  const provisionalAffinity = affinityRecord?.provisionalProviderId && affinityRecord?.provisionalAccountId
-    ? { providerId: affinityRecord.provisionalProviderId, accountId: affinityRecord.provisionalAccountId }
-    : undefined;
-
-  const allCandidates = providerRoutes.flatMap((route) => candidatesByProvider[route.providerId] ?? []);
-
-  const providerIndex = new Map(providerRoutes.map((route, index) => [route.providerId, index] as const));
-
-  const sortedCandidates = [...allCandidates].sort((left, right) => {
-    const idxLeft = providerIndex.get(left.providerId) ?? Number.MAX_SAFE_INTEGER;
-    const idxRight = providerIndex.get(right.providerId) ?? Number.MAX_SAFE_INTEGER;
-
-    // Respect provider ordering first (already policy-ordered), with an escape hatch
-    // for significant TTFT differences.
-    if (idxLeft !== idxRight) {
-      const perfLeft = requestLogStore.getPerfSummary(left.providerId, left.account.accountId, context.routedModel, strategy.mode);
-      const perfRight = requestLogStore.getPerfSummary(right.providerId, right.account.accountId, context.routedModel, strategy.mode);
-
-      const ttftLeft = perfLeft?.ewmaTtftMs;
-      const ttftRight = perfRight?.ewmaTtftMs;
-      if (
-        typeof ttftLeft === "number" && Number.isFinite(ttftLeft)
-        && typeof ttftRight === "number" && Number.isFinite(ttftRight)
-      ) {
-        const ttftDelta = Math.abs(ttftLeft - ttftRight);
-        if (ttftDelta > 120) {
-          return ttftLeft - ttftRight;
-        }
-      }
-
-      return idxLeft - idxRight;
-    }
-
-    // Within a provider, preserve upstream ordering (policy + account ordering + latency window).
-    return 0;
-  });
-
-  const candidates = reorderCandidatesForAffinities(
-    sortedCandidates,
-    [preferredAffinity, provisionalAffinity].filter((value): value is { readonly providerId: string; readonly accountId: string } => Boolean(value)),
-  );
+  const { candidates, preferredAffinity, provisionalAffinity } = await buildFallbackCandidates(deps);
 
   if (candidates.length === 0) {
-    return {
-      handled: false,
-      candidateCount: 0,
-      summary: accumulator
-    };
+    return emptyResult(0);
   }
 
   let preferredReassignmentAllowed = preferredAffinity === undefined || candidates.every(
@@ -523,6 +392,21 @@ export async function executeProviderFallback(
 
         if (isRateLimitResponse(upstreamResponse)) {
           accumulator.sawRateLimit = true;
+
+          let ollamaMultiplier = 1;
+          if (candidate.account.providerId === "ollama-cloud") {
+            try {
+              const cloned = upstreamResponse.clone();
+              const body = await cloned.json() as Record<string, unknown>;
+              const limitKind = detectOllamaLimitKind(body);
+              if (limitKind === "weekly") {
+                ollamaMultiplier = context.config.ollamaWeeklyCooldownMultiplier;
+              }
+            } catch {
+              // If we can't parse the body, fall back to no multiplier.
+            }
+          }
+
           let cooldownMs: number | undefined;
           if (quotaMonitor?.tracksProvider(candidate.account.providerId)) {
             cooldownMs = quotaMonitor.getCooldownMs(candidate.account.accountId);
@@ -536,11 +420,13 @@ export async function executeProviderFallback(
             } catch {
               // Ignore quota lookup failures and fall back to response-derived cooldowns.
             }
-            cooldownMs = quotaMonitor.getCooldownMs(candidate.account.accountId);
+            cooldownMs = quotaMonitor.getCooldownMsFromQuota(candidate.account.accountId);
           }
           if (!cooldownMs) {
             cooldownMs = context.config.keyCooldownMs;
           }
+
+          cooldownMs = Math.round(cooldownMs * ollamaMultiplier);
           keyPool.markRateLimited(candidate.account, cooldownMs);
           if (
             preferredAffinity
@@ -674,6 +560,9 @@ export async function executeProviderFallback(
             if (healthStore) {
               healthStore.recordSuccess(candidate.account, upstreamResponse.status);
             }
+            if (candidate.account.providerId === "ollama-cloud" && keyPool.clearAccountCooldown) {
+              keyPool.clearAccountCooldown(candidate.account.providerId, candidate.account.accountId);
+            }
             await providerRoutePheromoneStore.noteSuccess(
               candidate.providerId,
               context.routedModel,
@@ -697,6 +586,9 @@ export async function executeProviderFallback(
           upstreamSpan.end();
           if (healthStore && upstreamResponse.ok) {
             healthStore.recordSuccess(candidate.account, upstreamResponse.status);
+          }
+          if (upstreamResponse.ok && candidate.account.providerId === "ollama-cloud" && keyPool.clearAccountCooldown) {
+            keyPool.clearAccountCooldown(candidate.account.providerId, candidate.account.accountId);
           }
           await providerRoutePheromoneStore.noteSuccess(
             candidate.providerId,
@@ -917,6 +809,10 @@ export async function executeProviderFallback(
               if (!refreshedResponse.ok && refreshedOutcome.requestError === true && (refreshedResponse.status === 401 || refreshedResponse.status === 403)) {
                 if (shouldCooldownCredentialOnAuthFailure(candidate.providerId, refreshedResponse.status)) {
                   keyPool.markRateLimited(refreshedCredential, Math.min(context.config.keyCooldownMs, 10_000));
+                  // Disable OAuth accounts that fail auth even after successful token refresh
+                  if (refreshedCredential.authType === "oauth_bearer" && keyPool.disableAccount) {
+                    keyPool.disableAccount(refreshedCredential.providerId, refreshedCredential.accountId);
+                  }
                   if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && refreshedCredential.accountId === preferredAffinity.accountId) {
                     preferredReassignmentAllowed = true;
                   }
@@ -929,16 +825,28 @@ export async function executeProviderFallback(
           } else {
             await providerRoutePheromoneStore.noteFailure(candidate.providerId, context.routedModel);
             keyPool.markRateLimited(candidate.account, Math.min(context.config.keyCooldownMs, 10_000));
+            // Disable OAuth accounts when token refresh fails
+            if (candidate.account.authType === "oauth_bearer" && keyPool.disableAccount) {
+              keyPool.disableAccount(candidate.account.providerId, candidate.account.accountId);
+            }
             if (preferredAffinity && candidate.providerId === preferredAffinity.providerId && candidate.account.accountId === preferredAffinity.accountId) {
               preferredReassignmentAllowed = true;
             }
           }
         } else if (!upstreamResponse.ok && outcome.requestError === true && (upstreamResponse.status === 401 || upstreamResponse.status === 402 || upstreamResponse.status === 403)) {
           if (shouldCooldownCredentialOnAuthFailure(candidate.providerId, upstreamResponse.status) || shouldPermanentlyDisableCredential(candidate.account, upstreamResponse.status)) {
-            const cooldownMs = shouldPermanentlyDisableCredential(candidate.account, upstreamResponse.status)
+            const permanentlyDisable = shouldPermanentlyDisableCredential(candidate.account, upstreamResponse.status);
+            const cooldownMs = permanentlyDisable
               ? PERMANENT_DISABLE_COOLDOWN_MS
               : Math.min(context.config.keyCooldownMs, 10_000);
             keyPool.markRateLimited(candidate.account, cooldownMs);
+            if (permanentlyDisable && keyPool.disableAccount) {
+              keyPool.disableAccount(candidate.account.providerId, candidate.account.accountId);
+            }
+            // Also disable OAuth accounts with 401 that have no refresh token (unrecoverable)
+            if (upstreamResponse.status === 401 && candidate.account.authType === "oauth_bearer" && !candidate.account.refreshToken && keyPool.disableAccount) {
+              keyPool.disableAccount(candidate.account.providerId, candidate.account.accountId);
+            }
             if (healthStore) {
               healthStore.recordFailure(candidate.account, upstreamResponse.status, "credential_disabled");
             }
@@ -986,25 +894,35 @@ export async function executeProviderFallback(
   };
 }
 
+export const executeProviderFallback = executeProviderRoutingPlan;
+
 export async function inspectProviderAvailability(
   keyPool: {
-    getStatus(providerId: string): Promise<{ readonly totalAccounts: number }>;
+    getStatus(providerId: string): Promise<{ readonly totalAccounts: number; readonly disabledAccounts?: number }>;
   },
   providerRoutes: readonly ProviderRoute[],
   promptCacheKey?: string,
 ): Promise<ProviderAvailabilitySummary> {
   let sawConfiguredProvider = false;
+  let sawEnabledConfiguredProvider = false;
 
   for (const route of providerRoutes) {
     try {
       const status = await keyPool.getStatus(route.providerId);
       if (status.totalAccounts > 0) {
         sawConfiguredProvider = true;
+        if (status.totalAccounts > (status.disabledAccounts ?? 0)) {
+          sawEnabledConfiguredProvider = true;
+        }
       }
     } catch {
       // Ignore status lookup errors and continue collecting provider info.
     }
   }
 
-  return { sawConfiguredProvider, prompt_cache_key: promptCacheKey };
+  return {
+    sawConfiguredProvider,
+    sawOnlyDisabledProviders: sawConfiguredProvider && !sawEnabledConfiguredProvider,
+    prompt_cache_key: promptCacheKey,
+  };
 }

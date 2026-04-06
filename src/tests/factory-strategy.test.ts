@@ -157,6 +157,9 @@ async function withProxyApp(
     settingsFilePath: settingsPath,
     keyReloadMs: 50,
     keyCooldownMs: 10000,
+    keyCooldownJitterFactor: 0.4,
+    enableKeyRandomWalk: true,
+    ollamaWeeklyCooldownMultiplier: 24,
     requestTimeoutMs: 2000,
     streamBootstrapTimeoutMs: 2000,
     upstreamTransientRetryCount: 0,
@@ -973,7 +976,7 @@ test("Factory 4xx responses persist sanitized prompt-rejection diagnostics", { c
 
           const logsResponse = await app.inject({
             method: "GET",
-            url: "/api/ui/request-logs?limit=1",
+            url: "/api/v1/request-logs?limit=1",
           });
 
           assert.equal(logsResponse.statusCode, 200);

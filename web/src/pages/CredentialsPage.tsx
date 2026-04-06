@@ -1,8 +1,12 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { Badge, Spinner, StatusChipStack, type StatusChipItem } from "@open-hax/uxx";
 import {
   addApiKeyCredential,
+  disableAccount,
+  enableAccount,
   getApiOrigin,
+  getDisabledAccounts,
   getOpenAiCredentialQuota,
   getOpenAiPromptCacheAudit,
   listCredentials,
@@ -190,48 +194,12 @@ function formatQuotaRateLimitStatus(rateLimit: CredentialQuotaRateLimit | null):
   return "Unknown";
 }
 
-function quotaRateLimitBadgeClass(rateLimit: CredentialQuotaRateLimit | null): string {
-  if (rateLimit?.allowed === true) {
-    return "credentials-badge-accent";
-  }
-
-  if (rateLimit?.allowed === false || rateLimit?.limitReached === true) {
-    return "credentials-badge-danger";
-  }
-
-  return "credentials-badge-muted";
-}
-
-function probeBadgeClass(result: OpenAiAccountProbeResult | undefined): string {
-  if (!result) {
-    return "credentials-badge-muted";
-  }
-
-  return result.ok ? "credentials-badge-accent" : "credentials-badge-danger";
-}
-
 function formatAggregatePercent(value: number | null): string {
   if (value === null || !Number.isFinite(value)) {
     return "No data";
   }
 
   return value >= 10 ? `${Math.round(value)}%` : `${value.toFixed(1)}%`;
-}
-
-function quotaBadgeClassFromPercent(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) {
-    return "credentials-badge-muted";
-  }
-
-  if (value <= 15) {
-    return "credentials-badge-danger";
-  }
-
-  if (value <= 40) {
-    return "credentials-badge-warning";
-  }
-
-  return "credentials-badge-accent";
 }
 
 function quotaToneClass(remainingPercent: number | null): string {
@@ -390,6 +358,7 @@ export function CredentialsPage(): JSX.Element {
   const [promptCacheAudit, setPromptCacheAudit] = useState<PromptCacheAuditOverview | null>(null);
   const [accountProbeResults, setAccountProbeResults] = useState<Record<string, OpenAiAccountProbeResult>>({});
   const [accountProbeLoading, setAccountProbeLoading] = useState<Record<string, boolean>>({});
+  const [disabledAccounts, setDisabledAccounts] = useState<Set<string>>(new Set());
   const [copiedFieldKey, setCopiedFieldKey] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -437,11 +406,27 @@ export function CredentialsPage(): JSX.Element {
     }
   }, []);
 
+  const refreshDisabledAccounts = useCallback(async () => {
+    try {
+      const payload = await getDisabledAccounts();
+      const disabledSet = new Set<string>();
+      for (const account of payload.disabledAccounts) {
+        disabledSet.add(`${account.providerId}:${account.accountId}`);
+      }
+      setDisabledAccounts(disabledSet);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    }
+  }, []);
+
   useEffect(() => {
     void refreshCredentials().catch((nextError) => {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     });
-  }, [refreshCredentials]);
+    void refreshDisabledAccounts().catch((nextError) => {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    });
+  }, [refreshCredentials, refreshDisabledAccounts]);
 
   useEffect(() => {
     void refreshLogs().catch((nextError) => {
@@ -576,30 +561,15 @@ export function CredentialsPage(): JSX.Element {
       return [];
     }
 
-    return promptCacheAudit.rows
-      .map((row) => {
-        const cacheRate = row.promptTokens > 0 ? (row.cachedPromptTokens / row.promptTokens) * 100 : 0;
-        return {
-          ...row,
-          cacheRate,
-        };
-      })
-      .filter((row) => row.successfulAccountCount === 1)
-      .filter((row) => row.shapeFingerprintCount === 1)
-      .filter((row) => row.successfulRequestCount >= 4)
-      .filter((row) => row.promptTokens >= 10_000)
-      .sort((left, right) => {
-        if (left.cacheRate !== right.cacheRate) {
-          return left.cacheRate - right.cacheRate;
-        }
+    const sourceRows = promptCacheAudit.watchRows.length > 0 ? promptCacheAudit.watchRows : promptCacheAudit.rows;
 
-        if (right.promptTokens !== left.promptTokens) {
-          return right.promptTokens - left.promptTokens;
-        }
-
-        return left.promptCacheKeyHash.localeCompare(right.promptCacheKeyHash);
-      })
-      .slice(0, 8);
+    return sourceRows.map((row) => {
+      const cacheRate = row.promptTokens > 0 ? (row.cachedPromptTokens / row.promptTokens) * 100 : 0;
+      return {
+        ...row,
+        cacheRate,
+      };
+    });
   }, [promptCacheAudit]);
 
   const sortAccountEntries = useCallback((entries: readonly AccountEntry[]): AccountEntry[] => {
@@ -1081,6 +1051,34 @@ export function CredentialsPage(): JSX.Element {
     }
   }, [refreshPromptCacheAudit, refreshQuota]);
 
+  const handleDisableAccount = useCallback(async (providerId: string, accountId: string, displayName: string) => {
+    setError(null);
+
+    try {
+      await disableAccount(providerId, accountId);
+      setStatus(`Disabled account ${displayName}.`);
+      setDisabledAccounts((current) => new Set(current).add(`${providerId}:${accountId}`));
+    } catch (disableError) {
+      setError(disableError instanceof Error ? disableError.message : String(disableError));
+    }
+  }, []);
+
+  const handleEnableAccount = useCallback(async (providerId: string, accountId: string, displayName: string) => {
+    setError(null);
+
+    try {
+      await enableAccount(providerId, accountId);
+      setStatus(`Enabled account ${displayName}.`);
+      setDisabledAccounts((current) => {
+        const next = new Set(current);
+        next.delete(`${providerId}:${accountId}`);
+        return next;
+      });
+    } catch (enableError) {
+      setError(enableError instanceof Error ? enableError.message : String(enableError));
+    }
+  }, []);
+
   const renderQuotaRow = (label: string, window: CredentialQuotaWindow | null) => {
     const remainingPercent = window?.remainingPercent ?? null;
     const width = remainingPercent === null ? 0 : Math.min(100, Math.max(0, remainingPercent));
@@ -1121,9 +1119,9 @@ export function CredentialsPage(): JSX.Element {
       <section key={title} className="credentials-quota-group">
         <div className="credentials-quota-group-header">
           <strong>{title}</strong>
-          <span className={`credentials-badge ${quotaRateLimitBadgeClass(rateLimit)}`}>
+          <Badge variant={rateLimit?.allowed === true ? "success" : rateLimit?.allowed === false || rateLimit?.limitReached === true ? "error" : "default"}>
             {formatQuotaRateLimitStatus(rateLimit)}
-          </span>
+          </Badge>
         </div>
         <div className="credentials-quota-list">
           {primaryWindow && renderQuotaRow(formatQuotaWindowLabel(primaryWindow, "Primary window"), primaryWindow)}
@@ -1154,6 +1152,7 @@ export function CredentialsPage(): JSX.Element {
     const needsReauth = diagnostics?.needsReauth ?? false;
     const canReauth = providerId === "openai" && account.authType === "oauth_bearer";
     const canProbeAccount = providerId === "openai" && account.authType === "oauth_bearer";
+    const isAccountDisabled = disabledAccounts.has(accountKey);
 
     return (
       <article key={`${providerId}:${account.id}`} className="credentials-account-tile">
@@ -1165,11 +1164,14 @@ export function CredentialsPage(): JSX.Element {
             )}
           </div>
           <div className="credentials-provider-badges">
-            {showProviderBadge && <span className="credentials-badge credentials-badge-muted">{providerId}</span>}
-            {needsReauth && <span className="credentials-badge credentials-badge-danger">Reauth required</span>}
-            {duplicateCount > 1 && <span className="credentials-badge credentials-badge-warning">Possible duplicate ×{duplicateCount}</span>}
-            {planLabel && <span className="credentials-badge credentials-badge-accent">{planLabel}</span>}
-            <span className="credentials-badge credentials-badge-muted">{formatAuthType(account.authType)}</span>
+            <StatusChipStack items={[
+              ...(showProviderBadge ? [{ label: providerId, variant: 'default' as const }] : []),
+              ...(isAccountDisabled ? [{ label: 'Disabled', variant: 'warning' as const }] : []),
+              ...(needsReauth ? [{ label: 'Reauth required', variant: 'error' as const }] : []),
+              ...(duplicateCount > 1 ? [{ label: `Possible duplicate ×${duplicateCount}`, variant: 'warning' as const }] : []),
+              ...(planLabel ? [{ label: planLabel, variant: 'info' as const }] : []),
+              { label: formatAuthType(account.authType), variant: 'default' as const },
+            ] as StatusChipItem[]} />
           </div>
         </header>
 
@@ -1199,13 +1201,13 @@ export function CredentialsPage(): JSX.Element {
                 onClick={() => void handleProbeAccount(providerId, account.id)}
                 disabled={probeLoading}
               >
-                {probeLoading ? "Testing…" : "Test live"}
+                {probeLoading ? <><Spinner size="sm" /> Testing…</> : "Test live"}
               </button>
             )}
             {probeResult && (
-              <span className={`credentials-badge ${probeBadgeClass(probeResult)}`}>
+              <Badge variant={probeResult.ok ? "success" : "error"}>
                 {probeResult.ok ? "Live" : "Not live"}
-              </span>
+              </Badge>
             )}
           </div>
         )}
@@ -1302,13 +1304,32 @@ export function CredentialsPage(): JSX.Element {
               </div>
             )}
           </dl>
-          <button
-            type="button"
-            className="credentials-remove-button"
-            onClick={() => void handleRemoveAccount(providerId, account.id, account.displayName)}
-          >
-            Remove credential
-          </button>
+          <div className="credentials-account-actions-stack">
+            {isAccountDisabled ? (
+              <button
+                type="button"
+                className="credentials-enable-button"
+                onClick={() => void handleEnableAccount(providerId, account.id, account.displayName)}
+              >
+                Enable account
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="credentials-disable-button"
+                onClick={() => void handleDisableAccount(providerId, account.id, account.displayName)}
+              >
+                Disable account
+              </button>
+            )}
+            <button
+              type="button"
+              className="credentials-remove-button"
+              onClick={() => void handleRemoveAccount(providerId, account.id, account.displayName)}
+            >
+              Remove credential
+            </button>
+          </div>
         </details>
       </article>
     );
@@ -1392,9 +1413,9 @@ export function CredentialsPage(): JSX.Element {
                 </p>
               </div>
               <div className="credentials-provider-badges">
-                <span className={`credentials-badge ${quotaBadgeClassFromPercent(openAiQuotaPool.generalCombinedRemainingPercent)}`}>
-                  {formatAggregatePercent(openAiQuotaPool.generalCombinedRemainingPercent)} combined left
-                </span>
+                <Badge variant={(openAiQuotaPool.generalCombinedRemainingPercent ?? 0) > 50 ? "success" : (openAiQuotaPool.generalCombinedRemainingPercent ?? 0) > 20 ? "warning" : "error"}>
+                  {formatAggregatePercent(openAiQuotaPool.generalCombinedRemainingPercent ?? 0)} combined left
+                </Badge>
               </div>
             </header>
 
@@ -1470,15 +1491,15 @@ export function CredentialsPage(): JSX.Element {
                         {row.latestModel && <small>{row.providerId} · {row.latestModel}</small>}
                       </div>
                       <div>
-                        <span className={`credentials-badge ${row.successfulAccountCount > 1 ? "credentials-badge-warning" : "credentials-badge-accent"}`}>
+                        <Badge variant={row.successfulAccountCount > 1 ? "warning" : "success"}>
                           {row.successfulAccountCount} successful account{row.successfulAccountCount === 1 ? "" : "s"}
-                        </span>
+                        </Badge>
                         <small>{row.successfulAccountIds.join(", ") || "None"}</small>
                       </div>
                       <div>
-                        <span className={`credentials-badge ${row.failedAccountCount > 0 ? "credentials-badge-danger" : "credentials-badge-muted"}`}>
+                        <Badge variant={row.failedAccountCount > 0 ? "error" : "default"}>
                           {row.failedAccountCount} failed account{row.failedAccountCount === 1 ? "" : "s"}
-                        </span>
+                        </Badge>
                         <small>{row.failedAccountIds.join(", ") || "None"}</small>
                       </div>
                       <div>
@@ -1523,12 +1544,12 @@ export function CredentialsPage(): JSX.Element {
                       <small>{row.providerId} · {row.latestModel ?? "unknown model"}</small>
                     </div>
                     <div className="credentials-provider-badges">
-                      <span className={`credentials-badge ${quotaBadgeClassFromPercent(row.cacheRate)}`}>
-                        {formatAggregatePercent(row.cacheRate)} cache
-                      </span>
-                      <span className="credentials-badge credentials-badge-muted">
+                      <Badge variant={(row.cacheRate ?? 0) > 50 ? "success" : (row.cacheRate ?? 0) > 20 ? "warning" : "default"}>
+                        {formatAggregatePercent(row.cacheRate ?? 0)} cache
+                      </Badge>
+                      <Badge variant="default">
                         {row.successfulRequestCount} success
-                      </span>
+                      </Badge>
                     </div>
                     <dl className="credentials-watch-metrics">
                       <div>
@@ -1567,8 +1588,8 @@ export function CredentialsPage(): JSX.Element {
                     <p>{section.description}</p>
                   </div>
                   <div className="credentials-provider-badges">
-                    <span className="credentials-badge credentials-badge-muted">{section.badge}</span>
-                    <span className="credentials-badge">{section.badgeMuted}</span>
+                    <Badge variant="default">{section.badge}</Badge>
+                    <Badge variant="default">{section.badgeMuted}</Badge>
                   </div>
                 </header>
 

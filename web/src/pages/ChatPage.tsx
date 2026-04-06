@@ -1,5 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { Button, Chat as UiChat, Input, PanelHeader, type ChatMessage as UiChatMessage } from "@open-hax/uxx";
 import {
   addSessionMessage,
   createSession,
@@ -25,6 +26,15 @@ const DEFAULT_MODELS = [
 
 const LS_CHAT_MODEL = "open-hax-proxy.ui.chat.model";
 const LS_CHAT_ACTIVE_SESSION = "open-hax-proxy.ui.chat.activeSessionId";
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 function validateString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
@@ -110,7 +120,6 @@ function toOpenAiMessages(messages: SessionMessage[]): Array<{ readonly role: st
 export function ChatPage(): JSX.Element {
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [activeSession, setActiveSession] = useState<SessionRecord | null>(null);
-  const [draft, setDraft] = useState("");
   const [model, setModel] = useStoredState(LS_CHAT_MODEL, "ollama/qwen3-vl:2b", validateString);
   const [modelOptions, setModelOptions] = useState<string[]>(DEFAULT_MODELS);
   const [sending, setSending] = useState(false);
@@ -120,7 +129,6 @@ export function ChatPage(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [storedActiveSessionId, setStoredActiveSessionId] = useStoredState(LS_CHAT_ACTIVE_SESSION, "", validateString);
-  const threadRef = useRef<HTMLDivElement | null>(null);
   const copyResetTimerRef = useRef<number | null>(null);
 
   const refreshSessions = useCallback(async () => {
@@ -212,10 +220,9 @@ export function ChatPage(): JSX.Element {
     setSearchResults(payload.results);
   };
 
-  const sendMessage = async (event: FormEvent) => {
-    event.preventDefault();
-    const text = draft.trim();
-    if (text.length === 0 || sending) {
+  const sendMessage = async (text: string) => {
+    const normalized = text.trim();
+    if (normalized.length === 0 || sending) {
       return;
     }
 
@@ -231,7 +238,7 @@ export function ChatPage(): JSX.Element {
 
       await addSessionMessage(session.id, {
         role: "user",
-        content: text,
+        content: normalized,
         model,
       });
 
@@ -269,7 +276,6 @@ export function ChatPage(): JSX.Element {
       const updated = await getSession(session.id);
       setActiveSession(updated);
       setStoredActiveSessionId(updated.id);
-      setDraft("");
       await refreshSessions();
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : String(sendError));
@@ -311,7 +317,6 @@ export function ChatPage(): JSX.Element {
   };
 
   const groupedMessages = useMemo(() => activeSession?.messages ?? [], [activeSession]);
-  const messageCount = activeSession?.messages.length ?? 0;
   const availableModels = useMemo(() => {
     const options = [...modelOptions];
     const normalizedModel = model.trim();
@@ -322,31 +327,60 @@ export function ChatPage(): JSX.Element {
     return options;
   }, [model, modelOptions]);
 
-  useEffect(() => {
-    if (!threadRef.current || messageCount === 0) {
+  const uiMessages = useMemo<UiChatMessage[]>(() => {
+    return groupedMessages
+      .filter((message) => message.role === "system" || message.role === "user" || message.role === "assistant")
+      .map((message) => {
+        const safeContent = escapeHtml(message.content);
+        const safeReasoningContent = message.reasoningContent && message.reasoningContent.trim().length > 0
+          ? escapeHtml(message.reasoningContent)
+          : undefined;
+
+        return {
+          id: message.id,
+          role: message.role,
+          content: safeContent,
+          reasoningContent: safeReasoningContent,
+          timestamp: typeof message.createdAt === "number" ? new Date(message.createdAt) : undefined,
+          actions: [copiedMessageId === message.id ? "Copied" : "Copy", "Fork here"],
+          metadata: message.model ? { model: message.model } : undefined,
+        } satisfies UiChatMessage;
+      });
+  }, [copiedMessageId, groupedMessages]);
+
+  const handleUiMessageAction = useCallback((action: string, message: UiChatMessage) => {
+    const original = groupedMessages.find((candidate) => candidate.id === message.id);
+    if (!original) {
       return;
     }
 
-    threadRef.current.scrollTop = threadRef.current.scrollHeight;
-  }, [messageCount]);
+    if (action === "Copy" || action === "Copied") {
+      void handleCopy(original);
+      return;
+    }
+
+    if (action === "Fork here") {
+      void handleFork(original.id);
+    }
+  }, [groupedMessages]);
 
   return (
     <div className="chat-layout">
       <aside className="chat-sidebar">
         <div className="chat-sidebar-header">
           <h2>Sessions</h2>
-          <button type="button" onClick={() => void createNewSession()}>
+          <Button type="button" size="sm" onClick={() => void createNewSession()}>
             New
-          </button>
+          </Button>
         </div>
 
         <form className="chat-search-form" onSubmit={(event) => void runSearch(event)}>
-          <input
+          <Input
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.currentTarget.value)}
             placeholder="Semantic search history"
           />
-          <button type="submit">Search</button>
+          <Button type="submit" size="sm">Search</Button>
         </form>
 
         {searchResults.length > 0 && (
@@ -384,20 +418,21 @@ export function ChatPage(): JSX.Element {
       </aside>
 
       <section className="chat-main">
-        <header className="chat-main-header">
-          <div>
-            <h2>{activeSession?.title ?? "No session selected"}</h2>
-            {activeSession?.forkedFromSessionId && (
-              <p>
-                Forked from {activeSession.forkedFromSessionId}
-              </p>
-            )}
-          </div>
-
-          <div className="chat-main-controls">
+        <PanelHeader
+          title={activeSession?.title ?? "No session selected"}
+          description={activeSession?.forkedFromSessionId ? `Forked from ${activeSession.forkedFromSessionId}` : undefined}
+          actions={<>
             <select
               value={model}
               onChange={(event) => setModel(event.currentTarget.value)}
+              style={{
+                padding: "5px 10px",
+                borderRadius: "8px",
+                border: "1px solid var(--border)",
+                backgroundColor: "var(--token-colors-surface-input)",
+                color: "var(--text-main)",
+                fontSize: "0.82rem",
+              }}
             >
               {availableModels.map((option) => (
                 <option key={option} value={option}>
@@ -406,66 +441,43 @@ export function ChatPage(): JSX.Element {
               ))}
             </select>
             <div className="chat-main-control-buttons">
-              <button
+              <Button
                 type="button"
+                size="sm"
                 onClick={() => void refreshModelOptions().catch((nextError) => {
                   setError(nextError instanceof Error ? nextError.message : String(nextError));
                 })}
               >
                 Refresh models
-              </button>
-              <button type="button" onClick={() => void handleFork()} disabled={!activeSession}>
+              </Button>
+              <Button type="button" size="sm" variant="secondary" onClick={() => void handleFork()} disabled={!activeSession}>
                 Fork latest
-              </button>
+              </Button>
             </div>
-          </div>
-        </header>
+          </>}
+        />
 
-        <div className="chat-thread" ref={threadRef}>
-          {groupedMessages.map((message) => (
-            <article
-              key={message.id}
-              className={message.role === "user" ? "chat-message chat-message-user" : "chat-message chat-message-assistant"}
-            >
-              <header>
-                <strong>{message.role}</strong>
-                <div>
-                  <button type="button" onClick={() => void handleCopy(message)}>
-                    {copiedMessageId === message.id ? "Copied" : "Copy"}
-                  </button>
-                  <button type="button" onClick={() => void handleFork(message.id)}>
-                    Fork here
-                  </button>
-                </div>
-              </header>
-              <p>{message.content}</p>
-              {message.reasoningContent && message.reasoningContent.trim().length > 0 && (
-                <details className="chat-reasoning">
-                  <summary>Reasoning trace</summary>
-                  <pre>{message.reasoningContent}</pre>
-                </details>
-              )}
-            </article>
-          ))}
-        </div>
-
-        <form className="chat-input-form" onSubmit={(event) => void sendMessage(event)}>
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-            placeholder="Send a message..."
-            rows={4}
-          />
-          <button type="submit" disabled={sending}>
-            {sending ? "Sending..." : "Send"}
-          </button>
-        </form>
+        <UiChat
+          messages={uiMessages}
+          onSend={(message) => {
+            void sendMessage(message);
+          }}
+          placeholder="Send a message..."
+          loading={sending}
+          showTimestamps
+          allowMarkdown
+          onMessageAction={handleUiMessageAction}
+          emptyState={
+            <div className="chat-empty-state">
+              <h3>{activeSession ? "No messages yet" : "No session selected"}</h3>
+              <p>
+                {activeSession
+                  ? "Send a message to start the conversation."
+                  : "Create or select a session from the sidebar to begin chatting."}
+              </p>
+            </div>
+          }
+        />
 
         {error && <p className="chat-error">{error}</p>}
       </section>

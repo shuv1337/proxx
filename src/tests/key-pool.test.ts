@@ -188,6 +188,126 @@ test("prefers non-busy accounts before reusing in-flight accounts", async () => 
   );
 });
 
+test("random walk excludes accounts that are still cooling down", async () => {
+  await withKeysFile(
+    {
+      providers: {
+        "ollama-cloud": {
+          auth: "api_key",
+          accounts: [
+            { id: "oc-a", token: "oc-token-a" },
+            { id: "oc-b", token: "oc-token-b" },
+          ],
+        },
+      },
+    },
+    async (keysFilePath) => {
+      const originalNow = Date.now;
+      let now = 1_700_000_000_000;
+      Date.now = () => now;
+
+      try {
+        const keyPool = new KeyPool({
+          keysFilePath,
+          reloadIntervalMs: 10,
+          defaultCooldownMs: 1_000,
+          defaultProviderId: "ollama-cloud",
+          cooldownJitterFactor: 0,
+          enableRandomWalk: true,
+        }, () => 0.5);
+
+        await keyPool.warmup();
+        const initial = await keyPool.getRequestOrder("ollama-cloud");
+        assert.equal(initial.length, 2);
+
+        keyPool.markRateLimited(initial[0]!, 60_000);
+
+        const duringCooldown = await keyPool.getRequestOrder("ollama-cloud");
+        assert.deepEqual(duringCooldown.map((account) => account.accountId), [initial[1]!.accountId]);
+
+        now += 60_001;
+        const afterCooldown = await keyPool.getRequestOrder("ollama-cloud");
+        assert.equal(afterCooldown.length, 2);
+      } finally {
+        Date.now = originalNow;
+      }
+    },
+  );
+});
+
+test("refresh ordering omits accounts that are still cooling down", async () => {
+  await withKeysFile(
+    {
+      providers: {
+        openai: {
+          auth: "oauth_bearer",
+          accounts: [
+            { id: "oa-a", access_token: "oa-token-a", chatgpt_account_id: "chatgpt-a" },
+            { id: "oa-b", access_token: "oa-token-b", chatgpt_account_id: "chatgpt-b" },
+          ],
+        },
+      },
+    },
+    async (keysFilePath) => {
+      const originalNow = Date.now;
+      const now = 1_700_000_000_000;
+      Date.now = () => now;
+
+      try {
+        const keyPool = new KeyPool({
+          keysFilePath,
+          reloadIntervalMs: 10,
+          defaultCooldownMs: 1_000,
+          defaultProviderId: "openai",
+        });
+
+        await keyPool.warmup();
+        const initial = await keyPool.getRequestOrder("openai");
+        assert.equal(initial.length, 2);
+
+        keyPool.markRateLimited(initial[0]!, 60_000);
+
+        const ordered = await keyPool.getRequestOrderWithRefresh("openai", async () => null);
+        assert.deepEqual(ordered.map((account) => account.accountId), [initial[1]!.accountId]);
+      } finally {
+        Date.now = originalNow;
+      }
+    },
+  );
+});
+
+test("weighted shuffle rescales remaining weight mass between picks", async () => {
+  await withKeysFile(
+    {
+      providers: {
+        "ollama-cloud": {
+          auth: "api_key",
+          accounts: [
+            { id: "oc-a", token: "oc-token-a" },
+            { id: "oc-b", token: "oc-token-b" },
+            { id: "oc-c", token: "oc-token-c" },
+          ],
+        },
+      },
+    },
+    async (keysFilePath) => {
+      const rngValues = [0, 0, 1, 0.95, 0.95, 0.95];
+      const keyPool = new KeyPool({
+        keysFilePath,
+        reloadIntervalMs: 10,
+        defaultCooldownMs: 1_000,
+        defaultProviderId: "ollama-cloud",
+        cooldownJitterFactor: 0,
+        enableRandomWalk: true,
+      }, () => rngValues.shift() ?? 0.5);
+
+      await keyPool.warmup();
+      const ordered = await keyPool.getRequestOrder("ollama-cloud");
+      assert.deepEqual(ordered.map((account) => account.accountId), ["oc-c", "oc-b", "oc-a"]);
+    },
+  );
+});
+
 test("rate-limit cooldown survives OAuth token refresh for the same account", async () => {
   await withKeysFile(
     {
@@ -347,12 +467,14 @@ test("loads env-backed gemini provider via GEMINI_API_KEY", { concurrency: false
   );
 });
 
-test("loads env-backed zai and mistral providers", { concurrency: false }, async () => {
+test("loads env-backed zai, rotussy, and mistral providers", { concurrency: false }, async () => {
   await withEnv(
     {
       ZAI_API_KEY: "zai-key-1", // pragma: allowlist secret
+      ROTUSSY_API_KEY: "rotussy-key-1", // pragma: allowlist secret
       MISTRAL_API_KEY: "mistral-key-1", // pragma: allowlist secret
       ZAI_PROVIDER_ID: undefined,
+      ROTUSSY_PROVIDER_ID: undefined,
       MISTRAL_PROVIDER_ID: undefined,
       GEMINI_API_KEY: undefined,
       OPENROUTER_API_KEY: undefined,
@@ -378,11 +500,16 @@ test("loads env-backed zai and mistral providers", { concurrency: false }, async
 
           await keyPool.warmup();
           const zaiAccounts = await keyPool.getRequestOrder("zai");
+          const rotussyAccounts = await keyPool.getRequestOrder("rotussy");
           const mistralAccounts = await keyPool.getRequestOrder("mistral");
 
           assert.equal(zaiAccounts.length, 1);
           assert.equal(zaiAccounts[0]?.providerId, "zai");
           assert.equal(zaiAccounts[0]?.token, "zai-key-1");
+
+          assert.equal(rotussyAccounts.length, 1);
+          assert.equal(rotussyAccounts[0]?.providerId, "rotussy");
+          assert.equal(rotussyAccounts[0]?.token, "rotussy-key-1");
 
           assert.equal(mistralAccounts.length, 1);
           assert.equal(mistralAccounts[0]?.providerId, "mistral");
@@ -545,4 +672,290 @@ test("loads credentials from account store when database-backed source is config
   assert.equal(accounts[0]?.accountId, "db-openai-1");
   assert.equal(accounts[0]?.token, "db-token-1");
   assert.equal(accounts[0]?.authType, "oauth_bearer");
+});
+
+// ─── Disable/Enable Account Tests ──────────────────────────────────────────
+
+test("disableAccount excludes account from getRequestOrder", async () => {
+  await withEnv(
+    {
+      FACTORY_API_KEY: undefined,
+      FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
+      FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
+    },
+    async () => {
+      await withKeysFile(
+        {
+          providers: {
+            factory: {
+              auth: "api_key",
+              accounts: [
+                { id: "acct-1", api_key: "fk-key-1" }, // pragma: allowlist secret
+                { id: "acct-2", api_key: "fk-key-2" }, // pragma: allowlist secret
+                { id: "acct-3", api_key: "fk-key-3" }, // pragma: allowlist secret
+              ],
+            },
+          },
+        },
+        async (keysFilePath) => {
+          const keyPool = new KeyPool({
+            keysFilePath,
+            reloadIntervalMs: 10,
+            defaultCooldownMs: 1000,
+            defaultProviderId: "factory",
+          });
+
+          await keyPool.warmup();
+
+          // All accounts should be available initially
+          const initial = await keyPool.getRequestOrder("factory");
+          assert.equal(initial.length, 3);
+
+          // Disable one account
+          keyPool.disableAccount("factory", "acct-2");
+
+          // Only 2 accounts should be available now
+          const afterDisable = await keyPool.getRequestOrder("factory");
+          assert.equal(afterDisable.length, 2);
+          assert.ok(afterDisable.every((a) => a.accountId !== "acct-2"), "Disabled account should not be in results");
+        }
+      );
+    }
+  );
+});
+
+test("enableAccount re-includes disabled account in getRequestOrder", async () => {
+  await withEnv(
+    {
+      FACTORY_API_KEY: undefined,
+      FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
+      FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
+    },
+    async () => {
+      await withKeysFile(
+        {
+          providers: {
+            factory: {
+              auth: "api_key",
+              accounts: [
+                { id: "acct-1", api_key: "fk-key-1" }, // pragma: allowlist secret
+                { id: "acct-2", api_key: "fk-key-2" }, // pragma: allowlist secret
+              ],
+            },
+          },
+        },
+        async (keysFilePath) => {
+          const keyPool = new KeyPool({
+            keysFilePath,
+            reloadIntervalMs: 10,
+            defaultCooldownMs: 1000,
+            defaultProviderId: "factory",
+          });
+
+          await keyPool.warmup();
+
+          // Disable an account
+          keyPool.disableAccount("factory", "acct-1");
+          const afterDisable = await keyPool.getRequestOrder("factory");
+          assert.equal(afterDisable.length, 1);
+          assert.equal(afterDisable[0]?.accountId, "acct-2");
+
+          // Enable the account
+          keyPool.enableAccount("factory", "acct-1");
+          const afterEnable = await keyPool.getRequestOrder("factory");
+          assert.equal(afterEnable.length, 2);
+          assert.ok(afterEnable.some((a) => a.accountId === "acct-1"));
+          assert.ok(afterEnable.some((a) => a.accountId === "acct-2"));
+        }
+      );
+    }
+  );
+});
+
+test("isAccountDisabled returns correct state", async () => {
+  await withEnv(
+    {
+      FACTORY_API_KEY: undefined,
+      FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
+      FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
+    },
+    async () => {
+      await withKeysFile(
+        {
+          providers: {
+            factory: {
+              auth: "api_key",
+              accounts: [
+                { id: "acct-1", api_key: "fk-key-1" }, // pragma: allowlist secret
+                { id: "acct-2", api_key: "fk-key-2" }, // pragma: allowlist secret
+              ],
+            },
+          },
+        },
+        async (keysFilePath) => {
+          const keyPool = new KeyPool({
+            keysFilePath,
+            reloadIntervalMs: 10,
+            defaultCooldownMs: 1000,
+            defaultProviderId: "factory",
+          });
+
+          await keyPool.warmup();
+
+          // Initially not disabled
+          assert.equal(keyPool.isAccountDisabled("factory", "acct-1"), false);
+          assert.equal(keyPool.isAccountDisabled("factory", "acct-2"), false);
+
+          // Disable acct-1
+          keyPool.disableAccount("factory", "acct-1");
+          assert.equal(keyPool.isAccountDisabled("factory", "acct-1"), true);
+          assert.equal(keyPool.isAccountDisabled("factory", "acct-2"), false);
+
+          // Enable acct-1
+          keyPool.enableAccount("factory", "acct-1");
+          assert.equal(keyPool.isAccountDisabled("factory", "acct-1"), false);
+          assert.equal(keyPool.isAccountDisabled("factory", "acct-2"), false);
+        }
+      );
+    }
+  );
+});
+
+test("getDisabledAccounts returns list of disabled accounts", async () => {
+  await withEnv(
+    {
+      FACTORY_API_KEY: undefined,
+      FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
+      FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
+    },
+    async () => {
+      await withKeysFile(
+        {
+          providers: {
+            factory: {
+              auth: "api_key",
+              accounts: [
+                { id: "acct-1", api_key: "fk-key-1" }, // pragma: allowlist secret
+                { id: "acct-2", api_key: "fk-key-2" }, // pragma: allowlist secret
+                { id: "acct-3", api_key: "fk-key-3" }, // pragma: allowlist secret
+              ],
+            },
+          },
+        },
+        async (keysFilePath) => {
+          const keyPool = new KeyPool({
+            keysFilePath,
+            reloadIntervalMs: 10,
+            defaultCooldownMs: 1000,
+            defaultProviderId: "factory",
+          });
+
+          await keyPool.warmup();
+
+          // Initially no disabled accounts
+          assert.deepEqual(keyPool.getDisabledAccounts(), []);
+
+          // Disable some accounts
+          keyPool.disableAccount("factory", "acct-1");
+          keyPool.disableAccount("factory", "acct-3");
+
+          const disabled = keyPool.getDisabledAccounts();
+          assert.equal(disabled.length, 2);
+          assert.ok(disabled.some((a) => a.providerId === "factory" && a.accountId === "acct-1"));
+          assert.ok(disabled.some((a) => a.providerId === "factory" && a.accountId === "acct-3"));
+          assert.ok(!disabled.some((a) => a.accountId === "acct-2"));
+        }
+      );
+    }
+  );
+});
+
+test("disabled accounts are excluded from getRequestOrderWithRefresh", async () => {
+  await withEnv(
+    {
+      FACTORY_API_KEY: undefined,
+      FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
+      FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
+    },
+    async () => {
+      await withKeysFile(
+        {
+          providers: {
+            factory: {
+              auth: "api_key",
+              accounts: [
+                { id: "acct-1", api_key: "fk-key-1" }, // pragma: allowlist secret
+                { id: "acct-2", api_key: "fk-key-2" }, // pragma: allowlist secret
+              ],
+            },
+          },
+        },
+        async (keysFilePath) => {
+          const keyPool = new KeyPool({
+            keysFilePath,
+            reloadIntervalMs: 10,
+            defaultCooldownMs: 1000,
+            defaultProviderId: "factory",
+          });
+
+          await keyPool.warmup();
+
+          // Both accounts should be available initially
+          const initialAccounts = await keyPool.getRequestOrder("factory");
+          assert.equal(initialAccounts.length, 2);
+
+          // Disable acct-1
+          keyPool.disableAccount("factory", "acct-1");
+
+          const refreshFn = async () => null;
+          const accounts = await keyPool.getRequestOrderWithRefresh("factory", refreshFn);
+          assert.equal(accounts.length, 1);
+          assert.equal(accounts[0]?.accountId, "acct-2");
+        }
+      );
+    }
+  );
+});
+
+test("disabling all accounts returns empty array when requesting order", async () => {
+  await withEnv(
+    {
+      FACTORY_API_KEY: undefined,
+      FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
+      FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
+    },
+    async () => {
+      await withKeysFile(
+        {
+          providers: {
+            factory: {
+              auth: "api_key",
+              accounts: [
+                { id: "acct-1", api_key: "fk-key-1" }, // pragma: allowlist secret
+                { id: "acct-2", api_key: "fk-key-2" }, // pragma: allowlist secret
+              ],
+            },
+          },
+        },
+        async (keysFilePath) => {
+          const keyPool = new KeyPool({
+            keysFilePath,
+            reloadIntervalMs: 10,
+            defaultCooldownMs: 1000,
+            defaultProviderId: "factory",
+          });
+
+          await keyPool.warmup();
+
+          // Disable all accounts
+          keyPool.disableAccount("factory", "acct-1");
+          keyPool.disableAccount("factory", "acct-2");
+
+          // Should return empty array when all accounts are disabled
+          const accounts = await keyPool.getRequestOrder("factory");
+          assert.equal(accounts.length, 0);
+        }
+      );
+    }
+  );
 });

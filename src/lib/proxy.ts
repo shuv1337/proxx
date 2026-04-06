@@ -145,6 +145,43 @@ export function isRateLimitResponse(response: Response): boolean {
   return response.status === 429;
 }
 
+export type OllamaLimitKind = "session" | "weekly" | "unknown";
+
+export function detectOllamaLimitKind(errorBody: unknown): OllamaLimitKind {
+  const message = extractErrorMessage(errorBody);
+  if (!message) {
+    return "unknown";
+  }
+  const lowered = message.toLowerCase();
+  if (lowered.includes("weekly usage limit")) {
+    return "weekly";
+  }
+  if (lowered.includes("session usage limit")) {
+    return "session";
+  }
+  return "unknown";
+}
+
+function extractErrorMessage(body: unknown): string | undefined {
+  if (typeof body === "string") {
+    return body;
+  }
+  if (typeof body === "object" && body !== null) {
+    const record = body as Record<string, unknown>;
+    if (typeof record["error"] === "string") {
+      return record["error"];
+    }
+    if (typeof record["message"] === "string") {
+      return record["message"];
+    }
+    const error = record["error"];
+    if (typeof error === "object" && error !== null) {
+      return extractErrorMessage(error);
+    }
+  }
+  return undefined;
+}
+
 /**
  * Parse wait time from rate limit error messages.
  * Handles OpenAI-style messages like:

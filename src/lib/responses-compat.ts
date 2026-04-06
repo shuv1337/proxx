@@ -818,6 +818,16 @@ export function responsesRequestToChatRequest(requestBody: Record<string, unknow
 
   if (requestBody["reasoning"] !== undefined) {
     payload["reasoning"] = requestBody["reasoning"];
+    if (isRecord(requestBody["reasoning"])) {
+      const effort = requestBody["reasoning"]["effort"];
+      if (typeof effort === "string") {
+        payload["reasoning_effort"] = effort;
+      }
+      const summary = requestBody["reasoning"]["summary"];
+      if (typeof summary === "string") {
+        payload["reasoning_summary"] = summary;
+      }
+    }
   }
 
   if (requestBody["tools"] !== undefined) {
@@ -1594,6 +1604,16 @@ export function chatCompletionEventStreamToResponsesEventStream(streamText: stri
 
   emitEvent("response.completed", { response });
   return events.join("");
+}
+
+export function chatCompletionEventStreamToResponsesResponse(streamText: string, fallbackModel: string): Record<string, unknown> {
+  const payloads = parseChatCompletionSsePayloads(streamText);
+  if (payloads.length === 0) {
+    throw new Error("Invalid upstream chat completion event-stream payload");
+  }
+
+  const completion = synthesizeChatCompletionFromStreamPayloads(payloads, fallbackModel);
+  return chatCompletionToResponsesResponse(completion);
 }
 
 interface StreamToolCall {

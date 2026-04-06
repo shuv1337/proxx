@@ -23,6 +23,10 @@ import {
   ollamaToChatCompletion,
 } from "../ollama-compat.js";
 import {
+  isGlmModel,
+  applyGlmThinking,
+} from "../glm-compat.js";
+import {
   responseIsEventStream,
   summarizeUpstreamError,
 } from "../provider-utils.js";
@@ -246,6 +250,7 @@ interface PreferredAffinity {
 
 export interface ProviderAvailabilitySummary {
   readonly sawConfiguredProvider: boolean;
+  readonly sawOnlyDisabledProviders: boolean;
   readonly prompt_cache_key?: string;
 }
 
@@ -886,6 +891,11 @@ function buildRequestBodyForUpstream(context: StrategyRequestContext): Record<st
   }
 
   delete upstreamBody["open_hax"];
+
+  if (isGlmModel(context.routedModel)) {
+    return applyGlmThinking(upstreamBody, context.routedModel);
+  }
+
   return upstreamBody;
 }
 

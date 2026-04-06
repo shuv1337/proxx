@@ -29,7 +29,7 @@ services:
       PROXY_REQUEST_LOGS_FLUSH_MS: "${PROXY_REQUEST_LOGS_FLUSH_MS:-1000}"
       PROXY_PROMPT_AFFINITY_FLUSH_MS: "${PROXY_PROMPT_AFFINITY_FLUSH_MS:-250}"
       UPSTREAM_PROVIDER_ID: "${UPSTREAM_PROVIDER_ID:-openai}"
-      UPSTREAM_FALLBACK_PROVIDER_IDS: "${UPSTREAM_FALLBACK_PROVIDER_IDS:-ollama-cloud,requesty}"
+      UPSTREAM_FALLBACK_PROVIDER_IDS: "${UPSTREAM_FALLBACK_PROVIDER_IDS:-ollama-cloud,rotussy,zai,requesty}"
       DISABLED_PROVIDER_IDS: "${DISABLED_PROVIDER_IDS:-}"
       UPSTREAM_BASE_URL: "${UPSTREAM_BASE_URL:-}"
       UPSTREAM_PROVIDER_BASE_URLS: "${UPSTREAM_PROVIDER_BASE_URLS:-ollama-cloud=https://ollama.com,ob1=https://dashboard.openblocklabs.com/api,openai=https://chatgpt.com/backend-api,openrouter=https://openrouter.ai/api/v1,requesty=https://router.requesty.ai/v1,vivgrid=https://api.vivgrid.com}"
@@ -77,7 +77,8 @@ services:
       OLLAMA_MODEL_PREFIXES: "${OLLAMA_MODEL_PREFIXES:-ollama/,ollama:}"
       PROXY_KEY_RELOAD_MS: "${PROXY_KEY_RELOAD_MS:-5000}"
       PROXY_KEY_COOLDOWN_MS: "${PROXY_KEY_COOLDOWN_MS:-30000}"
-      UPSTREAM_REQUEST_TIMEOUT_MS: "${UPSTREAM_REQUEST_TIMEOUT_MS:-180000}"
+      UPSTREAM_REQUEST_TIMEOUT_MS: "${UPSTREAM_REQUEST_TIMEOUT_MS:-900000}"
+      UPSTREAM_STREAM_BOOTSTRAP_TIMEOUT_MS: "${UPSTREAM_STREAM_BOOTSTRAP_TIMEOUT_MS:-900000}"
       PROXY_ALLOW_UNAUTHENTICATED: "${PROXY_ALLOW_UNAUTHENTICATED:-false}"
       DATABASE_URL: "${DATABASE_URL:-postgresql://proxx_repo:proxx_repo@proxx-repo-db:5432/proxx_repo}" # pragma: allowlist secret
       VITE_ALLOWED_HOSTS: "${VITE_ALLOWED_HOSTS:-}"

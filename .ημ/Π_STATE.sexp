@@ -1,46 +1,33 @@
 ;; Π State Snapshot
-;; Generated: 2026-03-30T23:51:23Z
+;; Generated: 2026-04-04T03:31:21Z
 
 (
   :repo "open-hax/proxx"
-  :branch "feat/federation-sync-and-dynamic-ollama"
-  :head-before "471d28a"
-  :previous-tag "Π/20260330-205903-aco-route-quota-cooldowns"
-  :intended-tag "Π/20260330-235123-federation-sync-dynamic-ollama"
-  :remote "origin/fork-tax/20260330-235123-federation-sync-dynamic-ollama"
-  :status-digest "b4477936f775a4bea"
+  :branch "fork-tax/20260404-033121-proxx-night-owl-dashboard-finish"
+  :base-branch "fix/prompt-cache-audit-followups"
+  :previous-tag "Π/20260404-010801-request-log-cache-rollup-failure-exclusion"
+  :intended-tag "Π/20260404-033121-proxx-night-owl-dashboard-finish"
+  :remote "origin"
 
   :work-description
-  "Fork tax handoff: federation sync + dynamic Ollama routing merge.
+  "Adopt the published UXX runtime theming surface in Proxx, add a persisted Monokai/Night Owl theme toggle, and finish the dashboard/home-page migration so both UXX primitives and Proxx-owned CSS panels respond to the active theme.
 
-  Completes the feature branch by merging upstream changes and reconciling:
-  - federation sync and dynamic Ollama routing (ollama-compat, provider-strategy/ollama, bridge autostart/fallback)
-  - provider strategy refactor consolidating routing logic in provider-strategy/base and shared
-  - route simplification in app.ts, ui-routes, and chat routes
-  - expanded test coverage for provider catalog, Factory, and credentials"
-
-  :dirty-state (
-    :modified [
-      "src/app.ts"
-      "src/lib/app-deps.ts"
-      "src/lib/federation/bridge-agent-autostart.ts"
-      "src/lib/federation/bridge-fallback.ts"
-      "src/lib/ollama-compat.ts"
-      "src/lib/provider-strategy/base.ts"
-      "src/lib/provider-strategy/shared.ts"
-      "src/lib/provider-strategy/strategies/cephalon.ts"
-      "src/lib/provider-strategy/strategies/ollama.ts"
-      "src/lib/ui-routes.ts"
-      "src/routes/api/ui/analytics/usage.ts"
-      "src/routes/api/ui/hosts/index.ts"
-      "src/routes/chat.ts"
-      "src/routes/credentials/get-credentials-ui.ts"
-      "src/routes/embeddings.ts"
-      "src/routes/responses.ts"
-      "src/tests/proxy.test.ts"
-    ])
+  Changes:
+  - Upgraded @open-hax/uxx to 0.1.3
+  - Wrapped the app in ThemeProvider with persisted theme selection in local storage
+  - Moved Proxx theme aliases/background ownership to the themed wrapper instead of :root
+  - Verified the dashboard, nav, inputs, and panels all switch to Night Owl instead of only the metric cards
+  - Rebuilt and recreated services/proxx against the published package"
 
   :verification (
-    :typecheck "pass (tsc -p tsconfig.json --noEmit)"
-    :test-suite "pass (pnpm run build && node --test --test-concurrency=1 dist/tests/*.test.js => 185/187 passed)"
-    :known-failures "2 pre-existing federation bridge integration tests (require live enclave infrastructure)"))
+    :build "pass (pnpm build)"
+    :web-build "pass (pnpm web:build)"
+    :runtime "pass (docker compose up -d --build --force-recreate; service healthy on :5174)"
+    :browser-check "pass (Night Owl applied across dashboard panels + controls)"))
+    :store-tests "pass (npx tsx --test src/tests/request-log-store.test.ts)"
+    :proxy-analytics "pass (targeted src/tests/proxy.test.ts cache-hit summary regressions)"
+    :known-red "unrelated proxy.test failure remains: glm chat requests skip ollama-cloud when provider catalog does not advertise the requested model")
+
+  :deferred (
+    :metadata-rebuild "Rebuild live services/proxx request-log metadata to refresh stale weekly/monthly cache counters"
+    :ui-labeling "Disambiguate cache hit rate vs cached token share in operator UI"))

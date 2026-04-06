@@ -15,7 +15,7 @@ import { type TenantProviderPolicyRecord } from "../lib/tenant-provider-policy.j
 import { KeyPool } from "../lib/key-pool.js";
 import { ProxySettingsStore } from "../lib/proxy-settings-store.js";
 import { RequestLogStore } from "../lib/request-log-store.js";
-import { registerUiRoutes } from "../lib/ui-routes.js";
+import { registerApiV1Routes } from "../routes/api/v1/index.js";
 import type { CredentialStoreLike } from "../lib/credential-store.js";
 
 function buildConfig(input: {
@@ -81,6 +81,9 @@ function buildConfig(input: {
     settingsFilePath: input.paths.settingsPath,
     keyReloadMs: 50,
     keyCooldownMs: 10_000,
+    keyCooldownJitterFactor: 0.4,
+    enableKeyRandomWalk: true,
+    ollamaWeeklyCooldownMultiplier: 24,
     requestTimeoutMs: 2_000,
     streamBootstrapTimeoutMs: 2_000,
     upstreamTransientRetryCount: 1,
@@ -217,7 +220,7 @@ test("tenant provider policy routes list and upsert policies", async () => {
     },
   };
 
-  await registerUiRoutes(app, {
+  await registerApiV1Routes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -231,7 +234,7 @@ test("tenant provider policy routes list and upsert policies", async () => {
   try {
     const createResponse = await app.inject({
       method: "POST",
-      url: "/api/ui/federation/tenant-provider-policies",
+      url: "/api/v1/federation/tenant-provider-policies",
       headers: {
         authorization: "Bearer bridge-admin-token",
         "content-type": "application/json",
@@ -255,7 +258,7 @@ test("tenant provider policy routes list and upsert policies", async () => {
 
     const listResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/tenant-provider-policies?subjectDid=did:web:big.ussy.promethean.rest",
+      url: "/api/v1/federation/tenant-provider-policies?subjectDid=did:web:big.ussy.promethean.rest",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
 
@@ -365,7 +368,7 @@ test("federation diff-events route validates ownerSubject and forwards parsed fi
     },
   };
 
-  await registerUiRoutes(app, {
+  await registerApiV1Routes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -379,7 +382,7 @@ test("federation diff-events route validates ownerSubject and forwards parsed fi
   try {
     const missingOwnerResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/diff-events",
+      url: "/api/v1/federation/diff-events",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
 
@@ -388,7 +391,7 @@ test("federation diff-events route validates ownerSubject and forwards parsed fi
 
     const listResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/diff-events?ownerSubject=did:plc:test-owner&afterSeq=5&limit=2",
+      url: "/api/v1/federation/diff-events?ownerSubject=did:plc:test-owner&afterSeq=5&limit=2",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
 
@@ -516,7 +519,7 @@ test("federation accounts routes expose knowledge summaries, export api keys, an
     ]),
   };
 
-  await registerUiRoutes(app, {
+  await registerApiV1Routes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -530,7 +533,7 @@ test("federation accounts routes expose knowledge summaries, export api keys, an
   try {
     const listResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/accounts",
+      url: "/api/v1/federation/accounts",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
 
@@ -550,7 +553,7 @@ test("federation accounts routes expose knowledge summaries, export api keys, an
 
     const exportApiKeyResponse = await app.inject({
       method: "POST",
-      url: "/api/ui/federation/accounts/export",
+      url: "/api/v1/federation/accounts/export",
       headers: {
         authorization: "Bearer bridge-admin-token",
         "content-type": "application/json",
@@ -572,7 +575,7 @@ test("federation accounts routes expose knowledge summaries, export api keys, an
 
     const exportOauthResponse = await app.inject({
       method: "POST",
-      url: "/api/ui/federation/accounts/export",
+      url: "/api/v1/federation/accounts/export",
       headers: {
         authorization: "Bearer bridge-admin-token",
         "content-type": "application/json",
@@ -725,7 +728,7 @@ test("federation projected-account import route validates entries and records di
     },
   };
 
-  await registerUiRoutes(app, {
+  await registerApiV1Routes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -739,7 +742,7 @@ test("federation projected-account import route validates entries and records di
   try {
     const missingAccountsResponse = await app.inject({
       method: "POST",
-      url: "/api/ui/federation/projected-accounts/import",
+      url: "/api/v1/federation/projected-accounts/import",
       headers: {
         authorization: "Bearer bridge-admin-token",
         "content-type": "application/json",
@@ -752,7 +755,7 @@ test("federation projected-account import route validates entries and records di
 
     const importResponse = await app.inject({
       method: "POST",
-      url: "/api/ui/federation/projected-accounts/import",
+      url: "/api/v1/federation/projected-accounts/import",
       headers: {
         authorization: "Bearer bridge-admin-token",
         "content-type": "application/json",
@@ -929,7 +932,7 @@ test("federation projected-account imported route blocks non-importable accounts
     },
   };
 
-  await registerUiRoutes(app, {
+  await registerApiV1Routes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -943,7 +946,7 @@ test("federation projected-account imported route blocks non-importable accounts
   try {
     const blockedResponse = await app.inject({
       method: "POST",
-      url: "/api/ui/federation/projected-accounts/imported",
+      url: "/api/v1/federation/projected-accounts/imported",
       headers: {
         authorization: "Bearer bridge-admin-token",
         "content-type": "application/json",
@@ -961,7 +964,7 @@ test("federation projected-account imported route blocks non-importable accounts
 
     const importedResponse = await app.inject({
       method: "POST",
-      url: "/api/ui/federation/projected-accounts/imported",
+      url: "/api/v1/federation/projected-accounts/imported",
       headers: {
         authorization: "Bearer bridge-admin-token",
         "content-type": "application/json",
@@ -1068,7 +1071,7 @@ test("federation sync pull imports projected descriptors from aggregated peer ac
   const remoteProxySettingsStore = new ProxySettingsStore(path.join(tempDir, "remote-settings.json"));
   await remoteProxySettingsStore.warmup();
 
-  await registerUiRoutes(remoteApp, {
+  await registerApiV1Routes(remoteApp, {
     config: buildConfig({
       upstreamPort: 65535,
       paths: {
@@ -1225,7 +1228,7 @@ test("federation sync pull imports projected descriptors from aggregated peer ac
     },
   };
 
-  await registerUiRoutes(app, {
+  await registerApiV1Routes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -1239,7 +1242,7 @@ test("federation sync pull imports projected descriptors from aggregated peer ac
   try {
     const response = await app.inject({
       method: "POST",
-      url: "/api/ui/federation/sync/pull",
+      url: "/api/v1/federation/sync/pull",
       headers: {
         authorization: "Bearer bridge-admin-token",
         "content-type": "application/json",
@@ -1437,7 +1440,7 @@ test("credentials and quota routes merge runtime-visible oauth accounts with sto
     throw new Error(`unexpected fetch: ${url}`);
   }) as typeof fetch;
 
-  await registerUiRoutes(app, {
+  await registerApiV1Routes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -1449,7 +1452,7 @@ test("credentials and quota routes merge runtime-visible oauth accounts with sto
   try {
     const credentialsResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/credentials?reveal=false",
+      url: "/api/v1/credentials?reveal=false",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
 
@@ -1464,7 +1467,7 @@ test("credentials and quota routes merge runtime-visible oauth accounts with sto
 
     const quotaResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/credentials/openai/quota",
+      url: "/api/v1/credentials/openai/quota",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
 

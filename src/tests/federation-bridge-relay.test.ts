@@ -19,7 +19,8 @@ import { KeyPool } from "../lib/key-pool.js";
 import { ProxySettingsStore } from "../lib/proxy-settings-store.js";
 import { RequestLogStore } from "../lib/request-log-store.js";
 import { BRIDGE_PROTOCOL_VERSION } from "../lib/federation/bridge-protocol.js";
-import { registerUiRoutes } from "../lib/ui-routes.js";
+import { registerApiV1Routes } from "../routes/api/v1/index.js";
+import { registerWebSocketRoutes } from "../routes/api/ui/ws.js";
 
 interface BridgeTestContext {
   readonly app: FastifyInstance;
@@ -92,6 +93,9 @@ function buildConfig(input: {
     settingsFilePath: input.paths.settingsPath,
     keyReloadMs: 50,
     keyCooldownMs: 10_000,
+    keyCooldownJitterFactor: 0.4,
+    enableKeyRandomWalk: true,
+    ollamaWeeklyCooldownMultiplier: 24,
     requestTimeoutMs: 2_000,
     streamBootstrapTimeoutMs: 2_000,
     upstreamTransientRetryCount: 1,
@@ -281,7 +285,7 @@ async function withTenantScopedBridgeUiApp(
     resolveUiSession: async (subject: string) => sessions.get(subject),
   } as Pick<SqlCredentialStore, "resolveTenantApiKey" | "resolveUiSession"> as SqlCredentialStore;
 
-  await registerUiRoutes(app, {
+  const { bridgeRelay } = await registerWebSocketRoutes(app, {
     config,
     keyPool,
     requestLogStore,
@@ -289,6 +293,16 @@ async function withTenantScopedBridgeUiApp(
     sqlCredentialStore,
     authPersistence,
     proxySettingsStore,
+  });
+  await registerApiV1Routes(app, {
+    config,
+    keyPool,
+    requestLogStore,
+    credentialStore,
+    sqlCredentialStore,
+    authPersistence,
+    proxySettingsStore,
+    bridgeRelay,
   });
 
   await app.listen({ host: "127.0.0.1", port: 0 });
@@ -365,7 +379,7 @@ test("bridge relay accepts hello over websocket and exposes the session over HTT
 
     const listResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/bridges",
+      url: "/api/v1/federation/bridges",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
     assert.equal(listResponse.statusCode, 200);
@@ -377,7 +391,7 @@ test("bridge relay accepts hello over websocket and exposes the session over HTT
 
     const detailResponse = await app.inject({
       method: "GET",
-      url: `/api/ui/federation/bridges/${helloAck.sessionId as string}`,
+      url: `/api/v1/federation/bridges/${helloAck.sessionId as string}`,
       headers: { authorization: "Bearer bridge-admin-token" },
     });
     assert.equal(detailResponse.statusCode, 200);
@@ -389,7 +403,7 @@ test("bridge relay accepts hello over websocket and exposes the session over HTT
 
     const afterCloseResponse = await app.inject({
       method: "GET",
-      url: `/api/ui/federation/bridges/${helloAck.sessionId as string}`,
+      url: `/api/v1/federation/bridges/${helloAck.sessionId as string}`,
       headers: { authorization: "Bearer bridge-admin-token" },
     });
     assert.equal(afterCloseResponse.statusCode, 200);
@@ -452,7 +466,7 @@ test("bridge websocket HTTP route requires websocket upgrade", async () => {
   await withBridgeApp(async ({ app }) => {
     const response = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/bridge/ws",
+      url: "/api/v1/federation/bridge/ws",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
 
@@ -504,7 +518,7 @@ test("bridge relay list/detail endpoints scope sessions to tenant admins", async
 
     const globalListResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/bridges",
+      url: "/api/v1/federation/bridges",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
     assert.equal(globalListResponse.statusCode, 200);
@@ -513,7 +527,7 @@ test("bridge relay list/detail endpoints scope sessions to tenant admins", async
 
     const tenantListResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/bridges",
+      url: "/api/v1/federation/bridges",
       headers: { authorization: "Bearer tenant-admin-token" },
     });
     assert.equal(tenantListResponse.statusCode, 200);
@@ -524,14 +538,14 @@ test("bridge relay list/detail endpoints scope sessions to tenant admins", async
 
     const tenantOwnDetailResponse = await app.inject({
       method: "GET",
-      url: `/api/ui/federation/bridges/${tenantAdminAck.sessionId as string}`,
+      url: `/api/v1/federation/bridges/${tenantAdminAck.sessionId as string}`,
       headers: { authorization: "Bearer tenant-admin-token" },
     });
     assert.equal(tenantOwnDetailResponse.statusCode, 200);
 
     const tenantOtherDetailResponse = await app.inject({
       method: "GET",
-      url: `/api/ui/federation/bridges/${globalAck.sessionId as string}`,
+      url: `/api/v1/federation/bridges/${globalAck.sessionId as string}`,
       headers: { authorization: "Bearer tenant-admin-token" },
     });
     assert.equal(tenantOtherDetailResponse.statusCode, 404);
@@ -543,7 +557,7 @@ test("bridge relay list/detail endpoints scope sessions to tenant admins", async
 
     const globalAfterCloseResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/bridges",
+      url: "/api/v1/federation/bridges",
       headers: { authorization: "Bearer bridge-admin-token" },
     });
     assert.equal(globalAfterCloseResponse.statusCode, 200);
@@ -553,7 +567,7 @@ test("bridge relay list/detail endpoints scope sessions to tenant admins", async
 
     const tenantAfterCloseResponse = await app.inject({
       method: "GET",
-      url: "/api/ui/federation/bridges",
+      url: "/api/v1/federation/bridges",
       headers: { authorization: "Bearer tenant-admin-token" },
     });
     assert.equal(tenantAfterCloseResponse.statusCode, 200);
@@ -564,7 +578,7 @@ test("bridge relay list/detail endpoints scope sessions to tenant admins", async
 
     const tenantOtherAfterCloseDetailResponse = await app.inject({
       method: "GET",
-      url: `/api/ui/federation/bridges/${globalAck.sessionId as string}`,
+      url: `/api/v1/federation/bridges/${globalAck.sessionId as string}`,
       headers: { authorization: "Bearer tenant-admin-token" },
     });
     assert.equal(tenantOtherAfterCloseDetailResponse.statusCode, 404);
