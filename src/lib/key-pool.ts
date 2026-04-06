@@ -49,6 +49,7 @@ export interface KeyPoolStatus {
   readonly totalAccounts: number;
   readonly availableAccounts: number;
   readonly cooldownAccounts: number;
+  readonly disabledAccounts: number;
   readonly inFlightAccounts: number;
   readonly nextReadyInMs: number;
 }
@@ -987,7 +988,6 @@ export class KeyPool {
 
   public clearProviderCooldowns(providerId: string): void {
     const normalizedProviderId = normalizeProviderId(providerId);
-    const now = Date.now();
     for (const [key, _cooldownUntil] of this.cooldownByAccountKey) {
       if (key.startsWith(`${normalizedProviderId}\0`)) {
         this.cooldownByAccountKey.delete(key);
@@ -1017,6 +1017,7 @@ export class KeyPool {
         totalAccounts: 0,
         availableAccounts: 0,
         cooldownAccounts: 0,
+        disabledAccounts: 0,
         inFlightAccounts: 0,
         nextReadyInMs: 0
       };
@@ -1024,10 +1025,17 @@ export class KeyPool {
 
     const now = Date.now();
     let availableAccounts = 0;
+    let cooldownAccounts = 0;
+    let disabledAccounts = 0;
     let inFlightAccounts = 0;
     let minDelay = Number.POSITIVE_INFINITY;
 
     for (const credential of providerState.accounts) {
+      if (this.disabledAccountKeys.has(accountStateKey(credential))) {
+        disabledAccounts += 1;
+        continue;
+      }
+
       const cooldownUntil = this.cooldownByAccountKey.get(accountStateKey(credential)) ?? 0;
       if ((this.inFlightByAccountKey.get(accountStateKey(credential)) ?? 0) > 0) {
         inFlightAccounts += 1;
@@ -1037,6 +1045,7 @@ export class KeyPool {
         continue;
       }
 
+      cooldownAccounts += 1;
       minDelay = Math.min(minDelay, cooldownUntil - now);
     }
 
@@ -1049,13 +1058,14 @@ export class KeyPool {
 
     return {
       providerId: normalizedProviderId,
-        authType: providerState.authType,
-        totalAccounts,
-        availableAccounts,
-        cooldownAccounts: Math.max(totalAccounts - availableAccounts, 0),
-        inFlightAccounts,
-        nextReadyInMs
-      };
+      authType: providerState.authType,
+      totalAccounts,
+      availableAccounts,
+      cooldownAccounts,
+      disabledAccounts,
+      inFlightAccounts,
+      nextReadyInMs,
+    };
   }
 
   public async getAllStatuses(): Promise<Record<string, KeyPoolStatus>> {

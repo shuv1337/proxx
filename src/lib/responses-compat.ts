@@ -1606,6 +1606,16 @@ export function chatCompletionEventStreamToResponsesEventStream(streamText: stri
   return events.join("");
 }
 
+export function chatCompletionEventStreamToResponsesResponse(streamText: string, fallbackModel: string): Record<string, unknown> {
+  const payloads = parseChatCompletionSsePayloads(streamText);
+  if (payloads.length === 0) {
+    throw new Error("Invalid upstream chat completion event-stream payload");
+  }
+
+  const completion = synthesizeChatCompletionFromStreamPayloads(payloads, fallbackModel);
+  return chatCompletionToResponsesResponse(completion);
+}
+
 interface StreamToolCall {
   readonly index: number;
   readonly id: string;

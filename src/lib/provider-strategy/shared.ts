@@ -250,6 +250,7 @@ interface PreferredAffinity {
 
 export interface ProviderAvailabilitySummary {
   readonly sawConfiguredProvider: boolean;
+  readonly sawOnlyDisabledProviders: boolean;
   readonly prompt_cache_key?: string;
 }
 

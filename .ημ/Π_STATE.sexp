@@ -24,3 +24,10 @@
     :web-build "pass (pnpm web:build)"
     :runtime "pass (docker compose up -d --build --force-recreate; service healthy on :5174)"
     :browser-check "pass (Night Owl applied across dashboard panels + controls)"))
+    :store-tests "pass (npx tsx --test src/tests/request-log-store.test.ts)"
+    :proxy-analytics "pass (targeted src/tests/proxy.test.ts cache-hit summary regressions)"
+    :known-red "unrelated proxy.test failure remains: glm chat requests skip ollama-cloud when provider catalog does not advertise the requested model")
+
+  :deferred (
+    :metadata-rebuild "Rebuild live services/proxx request-log metadata to refresh stale weekly/monthly cache counters"
+    :ui-labeling "Disambiguate cache hit rate vs cached token share in operator UI"))

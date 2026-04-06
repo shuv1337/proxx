@@ -1,7 +1,7 @@
 import React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Badge, MetricTile, MetricTileGrid, PanelHeader, Progress, Spinner, type MetricTileSparkPoint, type MetricTileVariant } from "@open-hax/uxx";
+import { Badge, MetricTile, MetricTileGrid, PanelHeader, Spinner, type MetricTileVariant } from "@open-hax/uxx";
 import {
   getUsageOverview,
   listCredentials,
@@ -116,18 +116,6 @@ function formatProviderRouteCell(entry: RequestLogEntry): string {
   const origin = formatRequestOrigin(entry);
   const originPart = origin !== "unknown" && origin !== "local" ? ` · from ${origin}` : "";
   return `${base}${routePart}${originPart}`;
-}
-
-function metricTone(value: number, inverse = false): string {
-  if (value <= 0) {
-    return "dashboard-metric-neutral";
-  }
-
-  if (inverse) {
-    return value >= 5 ? "dashboard-metric-danger" : value >= 1 ? "dashboard-metric-warn" : "dashboard-metric-good";
-  }
-
-  return value >= 1 ? "dashboard-metric-good" : "dashboard-metric-neutral";
 }
 
 function metricTileVariant(value: number, inverse = false): MetricTileVariant {

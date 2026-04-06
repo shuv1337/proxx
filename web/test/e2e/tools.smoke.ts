@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { chromium } from "playwright";
 
 const BASE_URL = "http://127.0.0.1:5174";
 const NOW = new Date("2026-04-03T00:00:00Z").toISOString();
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 type ChatMessage = {
   readonly id: string;
@@ -40,7 +43,7 @@ async function ensureFrontendServer(): Promise<{ child: ChildProcess | null }> {
   }
 
   const child = spawn("pnpm", ["web:dev"], {
-    cwd: "/home/err/devel/orgs/open-hax/proxx",
+    cwd: REPO_ROOT,
     stdio: "ignore",
     detached: false,
   });

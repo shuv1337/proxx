@@ -282,6 +282,8 @@ async function withPatchedFetch(
 async function withClearedAmbientProviders(fn: () => Promise<void>): Promise<void> {
   await withEnv(
     {
+      ROTUSSY_API_KEY: undefined,
+      ROTUSSY_PROVIDER_ID: undefined,
       FACTORY_API_KEY: undefined,
       FACTORY_AUTH_V2_FILE: "/tmp/nonexistent-auth-v2-file",
       FACTORY_AUTH_V2_KEY: "/tmp/nonexistent-auth-v2-key",
@@ -307,6 +309,8 @@ async function withZaiProxyApp(
     {
       ZAI_API_KEY: "zai-key-1", // pragma: allowlist secret
       ZAI_PROVIDER_ID: undefined,
+      ROTUSSY_API_KEY: undefined,
+      ROTUSSY_PROVIDER_ID: undefined,
       GEMINI_API_KEY: undefined,
       OPENROUTER_API_KEY: undefined,
       REQUESTY_API_TOKEN: undefined,
@@ -1842,6 +1846,7 @@ test("fetches live OpenAI Codex quota windows and persists refreshed OAuth token
     await withProxyApp(
       {
         keys: [],
+        models: ["gpt-5.2"],
         keysPayload: {
           providers: {
             openai: {
@@ -7445,10 +7450,12 @@ test("/api/tools/websearch proxies via Responses web_search and extracts url cit
 test("/api/tools/websearch falls back to Exa when OpenAI fails", async () => {
   const originalFetch = globalThis.fetch;
   let exaCalled = false;
+  const callOrder: string[] = [];
 
   globalThis.fetch = (async (input: any, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.url;
     if (url?.includes("mcp.exa.ai")) {
+      callOrder.push("exa");
       exaCalled = true;
       const body = init?.body ? JSON.parse(init.body as string) : {};
       assert.equal(body.method, "tools/call");
@@ -7468,6 +7475,9 @@ test("/api/tools/websearch falls back to Exa when OpenAI fails", async () => {
         })}\n\n`,
         { status: 200, headers: { "content-type": "text/event-stream" } }
       );
+    }
+    if (typeof url === "string" && url.startsWith("http://127.0.0.1:")) {
+      return originalFetch(input, init);
     }
     throw new Error(`Unexpected fetch URL: ${url}`);
   }) as typeof fetch;
@@ -7489,11 +7499,14 @@ test("/api/tools/websearch falls back to Exa when OpenAI fails", async () => {
           upstreamProviderId: "openai",
           upstreamFallbackProviderIds: [],
         },
-        upstreamHandler: async () => ({
-          status: 500,
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ error: { message: "OpenAI web search unavailable" } }),
-        }),
+        upstreamHandler: async () => {
+          callOrder.push("openai");
+          return {
+            status: 500,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ error: { message: "OpenAI web search unavailable" } }),
+          };
+        },
       },
       async ({ app }) => {
         const response = await app.inject({
@@ -7511,6 +7524,7 @@ test("/api/tools/websearch falls back to Exa when OpenAI fails", async () => {
 
         assert.equal(response.statusCode, 200);
         assert.ok(exaCalled, "Exa MCP should have been called");
+        assert.deepEqual(callOrder, ["openai", "exa"]);
 
         const payload: unknown = response.json();
         assert.ok(isRecord(payload));
@@ -7742,8 +7756,7 @@ test("glm chat requests route to rotussy instead of ollama-cloud or the openai p
       ZAI_API_KEY: undefined,
     },
     async () => {
-      let observedPath = "";
-      let observedAuth: string | undefined;
+      const observedAttempts: Array<{ path: string; auth: string | undefined }> = [];
       let observedBody: Record<string, unknown> | undefined;
 
       await withProxyApp(
@@ -7774,8 +7787,12 @@ test("glm chat requests route to rotussy instead of ollama-cloud or the openai p
               };
             }
 
-            observedPath = request.url ?? "";
-            observedAuth = request.headers.authorization;
+            observedAttempts.push({
+              path: request.url ?? "",
+              auth: typeof request.headers.authorization === "string"
+                ? request.headers.authorization
+                : undefined,
+            });
             observedBody = JSON.parse(body) as Record<string, unknown>;
 
             return {
@@ -7808,8 +7825,9 @@ test("glm chat requests route to rotussy instead of ollama-cloud or the openai p
           });
 
           assert.equal(response.statusCode, 200);
-          assert.equal(observedPath, "/v1/chat/completions");
-          assert.equal(observedAuth, "Bearer rotussy-key-1");
+          assert.deepEqual(observedAttempts, [
+            { path: "/v1/chat/completions", auth: "Bearer rotussy-key-1" },
+          ]);
           assert.ok(isRecord(observedBody));
           assert.equal(observedBody.model, "glm-5");
           assert.equal(response.headers["x-open-hax-upstream-provider"], "rotussy");
@@ -7942,8 +7960,7 @@ test("glm /v1/responses requests route through rotussy chat-completions compatib
       REQUESTY_API_KEY: undefined,
     },
     async () => {
-      let observedPath = "";
-      let observedAuth: string | undefined;
+      const observedAttempts: Array<{ path: string; auth: string | undefined }> = [];
       let observedBody: Record<string, unknown> | undefined;
 
       await withProxyApp(
@@ -7974,8 +7991,12 @@ test("glm /v1/responses requests route through rotussy chat-completions compatib
               };
             }
 
-            observedPath = request.url ?? "";
-            observedAuth = request.headers.authorization;
+            observedAttempts.push({
+              path: request.url ?? "",
+              auth: typeof request.headers.authorization === "string"
+                ? request.headers.authorization
+                : undefined,
+            });
             observedBody = JSON.parse(body) as Record<string, unknown>;
 
             return {
@@ -8018,8 +8039,9 @@ test("glm /v1/responses requests route through rotussy chat-completions compatib
           });
 
           assert.equal(response.statusCode, 200);
-          assert.equal(observedPath, "/v1/chat/completions");
-          assert.equal(observedAuth, "Bearer rotussy-key-1");
+          assert.deepEqual(observedAttempts, [
+            { path: "/v1/chat/completions", auth: "Bearer rotussy-key-1" },
+          ]);
           assert.ok(isRecord(observedBody));
           assert.equal(observedBody.model, "glm-5");
           assert.ok(Array.isArray(observedBody.messages));

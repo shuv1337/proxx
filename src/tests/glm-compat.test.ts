@@ -191,11 +191,14 @@ test("applyGlmThinking does not mutate the original body", () => {
   const body = {
     model: "glm-4.7",
     messages: [{ role: "user", content: "hello" }],
+    thinking: { type: "disabled" },
     reasoning: { effort: "high" },
   };
+  const original = JSON.parse(JSON.stringify(body));
 
   applyGlmThinking(body, "glm-4.7");
 
+  assert.deepEqual(body, original);
   assert.equal((body as Record<string, unknown>)["enable_thinking"], undefined);
   assert.ok((body as Record<string, unknown>)["reasoning"] !== undefined);
 });

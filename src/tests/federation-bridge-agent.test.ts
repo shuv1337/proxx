@@ -217,13 +217,13 @@ test("bridge agent connects, publishes capabilities/health, and stops cleanly", 
     await waitFor(async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/federation/bridges",
+        url: "/api/v1/federation/bridges",
         headers: { authorization: "Bearer bridge-admin-token" },
       });
+      assert.equal(response.statusCode, 200);
       const payload = response.json() as { readonly sessions: ReadonlyArray<Record<string, unknown>> };
       const session = payload.sessions[0];
-      return response.statusCode === 200
-        && payload.sessions.length === 1
+      return payload.sessions.length === 1
         && session?.state === "connected"
         && Array.isArray(session?.capabilities)
         && (session.capabilities as ReadonlyArray<Record<string, unknown>>).length === 1
@@ -241,9 +241,10 @@ test("bridge agent connects, publishes capabilities/health, and stops cleanly", 
     await waitFor(async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/ui/federation/bridges",
+        url: "/api/v1/federation/bridges",
         headers: { authorization: "Bearer bridge-admin-token" },
       });
+      assert.equal(response.statusCode, 200);
       const payload = response.json() as { readonly sessions: ReadonlyArray<Record<string, unknown>> };
       return payload.sessions[0]?.state === "disconnected";
     });

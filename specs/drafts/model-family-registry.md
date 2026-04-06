@@ -25,7 +25,8 @@ When a new model family appears (e.g. Mistral), all three must be updated indepe
    - A `ModelFamily` type (`"openai" | "anthropic" | "google" | "zhipu" | "deepseek" | "moonshotai" | "qwen" | ...`)
    - A `MODEL_FAMILY_PREFIXES` constant: `ReadonlyArray<{ family: ModelFamily; prefixes: readonly string[] }>`
    - `function inferModelFamily(modelId: string): ModelFamily | undefined`
-   - `function looksLikeHostedOpenAiFamily(modelId: string): boolean` (delegates to `inferModelFamily`)
+   - `const HOSTED_OPENAI_MODEL_FAMILIES: readonly ModelFamily[]` containing the exact families that should behave like hosted OpenAI for routing (`openai`, `zhipu`, `moonshotai`, and any other currently-supported OpenAI-compatible hosted families)
+   - `function looksLikeHostedOpenAiFamily(modelId: string): boolean` (calls `inferModelFamily(modelId)` and returns `true` only when the result is in `HOSTED_OPENAI_MODEL_FAMILIES`)
    - `function modelFamilyProviderPreferences(family: ModelFamily): readonly string[]` (absorbs `MODEL_FAMILY_PROVIDER_PREFERENCES` from dead `provider-route-policies.ts` and `REQUESTY_MODEL_PREFIXES` from `fallback.ts`)
 
 2. Update consumers:
@@ -43,4 +44,5 @@ When a new model family appears (e.g. Mistral), all three must be updated indepe
 
 - `pnpm build` passes
 - `rg "inferModelFamily|REQUESTY_MODEL_PREFIXES" src/lib/` only shows `model-family.ts`
+- `looksLikeHostedOpenAiFamily()` remains restricted to the explicit hosted-OpenAI allowlist rather than every recognized family
 - Existing tests for `provider-routing.ts` and fallback pass

@@ -42,6 +42,11 @@ export async function handleRoutingOutcome(input: RoutingOutcomeInput): Promise<
       return true;
     }
 
+    if (availability.sawOnlyDisabledProviders) {
+      sendOpenAiError(reply, 503, "Proxy has upstream accounts but all are disabled", "server_error", "keys_unavailable");
+      return true;
+    }
+
     sendOpenAiError(
       reply,
       429,

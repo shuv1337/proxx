@@ -27,6 +27,15 @@ const DEFAULT_MODELS = [
 const LS_CHAT_MODEL = "open-hax-proxy.ui.chat.model";
 const LS_CHAT_ACTIVE_SESSION = "open-hax-proxy.ui.chat.activeSessionId";
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function validateString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -322,13 +331,16 @@ export function ChatPage(): JSX.Element {
     return groupedMessages
       .filter((message) => message.role === "system" || message.role === "user" || message.role === "assistant")
       .map((message) => {
+        const safeContent = escapeHtml(message.content);
+        const safeReasoningContent = message.reasoningContent && message.reasoningContent.trim().length > 0
+          ? escapeHtml(message.reasoningContent)
+          : undefined;
+
         return {
           id: message.id,
           role: message.role,
-          content: message.content,
-          reasoningContent: message.reasoningContent && message.reasoningContent.trim().length > 0
-            ? message.reasoningContent
-            : undefined,
+          content: safeContent,
+          reasoningContent: safeReasoningContent,
           timestamp: typeof message.createdAt === "number" ? new Date(message.createdAt) : undefined,
           actions: [copiedMessageId === message.id ? "Copied" : "Copy", "Fork here"],
           metadata: message.model ? { model: message.model } : undefined,

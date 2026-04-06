@@ -127,6 +127,13 @@ export function streamPayloadHasReasoningTrace(payload: string): boolean {
           return true;
         }
       }
+
+      if (type === "response.output_item.added") {
+        const item = isRecord(parsed["item"]) ? parsed["item"] : null;
+        if (item && asString(item["type"]) === "reasoning") {
+          return true;
+        }
+      }
     } catch {
       // ignore malformed stream fragments during validation
     }

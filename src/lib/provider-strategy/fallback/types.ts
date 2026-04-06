@@ -27,7 +27,7 @@ export interface FallbackKeyPool {
   markInFlight(credential: ProviderCredential): () => void;
   markRateLimited(credential: ProviderCredential, retryAfterMs?: number): void;
   isAccountExpired?(credential: ProviderCredential): boolean;
-  clearProviderCooldowns?(providerId: string): void;
+  clearAccountCooldown?(providerId: string, accountId: string): void;
   disableAccount?(providerId: string, accountId: string): void;
 }
 
