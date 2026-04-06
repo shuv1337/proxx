@@ -582,3 +582,132 @@ test("request log rollups remove cache counters when an updated entry becomes an
     await store.close();
   });
 });
+
+// ─── clientInfo persistence tests ────────────────────────────────────────────
+
+test("clientInfo persists through record and warmup", async () => {
+  await withTempDir(async (tempDir) => {
+    const filePath = path.join(tempDir, "request-logs.jsonl");
+
+    const store = new RequestLogStore(filePath, 100);
+    await store.warmup();
+    store.record({
+      providerId: "openai",
+      accountId: "acct-1",
+      authType: "api_key",
+      model: "gpt-5.4",
+      upstreamMode: "responses",
+      upstreamPath: "/v1/responses",
+      status: 200,
+      latencyMs: 150,
+      clientInfo: { ip: "203.0.113.10", host: "proxy.example.com" },
+    });
+    await store.close();
+
+    // Re-open and verify
+    const store2 = new RequestLogStore(filePath, 100);
+    await store2.warmup();
+
+    const entries = store2.snapshot();
+    assert.equal(entries.length, 1);
+    assert.deepEqual(entries[0].clientInfo, { ip: "203.0.113.10", host: "proxy.example.com" });
+
+    await store2.close();
+  });
+});
+
+test("update preserves clientInfo from original record", async () => {
+  await withTempDir(async (tempDir) => {
+    const filePath = path.join(tempDir, "request-logs.jsonl");
+
+    const store = new RequestLogStore(filePath, 100);
+    await store.warmup();
+    const entry = store.record({
+      providerId: "openai",
+      accountId: "acct-1",
+      authType: "api_key",
+      model: "gpt-5.4",
+      upstreamMode: "responses",
+      upstreamPath: "/v1/responses",
+      status: 200,
+      latencyMs: 100,
+      clientInfo: { ip: "10.0.0.1", host: "myhost.local" },
+    });
+
+    const updated = store.update(entry.id, {
+      promptTokens: 100,
+      completionTokens: 50,
+      totalTokens: 150,
+    });
+
+    assert.ok(updated);
+    assert.deepEqual(updated.clientInfo, { ip: "10.0.0.1", host: "myhost.local" });
+    assert.equal(updated.promptTokens, 100);
+
+    await store.close();
+  });
+});
+
+test("old entries without clientInfo hydrate with undefined clientInfo", async () => {
+  await withTempDir(async (tempDir) => {
+    const filePath = path.join(tempDir, "request-logs.jsonl");
+
+    // Write a legacy entry without clientInfo
+    const legacyEntry = JSON.stringify({
+      id: "legacy-1",
+      timestamp: Date.now(),
+      providerId: "openai",
+      accountId: "acct-1",
+      authType: "api_key",
+      model: "gpt-4",
+      upstreamMode: "chat_completions",
+      upstreamPath: "/v1/chat/completions",
+      status: 200,
+      latencyMs: 100,
+      serviceTierSource: "none",
+    });
+
+    await writeFile(filePath, legacyEntry + "\n", "utf8");
+
+    const store = new RequestLogStore(filePath, 100);
+    await store.warmup();
+
+    const entries = store.snapshot();
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].clientInfo, undefined);
+
+    await store.close();
+  });
+});
+
+test("clientInfo with only ip hydrates correctly", async () => {
+  await withTempDir(async (tempDir) => {
+    const filePath = path.join(tempDir, "request-logs.jsonl");
+
+    const store = new RequestLogStore(filePath, 100);
+    await store.warmup();
+    store.record({
+      providerId: "openai",
+      accountId: "acct-1",
+      authType: "api_key",
+      model: "gpt-5.4",
+      upstreamMode: "responses",
+      upstreamPath: "/v1/responses",
+      status: 200,
+      latencyMs: 150,
+      clientInfo: { ip: "192.168.1.1" },
+    });
+
+    await store.close();
+
+    const store2 = new RequestLogStore(filePath, 100);
+    await store2.warmup();
+
+    const entries = store2.snapshot();
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].clientInfo?.ip, "192.168.1.1");
+    assert.equal(entries[0].clientInfo?.host, undefined);
+
+    await store2.close();
+  });
+});

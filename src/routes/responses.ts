@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 
+import { extractClientRequestInfo } from "../lib/client-request-info.js";
 import {
   extractPromptCacheKey,
   summarizeResponsesRequestBody,
@@ -205,6 +206,7 @@ export function registerResponsesRoutes(deps: AppDeps, app: FastifyInstance): vo
 
     for (const [candidateIndex, candidateRoutingModel] of routingModelCandidates.entries()) {
       const hasMoreModelCandidates = candidateIndex < routingModelCandidates.length - 1;
+      const clientInfo = extractClientRequestInfo(request);
       const { strategy, context } = buildResponsesPassthroughContext(
         deps.config,
         request.headers,
@@ -212,6 +214,7 @@ export function registerResponsesRoutes(deps: AppDeps, app: FastifyInstance): vo
         requestedModelInput,
         candidateRoutingModel,
         request.openHaxAuth ?? undefined,
+        clientInfo,
       );
       reply.header("x-open-hax-upstream-mode", strategy.mode);
       const requestAuth = request.openHaxAuth ?? undefined;

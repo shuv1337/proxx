@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { extractClientRequestInfo } from "../lib/client-request-info.js";
 import type { AppDeps } from "../lib/app-deps.js";
 import { DEFAULT_TENANT_ID } from "../lib/tenant-api-key.js";
 import { resolveExplicitTenantProviderId } from "../lib/tenant-policy-helpers.js";
@@ -43,12 +44,14 @@ export function registerImagesRoutes(deps: AppDeps, app: FastifyInstance): void 
       return;
     }
 
+    const clientInfo = extractClientRequestInfo(request);
     const { strategy, context } = buildImagesPassthroughContext(
       deps.config,
       request.headers,
       requestBody,
       model,
       request.openHaxAuth ?? undefined,
+      clientInfo,
     );
     reply.header("x-open-hax-upstream-mode", strategy.mode);
 

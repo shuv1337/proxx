@@ -35,6 +35,11 @@ export interface Factory4xxDiagnostics {
   readonly instructionsFingerprint?: string;
 }
 
+export interface ClientRequestInfo {
+  readonly ip?: string;
+  readonly host?: string;
+}
+
 export interface RequestLogEntry {
   readonly id: string;
   readonly timestamp: number;
@@ -75,6 +80,7 @@ export interface RequestLogEntry {
   readonly costUsd?: number;
   readonly energyJoules?: number;
   readonly waterEvaporatedMl?: number;
+  readonly clientInfo?: ClientRequestInfo;
 }
 
 export type RequestLogEvent =
@@ -129,6 +135,7 @@ export interface RequestLogRecordInput {
   readonly costUsd?: number;
   readonly energyJoules?: number;
   readonly waterEvaporatedMl?: number;
+  readonly clientInfo?: ClientRequestInfo;
   readonly timestamp?: number;
 }
 
@@ -528,6 +535,21 @@ function hydrateFactoryDiagnostics(raw: unknown): Factory4xxDiagnostics | undefi
   return hasSignal ? diagnostics : undefined;
 }
 
+function hydrateClientInfo(raw: unknown): ClientRequestInfo | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+
+  const ip = sanitizeOptionalShortString(raw.ip, 45);
+  const host = sanitizeOptionalShortString(raw.host, 253);
+
+  if (!ip && !host) {
+    return undefined;
+  }
+
+  return { ip, host };
+}
+
 function emptyDb(): RequestLogDb {
   return {
     entries: [],
@@ -643,6 +665,7 @@ function hydrateEntry(raw: unknown): RequestLogEntry | null {
     costUsd: sanitizeOptionalCost(asNumber(raw.costUsd)),
     energyJoules: sanitizeOptionalCost(asNumber(raw.energyJoules)),
     waterEvaporatedMl: sanitizeOptionalCost(asNumber(raw.waterEvaporatedMl)),
+    clientInfo: hydrateClientInfo(raw.clientInfo),
   };
 }
 
@@ -1056,6 +1079,7 @@ export class RequestLogStore {
       costUsd: sanitizeOptionalCost(input.costUsd),
       energyJoules: sanitizeOptionalCost(input.energyJoules),
       waterEvaporatedMl: sanitizeOptionalCost(input.waterEvaporatedMl),
+      clientInfo: input.clientInfo,
     };
 
     this.entries.push(entry);

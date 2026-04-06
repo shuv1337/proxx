@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { extractClientRequestInfo } from "../lib/client-request-info.js";
 import type { AppDeps } from "../lib/app-deps.js";
 import { DEFAULT_TENANT_ID } from "../lib/tenant-api-key.js";
 import { joinUrl } from "../lib/request-utils.js";
@@ -37,6 +38,7 @@ export function registerEmbeddingsRoutes(deps: AppDeps, app: FastifyInstance): v
       return;
     }
 
+    const clientInfo = extractClientRequestInfo(request);
     const routingState = selectProviderStrategy(
       deps.config,
       request.headers,
@@ -48,6 +50,7 @@ export function registerEmbeddingsRoutes(deps: AppDeps, app: FastifyInstance): v
       model,
       model,
       request.openHaxAuth ?? undefined,
+      clientInfo,
     ).context;
 
     const routedModel = routingState.routedModel;

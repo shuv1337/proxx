@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
 import { type ChatCompletionRequest, extractPromptCacheKey } from "../lib/request-utils.js";
+import { extractClientRequestInfo } from "../lib/client-request-info.js";
 import { isRecord } from "../lib/provider-utils.js";
 import { resolveModelRouting } from "../lib/model-routing-pipeline.js";
 import {
@@ -82,6 +83,7 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
 
     for (const [candidateIndex, candidateRoutingModel] of routingModelCandidates.entries()) {
       const hasMoreModelCandidates = candidateIndex < routingModelCandidates.length - 1;
+      const clientInfo = extractClientRequestInfo(request);
       const { strategy, context } = selectProviderStrategy(
         deps.config,
         request.headers,
@@ -89,6 +91,7 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
         requestedModelInput,
         candidateRoutingModel,
         request.openHaxAuth ?? undefined,
+        clientInfo,
       );
       reply.header("x-open-hax-upstream-mode", strategy.mode);
       const requestAuth = request.openHaxAuth ?? undefined;

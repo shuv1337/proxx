@@ -1,6 +1,7 @@
 import type { IncomingHttpHeaders } from "node:http";
 
 import type { ProxyConfig } from "../config.js";
+import type { ClientRequestInfo } from "../request-log-store.js";
 import { requestWantsReasoningTrace } from "../provider-utils.js";
 import { looksLikeHostedOpenAiFamily, resolveRequestRoutingState } from "../provider-routing.js";
 import { PROVIDER_STRATEGIES } from "./registry.js";
@@ -20,6 +21,7 @@ export function selectProviderStrategy(
   requestedModelInput: string,
   routingModelInput: string,
   requestAuth?: Pick<ResolvedRequestAuth, "kind" | "tenantId" | "keyId" | "subject">,
+  clientInfo?: ClientRequestInfo,
 ): {
   readonly strategy: ProviderStrategy;
   readonly context: StrategyRequestContext;
@@ -54,6 +56,7 @@ export function selectProviderStrategy(
     clientWantsStream,
     needsReasoningTrace,
     upstreamAttemptTimeoutMs,
+    clientInfo,
   };
 
   return { strategy: selectMatchingStrategy(context), context };
@@ -66,6 +69,7 @@ export function buildResponsesPassthroughContext(
   requestedModelInput: string,
   routingModelInput: string,
   requestAuth?: Pick<ResolvedRequestAuth, "kind" | "tenantId" | "keyId" | "subject">,
+  clientInfo?: ClientRequestInfo,
 ): {
   readonly strategy: ProviderStrategy;
   readonly context: StrategyRequestContext;
@@ -95,6 +99,7 @@ export function buildResponsesPassthroughContext(
     needsReasoningTrace: false,
     upstreamAttemptTimeoutMs,
     responsesPassthrough: true,
+    clientInfo,
   };
 
   return { strategy: selectMatchingStrategy(context), context };
@@ -106,6 +111,7 @@ export function buildImagesPassthroughContext(
   requestBody: Record<string, unknown>,
   model: string,
   requestAuth?: Pick<ResolvedRequestAuth, "kind" | "tenantId" | "keyId" | "subject">,
+  clientInfo?: ClientRequestInfo,
 ): {
   readonly strategy: ProviderStrategy;
   readonly context: StrategyRequestContext;
@@ -128,6 +134,7 @@ export function buildImagesPassthroughContext(
     needsReasoningTrace: false,
     upstreamAttemptTimeoutMs: config.requestTimeoutMs,
     imagesPassthrough: true,
+    clientInfo,
   };
 
   return { strategy: selectMatchingStrategy(context), context };
