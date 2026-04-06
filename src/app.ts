@@ -79,6 +79,7 @@ import { RuntimeCredentialStore } from "./lib/runtime-credential-store.js";
 import { TokenRefreshManager } from "./lib/token-refresh-manager.js";
 import { DEFAULT_TENANT_ID } from "./lib/tenant-api-key.js";
 import { resolveRequestAuth } from "./lib/request-auth.js";
+import { extractClientRequestInfo } from "./lib/client-request-info.js";
 
 interface ChatCompletionRequest {
   readonly model?: string;
@@ -1173,7 +1174,8 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       request.log.warn({ error: toErrorMessage(error) }, "failed to resolve dynamic model aliases; using requested model as-is");
     }
 
-    const { strategy, context } = selectProviderStrategy(config, request.headers, requestBody, requestedModelInput, routingModelInput);
+    const clientInfo = extractClientRequestInfo(request);
+    const { strategy, context } = selectProviderStrategy(config, request.headers, requestBody, requestedModelInput, routingModelInput, clientInfo);
     reply.header("x-open-hax-upstream-mode", strategy.mode);
 
     let payload: ReturnType<typeof strategy.buildPayload>;
@@ -1371,12 +1373,14 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       request.log.warn({ error: toErrorMessage(error) }, "failed to resolve dynamic model aliases for /v1/responses; using requested model as-is");
     }
 
+    const clientInfo = extractClientRequestInfo(request);
     const { strategy, context } = buildResponsesPassthroughContext(
       config,
       request.headers,
       requestBody,
       requestedModelInput,
       routingModelInput,
+      clientInfo,
     );
     reply.header("x-open-hax-upstream-mode", strategy.mode);
 
@@ -1527,7 +1531,8 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       return;
     }
 
-    const { strategy, context } = buildImagesPassthroughContext(config, request.headers, requestBody, model);
+    const clientInfo = extractClientRequestInfo(request);
+    const { strategy, context } = buildImagesPassthroughContext(config, request.headers, requestBody, model, clientInfo);
     reply.header("x-open-hax-upstream-mode", strategy.mode);
 
     let payload: ReturnType<typeof strategy.buildPayload>;
@@ -1670,11 +1675,12 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
     }
 
     const model = typeof request.body.model === "string" ? request.body.model : "";
+    const clientInfo = extractClientRequestInfo(request);
     const routingState = selectProviderStrategy(config, request.headers, {
       model,
       messages: [{ role: "user", content: "embed" }],
       stream: false,
-    }, model, model).context;
+    }, model, model, clientInfo).context;
 
     const routedModel = routingState.routedModel;
     const upstreamUrl = joinUrl(config.ollamaBaseUrl, "/api/embed");

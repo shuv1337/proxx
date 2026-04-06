@@ -6,7 +6,7 @@ import type { FastifyReply } from "fastify";
 
 import type { ProxyConfig } from "../config.js";
 import type { ProviderCredential } from "../key-pool.js";
-import type { Factory4xxDiagnostics, RequestLogStore } from "../request-log-store.js";
+import type { Factory4xxDiagnostics, RequestLogStore, ClientRequestInfo } from "../request-log-store.js";
 import { estimateRequestCost } from "../model-pricing.js";
 import type { PromptAffinityStore } from "../prompt-affinity-store.js";
 import type { PolicyEngine } from "../policy/index.js";
@@ -192,6 +192,7 @@ interface StrategyRequestContext {
   readonly upstreamAttemptTimeoutMs: number;
   readonly responsesPassthrough?: boolean;
   readonly imagesPassthrough?: boolean;
+  readonly clientInfo?: ClientRequestInfo;
 }
 
 interface ProviderAttemptContext extends StrategyRequestContext {
@@ -984,6 +985,7 @@ function recordAttempt(
     promptCacheKeyUsed: values.promptCacheKeyUsed,
     ttftMs: values.latencyMs,
     error: values.error,
+    clientInfo: context.clientInfo,
     costUsd: cost.costUsd,
     energyJoules: cost.energyJoules,
     waterEvaporatedMl: cost.waterEvaporatedMl,

@@ -1,6 +1,7 @@
 import type { IncomingHttpHeaders } from "node:http";
 
 import type { ProxyConfig } from "../config.js";
+import type { ClientRequestInfo } from "../request-log-store.js";
 import { requestWantsReasoningTrace } from "../provider-utils.js";
 import { resolveRequestRoutingState } from "../provider-routing.js";
 import { PROVIDER_STRATEGIES } from "./registry.js";
@@ -17,6 +18,7 @@ export function selectProviderStrategy(
   requestBody: Record<string, unknown>,
   requestedModelInput: string,
   routingModelInput: string,
+  clientInfo?: ClientRequestInfo,
 ): {
   readonly strategy: ProviderStrategy;
   readonly context: StrategyRequestContext;
@@ -42,6 +44,7 @@ export function selectProviderStrategy(
     clientWantsStream,
     needsReasoningTrace,
     upstreamAttemptTimeoutMs,
+    clientInfo,
   };
 
   return { strategy: selectMatchingStrategy(context), context };
@@ -53,6 +56,7 @@ export function buildResponsesPassthroughContext(
   requestBody: Record<string, unknown>,
   requestedModelInput: string,
   routingModelInput: string,
+  clientInfo?: ClientRequestInfo,
 ): {
   readonly strategy: ProviderStrategy;
   readonly context: StrategyRequestContext;
@@ -79,6 +83,7 @@ export function buildResponsesPassthroughContext(
     needsReasoningTrace: false,
     upstreamAttemptTimeoutMs,
     responsesPassthrough: true,
+    clientInfo,
   };
 
   return { strategy: selectMatchingStrategy(context), context };
@@ -89,6 +94,7 @@ export function buildImagesPassthroughContext(
   clientHeaders: IncomingHttpHeaders,
   requestBody: Record<string, unknown>,
   model: string,
+  clientInfo?: ClientRequestInfo,
 ): {
   readonly strategy: ProviderStrategy;
   readonly context: StrategyRequestContext;
@@ -110,6 +116,7 @@ export function buildImagesPassthroughContext(
     needsReasoningTrace: false,
     upstreamAttemptTimeoutMs: config.requestTimeoutMs,
     imagesPassthrough: true,
+    clientInfo,
   };
 
   return { strategy: selectMatchingStrategy(context), context };
