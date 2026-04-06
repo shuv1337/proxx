@@ -517,6 +517,7 @@ export function DashboardPage(): JSX.Element {
               <span>Tier</span>
               <span>Status</span>
               <span>Latency</span>
+              <span>Client</span>
             </div>
             {requestLogs.length === 0 ? (
               <div className="dashboard-account-empty">No request log entries yet.</div>
@@ -530,6 +531,7 @@ export function DashboardPage(): JSX.Element {
                 </span>
                 <span className={`dashboard-status-pill dashboard-status-${entry.status >= 400 ? "cooldown" : "healthy"}`}>{entry.status}</span>
                 <span>{Math.round(entry.latencyMs)} ms</span>
+                <span className="dashboard-log-client" title={[entry.clientInfo?.ip, entry.clientInfo?.host].filter(Boolean).join(" · ") || "—"}>{entry.clientInfo?.ip || "—"}</span>
               </div>
             ))}
             <div ref={logSentinelRef} className="dashboard-log-sentinel">

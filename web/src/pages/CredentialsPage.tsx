@@ -1209,6 +1209,9 @@ export function CredentialsPage(): JSX.Element {
                 {entry.model} · {entry.upstreamMode} · {formatServiceTier(entry)} · {new Date(entry.timestamp).toLocaleString()}
                 {typeof entry.totalTokens === "number" ? ` · ${entry.totalTokens} tok` : ""}
               </p>
+              {(entry.clientInfo?.ip || entry.clientInfo?.host) && (
+                <small>Client: {entry.clientInfo?.ip || "—"} · {entry.clientInfo?.host || "—"}</small>
+              )}
               {entry.error && <small>{entry.error}</small>}
             </article>
           ))}

@@ -71,6 +71,10 @@ export interface RequestLogEntry {
   readonly imageCount?: number;
   readonly imageCostUsd?: number;
   readonly error?: string;
+  readonly clientInfo?: {
+    readonly ip?: string;
+    readonly host?: string;
+  };
 }
 
 export interface KeyPoolStatus {
