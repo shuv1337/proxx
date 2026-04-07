@@ -77,7 +77,7 @@ In all modes, provider credentials can remain locally managed by the operator. F
 Represents a logical org/project that consumes the proxy.
 
 Fields:
-- `id` (string slug, primary key; ex: `ussyverse`, `open-hax`, `demo`)
+- `id` (string slug, primary key; ex: `shuvdev`, `open-hax`, `demo`)
 - `name` (display)
 - `created_at`, `updated_at`
 - `status` (`active` | `suspended`)
