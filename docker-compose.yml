@@ -104,8 +104,8 @@ services:
       FEDERATION_DEFAULT_OWNER_SUBJECT: "${FEDERATION_DEFAULT_OWNER_SUBJECT:-did:web:proxx.local}"
       FEDERATION_REQUEST_TIMEOUT_MS: "${FEDERATION_REQUEST_TIMEOUT_MS:-30000}"
     volumes:
-      - ../services/proxx/keys.json:/workspace/service-config/keys.json
-      - ../services/proxx/models.json:/workspace/service-config/models.json:ro
+      - ./keys.json:/workspace/service-config/keys.json
+      - ./models.json:/workspace/service-config/models.json:ro
       - ./data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
