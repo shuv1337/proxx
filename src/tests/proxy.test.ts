@@ -11968,6 +11968,39 @@ test("federation accounts route stays wired after extraction and reports missing
   );
 });
 
+test("shared browser OAuth callback routes stay mounted", async () => {
+  await withProxyApp(
+    {
+      keys: ["key-a"],
+      proxyAuthToken: "ui-token",
+      upstreamHandler: async () => ({
+        status: 200,
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ ok: true })
+      })
+    },
+    async ({ app }) => {
+      const openAiCallback = await app.inject({
+        method: "GET",
+        url: "/auth/callback",
+      });
+      assert.equal(openAiCallback.statusCode, 200);
+      assert.match(openAiCallback.headers["content-type"] ?? "", /text\/html/);
+      assert.match(openAiCallback.body, /Missing OAuth callback state or code\./);
+
+      const factoryCallback = await app.inject({
+        method: "GET",
+        url: "/auth/factory/callback",
+      });
+      assert.equal(factoryCallback.statusCode, 200);
+      assert.match(factoryCallback.headers["content-type"] ?? "", /text\/html/);
+      assert.match(factoryCallback.body, /Missing OAuth callback state or code\./);
+    }
+  );
+});
+
 test("federation projected-account import route stays wired after extraction and reports missing store cleanly", async () => {
   await withProxyApp(
     {
