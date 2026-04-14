@@ -16,7 +16,7 @@ services:
     ports:
       - "${PROXY_PORT:-8789}:8789"
       - "${OPENAI_OAUTH_CALLBACK_PORT:-1455}:8789"
-      - "${PROXY_WEB_PORT:-5174}:5174"
+      - "${PROXY_WEB_PORT:-9317}:9317"
     environment:
       NODE_ENV: production
       PROXY_HOST: 0.0.0.0
@@ -115,7 +115,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "Promise.all([fetch('http://127.0.0.1:8789/health',{headers:{Authorization:'Bearer '+(process.env.PROXY_AUTH_TOKEN||'')}}), fetch('http://127.0.0.1:5174')]).then(([proxyResponse, webResponse]) => { if (!proxyResponse.ok || !webResponse.ok) { process.exit(1); } }).catch(() => process.exit(1))"
+          "Promise.all([fetch('http://127.0.0.1:8789/health',{headers:{Authorization:'Bearer '+(process.env.PROXY_AUTH_TOKEN||'')}}), fetch('http://127.0.0.1:9317')]).then(([proxyResponse, webResponse]) => { if (!proxyResponse.ok || !webResponse.ok) { process.exit(1); } }).catch(() => process.exit(1))"
         ]
       interval: 30s
       timeout: 10s

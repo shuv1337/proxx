@@ -22,7 +22,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: "127.0.0.1",
-    port: 5174,
+    port: 9317,
     strictPort: true,
     allowedHosts,
     proxy: {
@@ -32,9 +32,9 @@ export default defineConfig({
   },
   preview: {
     host: "127.0.0.1",
-    port: 5174,
+    port: 9317,
     strictPort: true,
-    allowedHosts,
+    allowedHosts: true,
   },
   build: {
     outDir: resolve(currentDir, "dist"),

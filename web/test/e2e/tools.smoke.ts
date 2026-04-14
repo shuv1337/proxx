@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { chromium } from "playwright";
 
-const BASE_URL = "http://127.0.0.1:5174";
+const BASE_URL = "http://127.0.0.1:9317";
 const NOW = new Date("2026-04-03T00:00:00Z").toISOString();
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -51,7 +51,7 @@ async function ensureFrontendServer(): Promise<{ child: ChildProcess | null }> {
   const ready = await waitForServer(BASE_URL, 30_000);
   if (!ready) {
     child.kill("SIGTERM");
-    throw new Error("Frontend dev server did not become ready on http://127.0.0.1:5174");
+    throw new Error("Frontend dev server did not become ready on http://127.0.0.1:9317");
   }
 
   return { child };

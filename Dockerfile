@@ -25,6 +25,6 @@ ENV PROXY_HOST=0.0.0.0
 ENV PROXY_PORT=8789
 
 EXPOSE 8789
-EXPOSE 5174
+EXPOSE 9317
 
 CMD ["pm2-runtime", "start", "ecosystem.container.config.cjs"]

@@ -10461,7 +10461,7 @@ test("serves a public landing page at root when proxy auth is enabled", async ()
       assert.equal(response.statusCode, 200);
       assert.equal(response.headers["content-type"], "text/html; charset=utf-8");
       assert.match(response.body, /Open Hax OpenAI Proxy/);
-      assert.match(response.body, /http:\/\/localhost:5174/);
+      assert.match(response.body, /http:\/\/localhost:9317/);
       assert.match(response.body, /Proxy Token/);
     }
   );
@@ -10492,7 +10492,7 @@ test("landing page prefers forwarded host when inferring web console url", async
       });
 
       assert.equal(response.statusCode, 200);
-      assert.match(response.body, /https:\/\/proxy\.example\.com:5174/);
+      assert.match(response.body, /https:\/\/proxy\.example\.com:9317/);
     }
   );
 });

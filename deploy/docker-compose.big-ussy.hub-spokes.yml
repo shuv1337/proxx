@@ -14,7 +14,7 @@ x-proxx-node: &proxx-node
         "CMD",
         "node",
         "-e",
-        "Promise.all([fetch('http://127.0.0.1:8789/health',{headers:{Authorization:'Bearer '+(process.env.PROXY_AUTH_TOKEN||'')}}), fetch('http://127.0.0.1:5174')]).then(([proxyResponse, webResponse]) => { if (!proxyResponse.ok || !webResponse.ok) { process.exit(1); } }).catch(() => process.exit(1))"
+        "Promise.all([fetch('http://127.0.0.1:8789/health',{headers:{Authorization:'Bearer '+(process.env.PROXY_AUTH_TOKEN||'')}}), fetch('http://127.0.0.1:9317')]).then(([proxyResponse, webResponse]) => { if (!proxyResponse.ok || !webResponse.ok) { process.exit(1); } }).catch(() => process.exit(1))"
       ]
     interval: 30s
     timeout: 10s
@@ -126,7 +126,7 @@ services:
     ports:
       - "127.0.0.1:${PROXY_PORT:-8789}:8789"
       - "127.0.0.1:${OPENAI_OAUTH_CALLBACK_PORT:-1455}:8789"
-      - "127.0.0.1:${PROXY_WEB_PORT:-5174}:5174"
+      - "127.0.0.1:${PROXY_WEB_PORT:-9317}:9317"
     environment:
       <<: *proxx-env
       PROXY_AUTH_TOKEN: "${PROXY_AUTH_TOKEN:-change-me-open-hax-proxy-token}"
@@ -179,7 +179,7 @@ services:
     ports:
       - "127.0.0.1:${FEDERATION_PROXY_PORT:-18792}:8789"
       - "127.0.0.1:${FEDERATION_OAUTH_CALLBACK_PORT:-18756}:8789"
-      - "127.0.0.1:${FEDERATION_WEB_PORT:-15175}:5174"
+      - "127.0.0.1:${FEDERATION_WEB_PORT:-15175}:9317"
     environment:
       <<: *proxx-env
       OPENAI_OAUTH_CALLBACK_PORT: "${FEDERATION_OAUTH_CALLBACK_PORT:-18756}"
@@ -233,7 +233,7 @@ services:
     ports:
       - "127.0.0.1:${BLONGS_PROXY_PORT:-5277}:8789"
       - "127.0.0.1:${BLONGS_OAUTH_CALLBACK_PORT:-2456}:8789"
-      - "127.0.0.1:${BLONGS_WEB_PORT:-8793}:5174"
+      - "127.0.0.1:${BLONGS_WEB_PORT:-8793}:9317"
     environment:
       <<: *proxx-env
       OPENAI_OAUTH_CALLBACK_PORT: "${BLONGS_OAUTH_CALLBACK_PORT:-2456}"
@@ -287,7 +287,7 @@ services:
     ports:
       - "127.0.0.1:${CEPHALON_PROXX_PORT:-18779}:8789"
       - "127.0.0.1:${CEPHALON_PROXX_OAUTH_PORT:-12455}:8789"
-      - "127.0.0.1:${CEPHALON_PROXX_WEB_PORT:-15274}:5174"
+      - "127.0.0.1:${CEPHALON_PROXX_WEB_PORT:-15274}:9317"
     environment:
       <<: *proxx-env
       OPENAI_OAUTH_CALLBACK_PORT: "${CEPHALON_PROXX_OAUTH_PORT:-12455}"

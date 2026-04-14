@@ -493,7 +493,7 @@ function configuredApiBaseUrl(): string {
   }
 
   const { protocol, hostname, port } = window.location;
-  if (port === "5174") {
+  if (port === "9317") {
     return `${protocol}//${hostname}:8789`;
   }
 

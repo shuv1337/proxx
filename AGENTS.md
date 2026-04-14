@@ -45,7 +45,7 @@ For changes to `Dockerfile`, `docker-compose.yml`, frontend package deps, or bui
 3. Validate:
    - `docker compose ps proxx`
    - `curl http://localhost:8789/health`
-   - `curl -I http://localhost:5174`
+   - `curl -I http://localhost:9317`
 
 ### Notes
 - `pnpm web:test` is the fast render-smoke layer.

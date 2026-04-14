@@ -322,7 +322,7 @@ export async function createApp(config: ProxyConfig): Promise<FastifyInstance> {
       || "localhost";
     const forwardedProto = readSingleHeader(request.headers as Record<string, unknown>, "x-forwarded-proto")?.trim();
     const protocol = forwardedProto || request.protocol || "http";
-    const webPort = (process.env.PROXY_WEB_PORT ?? "5174").trim() || "5174";
+    const webPort = (process.env.PROXY_WEB_PORT ?? "9317").trim() || "9317";
 
     let hostname = "localhost";
     try {

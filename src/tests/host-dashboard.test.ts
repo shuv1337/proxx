@@ -13,7 +13,7 @@ test("parseCaddyRoutes extracts hosts, path matchers, and upstreams", () => {
 ussy.promethean.rest {
   @api path /v1* /api* /auth* /health
   reverse_proxy @api host.docker.internal:8789
-  reverse_proxy host.docker.internal:5174
+  reverse_proxy host.docker.internal:9317
 }
 
 battlebussy.ussy.promethean.rest {
@@ -32,12 +32,12 @@ battlebussy.ussy.promethean.rest {
     upstreams: ["battlebussy-backend:8080"],
   });
 
-  const ussyWeb = routes.find((route) => route.host === "ussy.promethean.rest" && route.upstreams.includes("host.docker.internal:5174"));
+  const ussyWeb = routes.find((route) => route.host === "ussy.promethean.rest" && route.upstreams.includes("host.docker.internal:9317"));
   assert.deepEqual(ussyWeb, {
     host: "ussy.promethean.rest",
     matcher: undefined,
     matchPaths: [],
-    upstreams: ["host.docker.internal:5174"],
+    upstreams: ["host.docker.internal:9317"],
   });
 });
 
