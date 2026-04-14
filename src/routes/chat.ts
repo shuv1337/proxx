@@ -50,11 +50,11 @@ export function registerChatRoutes(deps: AppDeps, app: FastifyInstance): void {
     );
     const requestBody = proxySettings.fastMode
       ? {
+        ...request.body,
         open_hax: {
           fast_mode: true,
           ...(isRecord(request.body.open_hax) ? request.body.open_hax : {}),
         },
-        ...request.body,
       }
       : request.body;
 

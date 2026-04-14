@@ -4514,6 +4514,147 @@ test("request-level service tier overrides global fast mode", async () => {
   );
 });
 
+test("applies global fast mode to /v1/responses requests", async () => {
+  let observedBody: unknown;
+
+  await withProxyApp(
+    {
+      keys: ["key-a"],
+      upstreamHandler: async (_request, body) => {
+        observedBody = JSON.parse(body);
+
+        return {
+          status: 200,
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            id: "resp_fast_mode_responses",
+            object: "response",
+            created_at: 1772516801,
+            model: "gpt-5.4",
+            output: [
+              {
+                id: "msg_fast_mode_responses",
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: "fast-mode-responses-ok"
+                  }
+                ]
+              }
+            ]
+          })
+        };
+      }
+    },
+    async ({ app }) => {
+      const settingsResponse = await app.inject({
+        method: "POST",
+        url: "/api/v1/settings",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          fastMode: true
+        }
+      });
+
+      assert.equal(settingsResponse.statusCode, 200);
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        headers: {
+          "content-type": "application/json"
+        },
+        payload: {
+          model: "gpt-5.4",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+          instructions: "",
+          stream: false
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.headers["x-open-hax-fast-mode"], "priority");
+      assert.ok(isRecord(observedBody));
+      assert.equal(observedBody.service_tier, "priority");
+      assert.equal(observedBody.open_hax, undefined);
+
+      const requestLogsPayload = await app.inject({
+        method: "GET",
+        url: "/api/v1/request-logs?limit=1",
+      });
+      assert.equal(requestLogsPayload.statusCode, 200);
+      const requestLogsBody: unknown = requestLogsPayload.json();
+      assert.ok(isRecord(requestLogsBody));
+      assert.ok(Array.isArray(requestLogsBody.entries));
+      assert.ok(isRecord(requestLogsBody.entries[0]));
+      assert.equal(requestLogsBody.entries[0].serviceTier, "priority");
+      assert.equal(requestLogsBody.entries[0].serviceTierSource, "fast_mode");
+    }
+  );
+});
+
+test("preserves service tier on openai codex passthrough requests", async () => {
+  let observedBody: Record<string, unknown> | undefined;
+
+  await withProxyApp(
+    {
+      keys: [],
+      keysPayload: {
+        providers: {
+          openai: {
+            auth: "oauth_bearer",
+            accounts: [
+              { id: "openai-a", access_token: "oa-token-a", chatgpt_account_id: "chatgpt-a" },
+            ]
+          }
+        }
+      },
+      configOverrides: {
+        upstreamProviderId: "openai",
+        upstreamFallbackProviderIds: [],
+      },
+      upstreamHandler: async (_request, body) => {
+        observedBody = JSON.parse(body);
+
+        const streamText = [
+          `event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_tier_passthrough", status: "in_progress", model: "gpt-5.4", output: [] } })}\n\n`,
+          `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_tier_passthrough", status: "completed", model: "gpt-5.4", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "OK" }] }], usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 } } })}\n\n`,
+        ].join("");
+
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+          body: streamText
+        };
+      }
+    },
+    async ({ app }) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        headers: { "content-type": "application/json" },
+        payload: {
+          model: "gpt-5.4",
+          input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+          instructions: "",
+          service_tier: "priority",
+          stream: true,
+        }
+      });
+
+      assert.equal(response.statusCode, 200);
+      assert.ok(observedBody);
+      assert.equal(observedBody.service_tier, "priority");
+    }
+  );
+});
+
 test("tenant requests per minute quota blocks excess requests", async () => {
   let upstreamCallCount = 0;
 

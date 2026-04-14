@@ -27,6 +27,9 @@ import {
 /**
  * Parameters that the ChatGPT Codex backend (`chatgpt.com/backend-api/codex/responses`)
  * does not support and will reject with HTTP 400.
+ *
+ * `service_tier` is intentionally preserved so tenant fast-mode / explicit priority
+ * requests still reach Codex-backed GPT models like `gpt-5.4`.
  */
 const CODEX_UNSUPPORTED_PARAMS = [
   "max_output_tokens",
@@ -35,7 +38,6 @@ const CODEX_UNSUPPORTED_PARAMS = [
   "presence_penalty",
   "frequency_penalty",
   "seed",
-  "service_tier",
   "user",
 ] as const;
 
@@ -277,6 +279,7 @@ export class OpenAiResponsesPassthroughStrategy extends BaseProviderStrategy {
 
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload = buildRequestBodyForUpstream(context);
+    applyRequestedServiceTier(upstreamPayload, context);
     stripCodexUnsupportedParams(upstreamPayload);
     upstreamPayload["store"] = false;
     upstreamPayload["stream"] = true;

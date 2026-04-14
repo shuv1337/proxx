@@ -125,7 +125,19 @@ export function registerResponsesRoutes(deps: AppDeps, app: FastifyInstance): vo
     const tenantSettings = await deps.proxySettingsStore.getForTenant(
       (request.openHaxAuth?.tenantId) ?? "default",
     );
-    const requestBody = request.body;
+    const requestBody = tenantSettings.fastMode
+      ? {
+        ...request.body,
+        open_hax: {
+          fast_mode: true,
+          ...(isRecord(request.body.open_hax) ? request.body.open_hax : {}),
+        },
+      }
+      : request.body;
+
+    if (tenantSettings.fastMode) {
+      reply.header("x-open-hax-fast-mode", "priority");
+    }
     const promptCacheKey = extractPromptCacheKey(requestBody);
 
     app.log.info({

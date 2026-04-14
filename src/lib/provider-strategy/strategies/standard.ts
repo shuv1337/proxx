@@ -236,6 +236,7 @@ export class ResponsesPassthroughStrategy extends BaseProviderStrategy {
 
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload = buildRequestBodyForUpstream(context);
+    applyRequestedServiceTier(upstreamPayload, context);
     stripTrailingAssistantPrefill(upstreamPayload);
     return buildPayloadResult(upstreamPayload, context);
   }

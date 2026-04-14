@@ -54,6 +54,7 @@ export class FactoryResponsesPassthroughStrategy extends BaseProviderStrategy {
   public buildPayload(context: StrategyRequestContext): BuildPayloadResult {
     const upstreamPayload: Record<string, unknown> = { ...context.requestBody };
     delete upstreamPayload["open_hax"];
+    applyRequestedServiceTier(upstreamPayload, context);
     stripTrailingAssistantPrefill(upstreamPayload);
     return buildPayloadResult(upstreamPayload, context);
   }
