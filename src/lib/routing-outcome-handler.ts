@@ -6,6 +6,20 @@ import type { ProviderFallbackExecutionResult, ProviderAvailabilitySummary } fro
 import { minMsUntilAnyProviderKeyReady } from "./provider-routing.js";
 import { sendOpenAiError } from "./provider-utils.js";
 
+/**
+ * Maximum Retry-After value (in seconds) sent to clients.
+ *
+ * The OpenAI Node SDK (and many other clients) honour Retry-After literally
+ * with `await sleep(retryAfterMs)` and no upper cap.  If the proxy reports a
+ * cooldown of several hours the client blocks for the entire duration, which
+ * makes the calling application appear completely frozen.
+ *
+ * Capping the header lets clients retry sooner.  If the cooldown is still
+ * active they will receive a fresh 429 with an updated estimate; if an
+ * account recovered in the meantime the request will succeed.
+ */
+const MAX_RETRY_AFTER_SECONDS = 30;
+
 export interface RoutingOutcomeDeps {
   readonly keyPool: KeyPool;
 }
@@ -34,7 +48,7 @@ export async function handleRoutingOutcome(input: RoutingOutcomeInput): Promise<
   if (execution.candidateCount === 0) {
     const retryInMs = await minMsUntilAnyProviderKeyReady(keyPool, providerRoutes);
     if (retryInMs > 0) {
-      reply.header("retry-after", Math.ceil(retryInMs / 1000));
+      reply.header("retry-after", Math.min(Math.ceil(retryInMs / 1000), MAX_RETRY_AFTER_SECONDS));
     }
 
     if (!availability.sawConfiguredProvider) {
@@ -74,7 +88,7 @@ export async function handleRoutingOutcome(input: RoutingOutcomeInput): Promise<
   if (summary.sawRateLimit) {
     const retryInMs = await minMsUntilAnyProviderKeyReady(keyPool, providerRoutes);
     if (retryInMs > 0) {
-      reply.header("retry-after", Math.ceil(retryInMs / 1000));
+      reply.header("retry-after", Math.min(Math.ceil(retryInMs / 1000), MAX_RETRY_AFTER_SECONDS));
     }
 
     log.warn({ providerRoutes, attempts: summary.attempts, upstreamMode: strategyMode }, `${prefix}all attempts exhausted due to upstream rate limits`);
